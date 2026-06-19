@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import queue
 import threading
 import time
@@ -22,6 +23,49 @@ from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("event-timeline")
+
+
+def install_debug_log(run_dir: Path) -> tuple[Any, Any, Any]:
+    """把全量 DEBUG 日志整合进测试 run 目录(取代旧的 always-on .run/agent.log)。
+
+    用 QueueHandler + QueueListener:日志线程只入队,真正写盘在 listener 线程,
+    **非阻塞**。返回 (listener, queue_handler, file_handler) 供 remove_debug_log 收尾。
+    只在测试模式下调用,正常运行不挂任何文件日志处理器。
+    """
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(run_dir / "debug.log", mode="w", encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    log_queue: queue.SimpleQueue[Any] = queue.SimpleQueue()
+    queue_handler = logging.handlers.QueueHandler(log_queue)
+    queue_handler.setLevel(logging.DEBUG)
+    listener = logging.handlers.QueueListener(log_queue, file_handler, respect_handler_level=True)
+    listener.start()
+    root = logging.getLogger()
+    root.addHandler(queue_handler)
+    if root.level == logging.NOTSET or root.level > logging.DEBUG:
+        root.setLevel(logging.DEBUG)
+    return listener, queue_handler, file_handler
+
+
+async def remove_debug_log(state: tuple[Any, Any, Any]) -> None:
+    """关闭测试 DEBUG 日志:摘掉 handler、停 listener(刷盘)、关文件。不阻塞事件循环。"""
+    listener, queue_handler, file_handler = state
+    try:
+        logging.getLogger().removeHandler(queue_handler)
+    except Exception:
+        pass
+    try:
+        import asyncio
+
+        await asyncio.to_thread(listener.stop)
+    except Exception:
+        pass
+    try:
+        file_handler.close()
+    except Exception:
+        pass
 
 
 def _now_us() -> int:

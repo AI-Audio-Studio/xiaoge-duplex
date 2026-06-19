@@ -68,26 +68,9 @@ load_dotenv(override=True)
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-# Always-on debug log to <repo>/.run/agent.log so the agent's behaviour can be
-# inspected even when running in a visible console window (where the Rich TUI
-# owns the terminal). Overwritten each launch. Set AGENT_LOG_FILE to relocate.
-try:
-    _agent_log_path = Path(
-        os.getenv("AGENT_LOG_FILE")
-        or (Path(__file__).resolve().parents[2] / ".run" / "agent.log")
-    )
-    _agent_log_path.parent.mkdir(parents=True, exist_ok=True)
-    _agent_log_file_handler = logging.FileHandler(_agent_log_path, mode="w", encoding="utf-8")
-    _agent_log_file_handler.setLevel(logging.DEBUG)
-    _agent_log_file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
-    _root_logger = logging.getLogger()
-    _root_logger.addHandler(_agent_log_file_handler)
-    if _root_logger.level == logging.NOTSET or _root_logger.level > logging.DEBUG:
-        _root_logger.setLevel(logging.DEBUG)
-except Exception:  # never let logging setup block startup
-    pass
+# 注:全量 DEBUG 日志已整合进测试工具(AGENT_TIMELINE=1 时写 runs/<ts>/debug.log,
+# 见 event_timeline.install_debug_log)。正常运行不再挂任何文件日志处理器(零开销),
+# 也不再写 .run/agent.log。
 
 _TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
 _PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
@@ -993,14 +976,17 @@ async def entrypoint(ctx: JobContext) -> None:
     _timeline = None
     if os.getenv("AGENT_TIMELINE", "0").strip().lower() in {"1", "true", "yes", "on"}:
         try:
-            from event_timeline import EventTimeline
+            from event_timeline import EventTimeline, install_debug_log, remove_debug_log
 
             _run_dir = Path(__file__).resolve().parents[2] / "runs" / time.strftime("%Y%m%d_%H%M%S")
             _timeline = EventTimeline(_run_dir)
             _timeline.attach(session)
             ctx.add_shutdown_callback(_timeline.aclose)
+            # 全量 DEBUG 日志也整合进同一个 run 目录(取代旧的 .run/agent.log),非阻塞。
+            _dbg_state = install_debug_log(_run_dir)
+            ctx.add_shutdown_callback(lambda: remove_debug_log(_dbg_state))
             _append_turn_log(f"TIMELINE dir={_timeline.directory}")
-            logger.info("event timeline -> %s", _timeline.directory / "timeline.jsonl")
+            logger.info("event timeline + debug log -> %s", _timeline.directory)
         except Exception as exc:  # 时间线初始化失败绝不阻塞启动
             logger.warning("event timeline disabled: %s", exc)
             _timeline = None
@@ -1017,6 +1003,8 @@ async def entrypoint(ctx: JobContext) -> None:
         session.interrupt(force=True)
         logger.info("KWS strong interrupt: %r", keyword)
         _append_turn_log(f"STOP_KWS_EARLY keyword={keyword!r} -> force_interrupt")
+        if _timeline is not None:
+            _timeline.emit("interrupt.kws", {"keyword": keyword}, source="kws")
 
     _kws_config = KwsConfig.from_env()
     kws_spotter = NativeKwsSpotter.try_create(
@@ -1051,6 +1039,8 @@ async def entrypoint(ctx: JobContext) -> None:
             _online_state["accum"] = ""
             session.interrupt(force=True)
             _append_turn_log(f"STOP_ONLINE_EARLY text={accum!r} -> force_interrupt")
+            if _timeline is not None:
+                _timeline.emit("interrupt.online", {"text": accum, "kind": "stop"}, source="online")
             return
         core = _ACK_STRIP_RE.sub("", accum)
         meaningful = sum(1 for ch in core if ch not in _OVERLAP_ACK_CHARS)
