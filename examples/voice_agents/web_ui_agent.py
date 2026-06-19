@@ -293,6 +293,16 @@ class SwitchableTTS(tts.TTS):
             num_channels=initial_backend.num_channels,
         )
         self._backend: QwenStreamingTTS | HttpStreamingTTS = initial_backend
+        self._backend.on("error", self._on_backend_error)
+
+    def _on_backend_error(self, error: object) -> None:
+        # Re-emit the active backend's TTS errors on this proxy. The framework
+        # subscribes to errors on the proxy (it never sees the backend object),
+        # so without this a backend failure (e.g. switched to an unreachable TTS)
+        # would bypass the framework's resilient TTS-error handling. Connection
+        # errors are recoverable -> the session logs and continues; switching back
+        # to a working backend recovers. Symmetric to SwitchableSTT's isolation.
+        self.emit("error", error)
 
     @property
     def provider(self) -> str:
@@ -302,6 +312,11 @@ class SwitchableTTS(tts.TTS):
         self, new_backend: QwenStreamingTTS | HttpStreamingTTS
     ) -> QwenStreamingTTS | HttpStreamingTTS:
         old = self._backend
+        try:
+            old.off("error", self._on_backend_error)
+        except Exception:
+            pass
+        new_backend.on("error", self._on_backend_error)
         self._backend = new_backend
         return old
 
@@ -320,6 +335,10 @@ class SwitchableTTS(tts.TTS):
             self._backend.prewarm_connection()
 
     async def aclose(self) -> None:
+        try:
+            self._backend.off("error", self._on_backend_error)
+        except Exception:
+            pass
         await self._backend.aclose()
 
 
@@ -600,15 +619,7 @@ async def _handle_switch_asr(request: aiohttp.web.Request) -> aiohttp.web.Respon
     if backend not in _STT_BACKENDS:
         return aiohttp.web.json_response({"error": f"unknown backend: {backend}"}, status=400)
 
-    if backend == "qwen3":
-        url = os.getenv("QWEN3_ASR_WS_URL", "ws://60.205.197.165:10091/ws/transcribe")
-        new_stt: agents_stt.STT = Qwen3ASROfflineSTT(websocket_url=url)
-    elif backend == "qwen3-stream":
-        url = os.getenv("QWEN3_ASR_STREAM_WS_URL", "ws://10.212.164.230:10091/ws/transcribe")
-        new_stt = _Qwen3StreamSTT(websocket_url=url)
-    else:
-        url = os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090")
-        new_stt = FunASROfflineSTT(websocket_url=url)
+    new_stt = _make_stt_backend(backend)
 
     old_stt = stt.switch_backend(new_stt)
     provider = new_stt.provider
@@ -639,11 +650,7 @@ async def _handle_switch_tts(request: aiohttp.web.Request) -> aiohttp.web.Respon
     if backend not in _TTS_BACKENDS:
         return aiohttp.web.json_response({"error": f"unknown backend: {backend}"}, status=400)
 
-    if backend == "http":
-        url = os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")
-        new_tts: QwenStreamingTTS | HttpStreamingTTS = HttpStreamingTTS(base_url=url)
-    else:
-        new_tts = QwenStreamingTTS()
+    new_tts = _make_tts_backend(backend)
 
     old_tts = tts_engine.switch_backend(new_tts)
     _tts_backend_key = backend
@@ -699,27 +706,42 @@ class _Qwen3StreamSTT(Qwen3ASROfflineSTT):
 _STT_BACKENDS = {"funasr", "qwen3", "qwen3-stream"}
 
 
+def _make_stt_backend(backend: str) -> agents_stt.STT:
+    """Construct a (non-switchable) STT backend. Single source of truth shared by
+    build_stt() and the /api/asr switch handler — add a new backend only here."""
+    if backend == "qwen3":
+        url = os.getenv("QWEN3_ASR_WS_URL", "ws://60.205.197.165:10091/ws/transcribe")
+        logger.info("STT backend: Qwen3-ASR  url=%s", url)
+        return Qwen3ASROfflineSTT(websocket_url=url)
+    if backend == "qwen3-stream":
+        url = os.getenv("QWEN3_ASR_STREAM_WS_URL", "ws://10.212.164.230:10091/ws/transcribe")
+        logger.info("STT backend: Qwen3-ASR-Stream  url=%s", url)
+        return _Qwen3StreamSTT(websocket_url=url)
+    url = os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090")
+    logger.info("STT backend: FunASR  url=%s", url)
+    return FunASROfflineSTT(websocket_url=url)
+
+
 def build_stt() -> SwitchableSTT:
     backend = (os.getenv("STT_BACKEND") or "funasr").strip().lower()
     if backend not in _STT_BACKENDS:
         logger.warning("unknown STT_BACKEND=%r, falling back to funasr", backend)
         backend = "funasr"
-    if backend == "qwen3":
-        url = os.getenv("QWEN3_ASR_WS_URL", "ws://60.205.197.165:10091/ws/transcribe")
-        logger.info("STT backend: Qwen3-ASR  url=%s", url)
-        inner: agents_stt.STT = Qwen3ASROfflineSTT(websocket_url=url)
-    elif backend == "qwen3-stream":
-        url = os.getenv("QWEN3_ASR_STREAM_WS_URL", "ws://10.212.164.230:10091/ws/transcribe")
-        logger.info("STT backend: Qwen3-ASR-Stream  url=%s", url)
-        inner = _Qwen3StreamSTT(websocket_url=url)
-    else:
-        url = os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090")
-        logger.info("STT backend: FunASR  url=%s", url)
-        inner = FunASROfflineSTT(websocket_url=url)
-    return SwitchableSTT(inner)
+    return SwitchableSTT(_make_stt_backend(backend))
 
 
 _TTS_BACKENDS = {"qwen", "http"}
+
+
+def _make_tts_backend(backend: str) -> QwenStreamingTTS | HttpStreamingTTS:
+    """Construct a (non-switchable) TTS backend. Single source of truth shared by
+    build_tts() and the /api/tts switch handler — add a new backend only here."""
+    if backend == "http":
+        url = os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")
+        logger.info("TTS backend: HttpStreamingTTS  url=%s/tts", url)
+        return HttpStreamingTTS(base_url=url)
+    logger.info("TTS backend: QwenStreamingTTS")
+    return QwenStreamingTTS()
 
 
 def build_tts() -> SwitchableTTS:
@@ -728,15 +750,8 @@ def build_tts() -> SwitchableTTS:
     if backend not in _TTS_BACKENDS:
         logger.warning("unknown TTS_BACKEND=%r, falling back to qwen", backend)
         backend = "qwen"
-    if backend == "http":
-        url = os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")
-        logger.info("TTS backend: HttpStreamingTTS  url=%s/tts", url)
-        inner: QwenStreamingTTS | HttpStreamingTTS = HttpStreamingTTS(base_url=url)
-    else:
-        logger.info("TTS backend: QwenStreamingTTS")
-        inner = QwenStreamingTTS()
     _tts_backend_key = backend
-    return SwitchableTTS(inner)
+    return SwitchableTTS(_make_tts_backend(backend))
 
 
 def build_llm() -> lk_openai.LLM:

@@ -1,0 +1,74 @@
+<svg viewBox="0 0 960 800" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">一轮对话生命周期时序</title>
+  <desc id="d">从麦克风到扬声器的处理流水线:VAD/STT 分叉、判停、LLM、TTS,以及抢先生成的重叠窗与四层打断注入点。</desc>
+  <rect x="0" y="0" width="960" height="800" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="959" height="799" fill="none" stroke="#e5e7eb"/>
+  <defs>
+    <marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#374151"/></marker>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#dc2626"/></marker>
+  </defs>
+
+  <text x="24" y="34" font-size="20" font-weight="700" fill="#111827">一轮对话生命周期(时序 + 延迟)</text>
+  <g font-size="12" fill="#374151">
+    <rect x="600" y="20" width="14" height="14" rx="3" fill="#f3f4f6" stroke="#9ca3af"/><text x="620" y="32">本地处理</text>
+    <rect x="710" y="20" width="14" height="14" rx="3" fill="#d1fae5" stroke="#059669"/><text x="730" y="32">远程模型</text>
+    <rect x="820" y="20" width="14" height="14" rx="3" fill="#fee2e2" stroke="#dc2626"/><text x="840" y="32">打断</text>
+  </g>
+
+  <!-- pipeline column x: 300..640 -->
+  <!-- 1 -->
+  <rect x="300" y="56" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="82" font-size="13" fill="#111827" text-anchor="middle">用户说话 → 麦克风帧(taps 透传:KWS/在线/录音)</text>
+  <line x1="480" y1="98" x2="480" y2="116" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 2 -->
+  <rect x="300" y="116" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="142" font-size="13" fill="#111827" text-anchor="middle">VAD 静默判定(Silero · min_silence=0.35s)</text>
+  <text x="676" y="142" font-size="11" fill="#6b7280">VAD 通道始终收帧</text>
+  <line x1="480" y1="158" x2="480" y2="176" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 3 -->
+  <rect x="300" y="176" width="360" height="42" rx="6" fill="#d1fae5" stroke="#059669"/><text x="480" y="202" font-size="13" fill="#111827" text-anchor="middle">StreamAdapter 切整段 → 远程 STT 识别</text>
+  <text x="676" y="202" font-size="11" fill="#6b7280">整段 RTT(持久连接省握手)</text>
+  <line x1="480" y1="218" x2="480" y2="236" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 4 -->
+  <rect x="300" y="236" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="262" font-size="13" fill="#111827" text-anchor="middle">FINAL_TRANSCRIPT(可在此早判停止词)</text>
+  <line x1="480" y1="278" x2="480" y2="296" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 5 -->
+  <rect x="300" y="296" width="360" height="50" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="316" font-size="13" fill="#111827" text-anchor="middle">判停 EOU · MultilingualModel</text><text x="480" y="334" font-size="11" fill="#475569" text-anchor="middle">prob≥阈值→min_delay 0.3s · 否则→max_delay 0.6s</text>
+  <line x1="480" y1="346" x2="480" y2="364" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 6 -->
+  <rect x="300" y="364" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="390" font-size="13" fill="#111827" text-anchor="middle">on_user_turn_completed(停止词→StopResponse)</text>
+  <line x1="480" y1="406" x2="480" y2="424" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 7 -->
+  <rect x="300" y="424" width="360" height="42" rx="6" fill="#d1fae5" stroke="#059669"/><text x="480" y="450" font-size="13" fill="#111827" text-anchor="middle">LLM 生成 · Qwen(首 token TTFT)</text>
+  <line x1="480" y1="466" x2="480" y2="484" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 8 -->
+  <rect x="300" y="484" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="510" font-size="13" fill="#111827" text-anchor="middle">transcription_node → 广播文本到面板</text>
+  <line x1="480" y1="526" x2="480" y2="544" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 9 -->
+  <rect x="300" y="544" width="360" height="42" rx="6" fill="#d1fae5" stroke="#059669"/><text x="480" y="570" font-size="13" fill="#111827" text-anchor="middle">TTS 按句合成 · 百炼(首包 TTFB)</text>
+  <text x="676" y="570" font-size="11" fill="#6b7280">预热池藏~1s握手</text>
+  <line x1="480" y1="586" x2="480" y2="604" stroke="#374151" stroke-width="1.5" marker-end="url(#a)"/>
+  <!-- 10 -->
+  <rect x="300" y="604" width="360" height="42" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="480" y="630" font-size="13" fill="#111827" text-anchor="middle">扬声器播放</text>
+
+  <!-- preemptive overlap bracket (right, spanning 5..9) -->
+  <path d="M688,300 h16 v284 h-16" fill="none" stroke="#2563eb" stroke-width="1.4"/>
+  <text x="712" y="430" font-size="12" fill="#2563eb" transform="rotate(90 712 430)" text-anchor="middle">抢先生成:LLM/TTS 叠进判停窗</text>
+
+  <!-- interruption injections (left, into playback) -->
+  <rect x="24" y="424" width="232" height="160" rx="8" fill="#fff7f7" stroke="#fecaca"/>
+  <text x="36" y="444" font-size="12" font-weight="700" fill="#dc2626">播放期间的打断注入</text>
+  <text x="36" y="466" font-size="11.5" fill="#374151">① VAD 能量(min_duration 2.0)</text>
+  <text x="36" y="486" font-size="11.5" fill="#374151">② KWS 命中停止词(最早)</text>
+  <text x="36" y="506" font-size="11.5" fill="#374151">③ 在线 ASR ≥3 字 barge-in</text>
+  <text x="36" y="526" font-size="11.5" fill="#374151">④ 离线 final 停止词(兜底)</text>
+  <text x="36" y="552" font-size="11" fill="#6b7280">→ session.interrupt(force):</text>
+  <text x="36" y="570" font-size="11" fill="#6b7280">切断 TTS,按需跳过/重规划</text>
+  <line x1="256" y1="520" x2="300" y2="560" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+  <line x1="256" y1="500" x2="300" y2="445" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+
+  <!-- footnote -->
+  <text x="24" y="680" font-size="12" font-weight="700" fill="#111827">延迟预算(用户停说 → 开始听到回答)</text>
+  <text x="24" y="702" font-size="11.5" fill="#374151">VAD静默(0.35) + STT整段RTT + 判停等待(0.3~0.6) + EOU推理 + LLM TTFT + TTS TTFB</text>
+  <text x="24" y="722" font-size="11.5" fill="#374151">抢先生成把 LLM TTFT / TTS TTFB 与判停窗重叠 ⇒ 实测 wall-clock e2e 可压到 ~1.1s 量级</text>
+  <text x="24" y="748" font-size="11" fill="#6b7280">⚠ should_discard 为真时:VAD 收帧但 STT 被 skip(详见 ARCHITECTURE.md §6.5)</text>
+  <text x="24" y="768" font-size="11" fill="#6b7280">指标落在 qwen_voice_turn_metrics.log:TURN_USER / TURN_ASSISTANT / FELT_LATENCY</text>
+</svg>

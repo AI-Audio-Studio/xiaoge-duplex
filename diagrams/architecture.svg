@@ -1,0 +1,84 @@
+<svg viewBox="0 0 960 700" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+  <title id="t">Xiaoge Duplex Speech 系统架构</title>
+  <desc id="d">四层架构:本地音频IO、应用编排层、框架内核、模型后端,以及独立线程的控制面板与四层打断信号源。</desc>
+  <rect x="0" y="0" width="960" height="700" fill="#ffffff"/>
+  <rect x="0.5" y="0.5" width="959" height="699" fill="none" stroke="#e5e7eb"/>
+
+  <defs>
+    <marker id="arr" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#374151"/></marker>
+    <marker id="arrR" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#dc2626"/></marker>
+    <marker id="arrB" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#7c3aed"/></marker>
+  </defs>
+
+  <text x="24" y="34" font-size="20" font-weight="700" fill="#111827">Xiaoge Duplex Speech — 系统架构</text>
+
+  <!-- legend -->
+  <g font-size="12" fill="#374151">
+    <rect x="600" y="20" width="14" height="14" rx="3" fill="#dbeafe" stroke="#2563eb"/><text x="620" y="32">应用代码(本工程)</text>
+    <rect x="740" y="20" width="14" height="14" rx="3" fill="#f3f4f6" stroke="#9ca3af"/><text x="760" y="32">框架/底座</text>
+    <rect x="600" y="42" width="14" height="14" rx="3" fill="#d1fae5" stroke="#059669"/><text x="620" y="54">模型/远程</text>
+    <rect x="740" y="42" width="14" height="14" rx="3" fill="#fee2e2" stroke="#dc2626"/><text x="760" y="54">打断通路</text>
+  </g>
+
+  <!-- ============ Layer 1: Local IO ============ -->
+  <rect x="24" y="74" width="720" height="78" rx="8" fill="#fafafa" stroke="#e5e7eb"/>
+  <text x="36" y="94" font-size="12" font-weight="700" fill="#6b7280">① 本地音频 I/O · console (PortAudio 线程 + AEC)</text>
+  <rect x="40" y="102" width="200" height="40" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="140" y="127" font-size="13" fill="#111827" text-anchor="middle">麦克风 · sounddevice</text>
+  <rect x="262" y="102" width="240" height="40" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="382" y="127" font-size="13" fill="#111827" text-anchor="middle">扬声器 · WebRTC AEC/降噪/AGC</text>
+
+  <!-- ============ Layer 2: App orchestration ============ -->
+  <rect x="24" y="172" width="720" height="118" rx="8" fill="#f5f9ff" stroke="#bfdbfe"/>
+  <text x="36" y="192" font-size="12" font-weight="700" fill="#2563eb">② 应用编排层 · web_ui_agent.py (单事件循环)</text>
+  <rect x="40" y="200" width="200" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="140" y="220" font-size="12.5" fill="#111827" text-anchor="middle">taps 链(透传旁路)</text><text x="140" y="236" font-size="11" fill="#475569" text-anchor="middle">KWS · Online · Recorder</text>
+  <rect x="262" y="200" width="170" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="347" y="220" font-size="12.5" fill="#111827" text-anchor="middle">AgentSession</text><text x="347" y="236" font-size="11" fill="#475569" text-anchor="middle">turn_handling 配置</text>
+  <rect x="454" y="200" width="130" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="519" y="220" font-size="12.5" fill="#111827" text-anchor="middle">Switchable</text><text x="519" y="236" font-size="11" fill="#475569" text-anchor="middle">STT/TTS 切换</text>
+  <rect x="606" y="200" width="122" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="667" y="220" font-size="12.5" fill="#111827" text-anchor="middle">停止词/附和</text><text x="667" y="236" font-size="11" fill="#475569" text-anchor="middle">数字归一化</text>
+  <text x="40" y="266" font-size="11" fill="#475569">VoiceAgent.transcription_node / on_user_turn_completed → StopResponse</text>
+
+  <!-- ============ Layer 3: Framework core ============ -->
+  <rect x="24" y="310" width="720" height="118" rx="8" fill="#fafafa" stroke="#e5e7eb"/>
+  <text x="36" y="330" font-size="12" font-weight="700" fill="#6b7280">③ 框架内核 · livekit-agents (AudioRecognition / AgentActivity)</text>
+  <rect x="40" y="338" width="150" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="115" y="358" font-size="12.5" fill="#111827" text-anchor="middle">VAD 通道</text><text x="115" y="374" font-size="11" fill="#475569" text-anchor="middle">Silero · 始终收帧</text>
+  <rect x="206" y="338" width="180" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="296" y="358" font-size="12.5" fill="#111827" text-anchor="middle">STT 管线 · StreamAdapter</text><text x="296" y="374" font-size="11" fill="#475569" text-anchor="middle">自带 VAD 切整段</text>
+  <rect x="402" y="338" width="150" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="477" y="358" font-size="12.5" fill="#111827" text-anchor="middle">判停 EOU</text><text x="477" y="374" font-size="11" fill="#475569" text-anchor="middle">MultilingualModel</text>
+  <rect x="568" y="338" width="76" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="606" y="364" font-size="12.5" fill="#111827" text-anchor="middle">LLM 节点</text>
+  <rect x="656" y="338" width="72" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="692" y="364" font-size="12.5" fill="#111827" text-anchor="middle">TTS 节点</text>
+  <text x="40" y="404" font-size="11" fill="#475569">push_audio: should_discard → VAD 收帧但 STT 被 skip(⚠ 见架构文档 §6.5);抢先生成把 LLM/TTS 叠进判停窗</text>
+
+  <!-- ============ Layer 4: Models ============ -->
+  <rect x="24" y="448" width="720" height="78" rx="8" fill="#f3fbf7" stroke="#a7f3d0"/>
+  <text x="36" y="468" font-size="12" font-weight="700" fill="#059669">④ 模型后端</text>
+  <rect x="40" y="476" width="150" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="115" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Qwen LLM 网关</text>
+  <rect x="206" y="476" width="180" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="296" y="501" font-size="12.5" fill="#111827" text-anchor="middle">FunASR / Qwen3 STT</text>
+  <rect x="402" y="476" width="120" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="462" y="501" font-size="12.5" fill="#111827" text-anchor="middle">百炼 TTS</text>
+  <rect x="538" y="476" width="190" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="633" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Silero VAD · KWS 模型(本地)</text>
+
+  <!-- main flow arrows (down the center) -->
+  <line x1="382" y1="152" x2="382" y2="172" stroke="#374151" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="382" y1="290" x2="382" y2="310" stroke="#374151" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="382" y1="428" x2="382" y2="448" stroke="#374151" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- ============ Control panel (right column) ============ -->
+  <rect x="772" y="172" width="164" height="256" rx="8" fill="#faf5ff" stroke="#e9d5ff"/>
+  <text x="784" y="192" font-size="12" font-weight="700" fill="#7c3aed">控制面板</text>
+  <text x="784" y="210" font-size="11" fill="#475569">独立线程 + 独立循环</text>
+  <rect x="784" y="220" width="140" height="34" rx="6" fill="#f3e8ff" stroke="#a855f7"/><text x="854" y="241" font-size="12" fill="#111827" text-anchor="middle">aiohttp · /ws</text>
+  <rect x="784" y="262" width="140" height="34" rx="6" fill="#f3e8ff" stroke="#a855f7"/><text x="854" y="283" font-size="12" fill="#111827" text-anchor="middle">/api/mic·asr·tts</text>
+  <text x="784" y="320" font-size="11" fill="#475569">桥接(双向):</text>
+  <text x="784" y="338" font-size="11" fill="#7c3aed">run_coroutine_</text>
+  <text x="784" y="354" font-size="11" fill="#7c3aed">threadsafe</text>
+  <text x="784" y="392" font-size="11" fill="#475569">浏览器:</text>
+  <text x="784" y="408" font-size="11" fill="#475569">localhost:8787</text>
+  <path d="M772,300 C752,300 752,222 744,222" fill="none" stroke="#7c3aed" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrB)"/>
+
+  <!-- ============ Interruption sources (bottom) ============ -->
+  <rect x="24" y="546" width="912" height="132" rx="8" fill="#fff7f7" stroke="#fecaca"/>
+  <text x="36" y="566" font-size="12" font-weight="700" fill="#dc2626">四层打断信号源 → session.interrupt(force) / clear_user_turn()</text>
+  <rect x="40" y="576" width="210" height="42" rx="6" fill="#fee2e2" stroke="#dc2626"/><text x="145" y="596" font-size="12.5" fill="#111827" text-anchor="middle">① VAD(框架)</text><text x="145" y="611" font-size="11" fill="#475569" text-anchor="middle">最快·内容盲·min_words=3</text>
+  <rect x="262" y="576" width="210" height="42" rx="6" fill="#fee2e2" stroke="#dc2626"/><text x="367" y="596" font-size="12.5" fill="#111827" text-anchor="middle">② KWS(本地·真线程)</text><text x="367" y="611" font-size="11" fill="#475569" text-anchor="middle">懂停止词·早0.5–1.5s</text>
+  <rect x="484" y="576" width="210" height="42" rx="6" fill="#fee2e2" stroke="#dc2626"/><text x="589" y="596" font-size="12.5" fill="#111827" text-anchor="middle">③ 在线ASR(2pass)</text><text x="589" y="611" font-size="11" fill="#475569" text-anchor="middle">懂内容·min_chars=3</text>
+  <rect x="706" y="576" width="210" height="42" rx="6" fill="#fee2e2" stroke="#dc2626"/><text x="811" y="596" font-size="12.5" fill="#111827" text-anchor="middle">④ 离线停止词</text><text x="811" y="611" font-size="11" fill="#475569" text-anchor="middle">兜底·等整段 final</text>
+  <text x="40" y="642" font-size="11" fill="#475569">①VAD 在框架内 · ②KWS/③在线 经 taps 旁路并行运行 · ④停止词在 on_user_turn_completed</text>
+  <text x="40" y="662" font-size="11" fill="#475569">信号统一汇入 AgentSession 的打断动作,切断当前 TTS 播放并按需跳过/重规划本轮回复</text>
+  <line x1="455" y1="546" x2="430" y2="428" stroke="#dc2626" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arrR)"/>
+</svg>
