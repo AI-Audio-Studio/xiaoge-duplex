@@ -986,6 +986,25 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.debug("llm warmup skipped: %s", exc)
 
     asyncio.create_task(_warmup_llm())
+
+    # 结构化事件时间线(自动化测试 P0 数据基座)。**默认关闭**:正常运行完全不创建、不
+    # attach、零开销;仅测试时显式 AGENT_TIMELINE=1 启用。启用后也是纯旁路、后台线程写盘、
+    # 绝不阻塞/影响主流程。在 start() 之前 attach 才能捕获开场白那一轮。
+    _timeline = None
+    if os.getenv("AGENT_TIMELINE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from event_timeline import EventTimeline
+
+            _run_dir = Path(__file__).resolve().parents[2] / "runs" / time.strftime("%Y%m%d_%H%M%S")
+            _timeline = EventTimeline(_run_dir)
+            _timeline.attach(session)
+            ctx.add_shutdown_callback(_timeline.aclose)
+            _append_turn_log(f"TIMELINE dir={_timeline.directory}")
+            logger.info("event timeline -> %s", _timeline.directory / "timeline.jsonl")
+        except Exception as exc:  # 时间线初始化失败绝不阻塞启动
+            logger.warning("event timeline disabled: %s", exc)
+            _timeline = None
+
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
     _recorder = AudioRecorder(session_dir="recordings")
