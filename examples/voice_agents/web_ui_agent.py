@@ -993,10 +993,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
-    _recorder = AudioRecorder(session_dir="recordings")
-    _recorder.install(session)
-    ctx.add_shutdown_callback(_recorder.aclose)
-    _append_turn_log(f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}")
+    if _timeline is not None:
+        # 测试模式:按真实时间轴录多轨(user/assistant/duplex)进同一个 run 目录。
+        try:
+            from test_recorder import TestRecorder
+
+            _recorder: object = TestRecorder(_timeline.directory)
+            _recorder.install(session)
+            ctx.add_shutdown_callback(_recorder.aclose)
+            _append_turn_log(f"TEST_RECORDER dir={_recorder.directory}")
+        except Exception as exc:  # 录音初始化失败绝不阻塞启动
+            logger.warning("test recorder disabled: %s", exc)
+    else:
+        # 正常模式:沿用原有单文件混音录音(recordings/),不受测试功能影响。
+        _recorder = AudioRecorder(session_dir="recordings")
+        _recorder.install(session)
+        ctx.add_shutdown_callback(_recorder.aclose)
+        _append_turn_log(f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}")
 
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
