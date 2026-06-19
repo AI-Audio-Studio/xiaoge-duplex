@@ -35,6 +35,11 @@ logger = logging.getLogger("custom-audio-providers")
 # Windows). Keep it short so a dead backend fails fast and recovery is quick.
 _WS_CONNECT_TIMEOUT = float(os.getenv("ASR_WS_CONNECT_TIMEOUT", "5"))
 
+# Same idea for HTTP TTS: bound the connect so an unreachable endpoint fails fast
+# (~5s) instead of hanging on the OS TCP connect (~21s on Windows). Only the
+# connect is bounded; streaming the audio body can still take as long as needed.
+_TTS_CONNECT_TIMEOUT = float(os.getenv("TTS_CONNECT_TIMEOUT", "5"))
+
 
 def _env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -76,6 +81,31 @@ def _funasr_hotwords() -> str:
     return json.dumps(words, ensure_ascii=False) if words else ""
 
 
+def _acquire_http_session() -> tuple[aiohttp.ClientSession, bool]:
+    """Return (session, owns). Prefer LiveKit's shared http session; fall back to a
+    private ClientSession the caller is responsible for closing (owns=True)."""
+    try:
+        return utils.http_context.http_session(), False
+    except RuntimeError:
+        return aiohttp.ClientSession(), True
+
+
+def _resample_pcm(buffer: utils.AudioBuffer, target_rate: int) -> bytes:
+    """Merge an AudioBuffer and resample to mono 16-bit PCM at target_rate."""
+    frame = utils.merge_frames(buffer) if isinstance(buffer, list) else buffer
+    if frame.sample_rate != target_rate or frame.num_channels != 1:
+        resampler = rtc.AudioResampler(
+            input_rate=frame.sample_rate,
+            output_rate=target_rate,
+            num_channels=1,
+            quality=rtc.AudioResamplerQuality.HIGH,
+        )
+        frames = resampler.push(frame)
+        frames.extend(resampler.flush())
+        frame = rtc.combine_audio_frames(frames)
+    return bytes(frame.data)
+
+
 @dataclass
 class FunASROptions:
     websocket_url: str
@@ -83,7 +113,6 @@ class FunASROptions:
     verify_ssl: bool = False
     language: str = "zh"
     chunk_size: int = 3200
-    send_interval: float = 0.01
 
 
 class FunASROfflineSTT(stt.STT):
@@ -128,35 +157,21 @@ class FunASROfflineSTT(stt.STT):
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
-            try:
-                self._session = utils.http_context.http_session()
-            except RuntimeError:
-                self._session = aiohttp.ClientSession()
+            self._session, owns = _acquire_http_session()
+            if owns:
                 self._owns_session = True
         return self._session
 
     def _resample_to_pcm(self, buffer: utils.AudioBuffer) -> bytes:
-        frame = utils.merge_frames(buffer) if isinstance(buffer, list) else buffer
-
-        frames = [frame]
-        if frame.sample_rate != self._opts.sample_rate or frame.num_channels != 1:
-            resampler = rtc.AudioResampler(
-                input_rate=frame.sample_rate,
-                output_rate=self._opts.sample_rate,
-                num_channels=1,
-                quality=rtc.AudioResamplerQuality.HIGH,
-            )
-            frames = resampler.push(frame)
-            frames.extend(resampler.flush())
-            frame = rtc.combine_audio_frames(frames)
-
-        return bytes(frame.data)
+        return _resample_pcm(buffer, self._opts.sample_rate)
 
     async def _ensure_ws(self) -> aiohttp.ClientWSResponse:
         ws = self._ws
         if ws is not None and not ws.closed:
             return ws
         ssl_ctx = None
+        # 内网自签证书端点:仅当 verify_ssl=False(由 FUNASR_VERIFY_SSL 控制,默认 false)时
+        # 才跳过校验。生产/公网请置 true。见 .env.example。
         if self._opts.websocket_url.startswith("wss://") and not self._opts.verify_ssl:
             ssl_ctx = ssl._create_unverified_context()
         session = self._ensure_session()
@@ -317,26 +332,13 @@ class Qwen3ASROfflineSTT(stt.STT):
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
-            try:
-                self._session = utils.http_context.http_session()
-            except RuntimeError:
-                self._session = aiohttp.ClientSession()
+            self._session, owns = _acquire_http_session()
+            if owns:
                 self._owns_session = True
         return self._session
 
     def _resample_to_pcm(self, buffer: utils.AudioBuffer) -> bytes:
-        frame = utils.merge_frames(buffer) if isinstance(buffer, list) else buffer
-        if frame.sample_rate != self._sample_rate or frame.num_channels != 1:
-            resampler = rtc.AudioResampler(
-                input_rate=frame.sample_rate,
-                output_rate=self._sample_rate,
-                num_channels=1,
-                quality=rtc.AudioResamplerQuality.HIGH,
-            )
-            frames = resampler.push(frame)
-            frames.extend(resampler.flush())
-            frame = rtc.combine_audio_frames(frames)
-        return bytes(frame.data)
+        return _resample_pcm(buffer, self._sample_rate)
 
     async def prewarm_connection(self) -> None:
         """用户开始说话时调用：提前建好 WS，将握手延迟藏进说话期间。
@@ -507,10 +509,8 @@ class FunASRStreamingSTT(stt.STT):
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
-            try:
-                self._session = utils.http_context.http_session()
-            except RuntimeError:
-                self._session = aiohttp.ClientSession()
+            self._session, owns = _acquire_http_session()
+            if owns:
                 self._owns_session = True
         return self._session
 
@@ -686,9 +686,6 @@ class _BailianCallback(QwenTtsRealtimeCallback):
             self.done.set()
 
 
-import threading
-
-
 class BailianRealtimeTTS(tts.TTS):
     def __init__(
         self,
@@ -733,6 +730,8 @@ class BailianRealtimeTTS(tts.TTS):
         return
 
     def _synthesize_sync(self, text: str) -> bytes:
+        # NOTE: dashscope.api_key 是进程级全局(SDK 设计如此)。当前单 key 场景没问题;
+        # 若将来一个进程内并存多个不同 DASHSCOPE_API_KEY,这里会相互覆盖/竞争。
         dashscope.api_key = self._api_key
         callback = _BailianCallback()
         realtime = QwenTtsRealtime(model=self._opts.model, callback=callback)
@@ -1089,6 +1088,10 @@ class HttpStreamingTTS(tts.TTS):
         self._chunk_size = chunk_size
 
     @property
+    def model(self) -> str:
+        return "http-tts"
+
+    @property
     def provider(self) -> str:
         return "HttpTTS"
 
@@ -1117,7 +1120,8 @@ class HttpStreamingTTS(tts.TTS):
     ) -> None:
         """POST 单句文本，把 PCM 块逐一 push 到 emitter。不调用 flush()，由调用方决定时机。"""
         payload = {"text": text, "speaker": self._speaker, "speed": self._speed}
-        async with session.post(self._url, json=payload) as resp:
+        timeout = aiohttp.ClientTimeout(connect=_TTS_CONNECT_TIMEOUT, sock_connect=_TTS_CONNECT_TIMEOUT)
+        async with session.post(self._url, json=payload, timeout=timeout) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 raise APIConnectionError(f"HTTP TTS returned {resp.status}: {body}")

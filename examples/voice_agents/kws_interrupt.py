@@ -71,7 +71,9 @@ DEFAULT_KEYWORDS: tuple[str, ...] = (
 
 @dataclass(slots=True)
 class KwsConfig:
-    enable: bool = False
+    # 默认开启,与 from_env() 的 XIAOGE_KWS_ENABLE_NATIVE=1 一致(避免直接构造时静默关闭);
+    # 缺模型/依赖时由 _unavailable_reason 自动降级为 no-op,不影响启动。
+    enable: bool = True
     model_dir: str | None = None
     keywords: tuple[str, ...] = DEFAULT_KEYWORDS
     keywords_file: str | None = None
@@ -272,6 +274,9 @@ def _unavailable_reason(config: KwsConfig) -> str | None:
 
 
 def _find_model_artifacts(model_root: Path) -> dict[str, Path] | None:
+    # 假定 sherpa-onnx KWS 模型的 chunk-8 三件套固定文件名(随当前内置模型)。换用不同
+    # checkpoint/命名时这里会匹配不上 -> 返回 None -> _unavailable_reason 记 "model files
+    # missing" 并降级为 no-op(不崩,只是 KWS 关闭)。换模型时同步改这里的文件名即可。
     if not model_root.is_dir():
         return None
     tokens = model_root / "tokens.txt"
