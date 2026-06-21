@@ -60,9 +60,7 @@ class QwenAgent(Agent):
     def __init__(self) -> None:
         super().__init__(
             instructions=(
-                "你是一个中文助手。"
-                "默认使用中文回答。"
-                "回答简洁直接，先给结论，再补必要说明。"
+                "你是一个中文助手。默认使用中文回答。回答简洁直接，先给结论，再补必要说明。"
             )
         )
 

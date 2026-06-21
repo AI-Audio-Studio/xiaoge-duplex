@@ -8,10 +8,15 @@ from pathlib import Path
 
 import httpx
 import openai
-from dotenv import load_dotenv
-
 from audio_recorder import AudioRecorder
-from custom_audio_providers import FunASROfflineSTT, HttpStreamingTTS, Qwen3ASROfflineSTT, QwenStreamingTTS, _funasr_hotwords
+from custom_audio_providers import (
+    FunASROfflineSTT,
+    HttpStreamingTTS,
+    Qwen3ASROfflineSTT,
+    QwenStreamingTTS,
+    _funasr_hotwords,
+)
+from dotenv import load_dotenv
 from kws_interrupt import (
     KwsConfig,
     KwsTapAudioInput,
@@ -22,10 +27,9 @@ from online_interrupt import (
     OnlineAsrTap,
     OnlineInterruptConfig,
     OnlineTapAudioInput,
-)
-from online_interrupt import (
     unavailable_reason as _online_unavailable_reason,
 )
+
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -36,13 +40,12 @@ from livekit.agents import (
     StopResponse,
     cli,
     function_tool,
+    stt as agents_stt,
+    tts,
 )
-from livekit.agents import stt as agents_stt
-from livekit.agents import tts
 from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.stt.stream_adapter import StreamAdapter
-from livekit.plugins import openai as lk_openai
-from livekit.plugins import silero
+from livekit.plugins import openai as lk_openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("qwen-funasr-bailian-voice-agent")
@@ -54,19 +57,32 @@ load_dotenv()
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-_TURN_METRICS_LOG = Path(
-    os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")
-).resolve()
+_TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
 _PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
 # 命中后：强制打断当前播放 + 跳过本次回复（见 VoiceAgent.on_user_turn_completed）。
 _STOP_WORDS = (
-    "停", "停下", "停一下", "暂停",
-    "好了", "行了",
-    "别说", "别说了", "别讲", "别讲了", "别念了",
-    "等一下", "等等", "等下", "稍等",
-    "知道了", "我知道了",
-    "闭嘴", "安静",
-    "不听了", "不用了", "不要了",
+    "停",
+    "停下",
+    "停一下",
+    "暂停",
+    "好了",
+    "行了",
+    "别说",
+    "别说了",
+    "别讲",
+    "别讲了",
+    "别念了",
+    "等一下",
+    "等等",
+    "等下",
+    "稍等",
+    "知道了",
+    "我知道了",
+    "闭嘴",
+    "安静",
+    "不听了",
+    "不用了",
+    "不要了",
     "休庭",  # FunASR 常把"停/暂停"误识成"休庭"，兜底
 )
 # 可选引导词前缀：实测用户说"那别说了"，"那"不在停止词表也不在附和字集，
@@ -82,9 +98,7 @@ _STOP_REPLY_PATTERNS = tuple(
 # 不强制打断 —— 靠 resume_false_interruption 让 agent 把原话接着说完。
 # 整句必须全部由语气字 + 标点组成才算（"哦好吧"含实义不命中）。
 _BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
-_BACKCHANNEL_RE = re.compile(
-    rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$"
-)
+_BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
 
 # 压话确认词：用户在 AI 播报期间说的"对/好/是的"等附和，不是新指令。
 # 实测踩坑：听故事时"嗯……对……"连发，多个 final 累加成一轮"嗯。 对。"——
@@ -224,6 +238,7 @@ async def get_weather(
 ) -> str:
     """查询城市天气。"""
     return f"{city}今天寒冷，天气15度。"
+
 
 class VoiceAgent(Agent):
     def __init__(self) -> None:
@@ -519,7 +534,7 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.debug("llm warmup skipped: %s", exc)
 
-    warmup_task = asyncio.create_task(_warmup_llm())
+    asyncio.create_task(_warmup_llm())  # noqa: RUF006 (fire-and-forget warmup)
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
@@ -590,9 +605,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _online_reason = _online_unavailable_reason(_online_cfg)
     if _online_reason is None and session.input.audio is not None:
-        online_tap = OnlineAsrTap(
-            _online_cfg, hotwords=_funasr_hotwords(), on_text=_on_online_text
-        )
+        online_tap = OnlineAsrTap(_online_cfg, hotwords=_funasr_hotwords(), on_text=_on_online_text)
         online_tap.start()
         session.input.audio = OnlineTapAudioInput(session.input.audio, online_tap)
         ctx.add_shutdown_callback(online_tap.aclose)

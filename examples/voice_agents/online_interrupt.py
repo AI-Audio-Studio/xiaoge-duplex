@@ -18,8 +18,8 @@ import json
 import logging
 import os
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import aiohttp
 
@@ -39,7 +39,7 @@ class OnlineInterruptConfig:
     reconnect_delay: float = 2.0
 
     @classmethod
-    def from_env(cls) -> "OnlineInterruptConfig":
+    def from_env(cls) -> OnlineInterruptConfig:
         return cls(
             enable=_parse_bool(os.getenv("XIAOGE_ONLINE_INTERRUPT_ENABLE", "1")),
             ws_url=os.getenv("FUNASR_WS_URL", "").strip() or None,
@@ -141,9 +141,7 @@ class OnlineAsrTap:
         if self._config.ws_url.startswith("wss://") and not self._config.verify_ssl:
             ssl_ctx = ssl._create_unverified_context()
 
-        async with session.ws_connect(
-            self._config.ws_url, ssl=ssl_ctx, heartbeat=30
-        ) as ws:
+        async with session.ws_connect(self._config.ws_url, ssl=ssl_ctx, heartbeat=30) as ws:
             init_payload = {
                 "mode": "2pass",
                 # 主链路用标准 600ms 块（[5,10,5]）；这条旁路改 480ms 块压首包延迟

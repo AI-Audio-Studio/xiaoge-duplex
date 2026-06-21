@@ -29,10 +29,15 @@ import aiohttp
 import aiohttp.web
 import httpx
 import openai
-from dotenv import load_dotenv
-
 from audio_recorder import AudioRecorder
-from custom_audio_providers import FunASROfflineSTT, HttpStreamingTTS, Qwen3ASROfflineSTT, QwenStreamingTTS, _funasr_hotwords
+from custom_audio_providers import (
+    FunASROfflineSTT,
+    HttpStreamingTTS,
+    Qwen3ASROfflineSTT,
+    QwenStreamingTTS,
+    _funasr_hotwords,
+)
+from dotenv import load_dotenv
 from kws_interrupt import KwsConfig, KwsTapAudioInput, NativeKwsSpotter, _unavailable_reason
 from online_interrupt import (
     OnlineAsrTap,
@@ -40,26 +45,25 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    APIConnectOptions,
     JobContext,
     JobProcess,
-    RunContext,
+    LanguageCode,
     StopResponse,
     cli,
-    function_tool,
+    stt as agents_stt,
+    tts,
+    utils as lk_utils,
 )
-from livekit.agents import APIConnectOptions, LanguageCode
-from livekit.agents import stt as agents_stt
-from livekit.agents import tts
-from livekit.agents import utils as lk_utils
 from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.stt.stream_adapter import StreamAdapter
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGivenOr
-from livekit.plugins import openai as lk_openai
-from livekit.plugins import silero
+from livekit.plugins import openai as lk_openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("web-ui-agent")
@@ -75,13 +79,28 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 _TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
 _PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
 _STOP_WORDS = (
-    "停", "停下", "停一下", "暂停",
-    "好了", "行了",
-    "别说", "别说了", "别讲", "别讲了", "别念了",
-    "等一下", "等等", "等下", "稍等",
-    "知道了", "我知道了",
-    "闭嘴", "安静",
-    "不听了", "不用了", "不要了",
+    "停",
+    "停下",
+    "停一下",
+    "暂停",
+    "好了",
+    "行了",
+    "别说",
+    "别说了",
+    "别讲",
+    "别讲了",
+    "别念了",
+    "等一下",
+    "等等",
+    "等下",
+    "稍等",
+    "知道了",
+    "我知道了",
+    "闭嘴",
+    "安静",
+    "不听了",
+    "不用了",
+    "不要了",
     "休庭",
 )
 _STOP_LEAD_IN = r"(?:那|你|就|请|先|那你|那就)?"
@@ -90,9 +109,7 @@ _STOP_REPLY_PATTERNS = tuple(
     for w in _STOP_WORDS
 )
 _BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
-_BACKCHANNEL_RE = re.compile(
-    rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$"
-)
+_BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
 _OVERLAP_ACK_CHARS = _BACKCHANNEL_CHARS + "对好是行的呀嘛"
 _ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
 _SEGMENT_SPLIT_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
@@ -119,6 +136,7 @@ def _configure_utf8_stdio() -> None:
         return
     try:
         import ctypes
+
         kernel32 = ctypes.windll.kernel32
         kernel32.SetConsoleOutputCP(65001)
         kernel32.SetConsoleCP(65001)
@@ -183,6 +201,7 @@ def _append_turn_log(line: str) -> None:
 
 
 # ─── SwitchableSTT ───────────────────────────────────────────────────────────
+
 
 class SwitchableSTT(agents_stt.STT):
     """STT proxy supporting runtime backend switching and mute.
@@ -261,6 +280,7 @@ class SwitchableSTT(agents_stt.STT):
 
 
 # ─── SwitchableTTS ───────────────────────────────────────────────────────────
+
 
 class SwitchableTTS(tts.TTS):
     """TTS proxy supporting runtime backend switching.
@@ -532,6 +552,7 @@ conn();
 
 # ─── Web server coroutines (run in _web_loop thread) ─────────────────────────
 
+
 async def _ws_broadcast(data: str) -> None:
     dead: list[aiohttp.web.WebSocketResponse] = []
     for ws in list(_ws_clients):
@@ -548,9 +569,7 @@ def broadcast(msg: dict) -> None:
     loop = _web_loop
     if loop is None or not loop.is_running():
         return
-    asyncio.run_coroutine_threadsafe(
-        _ws_broadcast(json.dumps(msg, ensure_ascii=False)), loop
-    )
+    asyncio.run_coroutine_threadsafe(_ws_broadcast(json.dumps(msg, ensure_ascii=False)), loop)
 
 
 async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -564,12 +583,17 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
 
     # Push current state immediately on connect
     stt = _switchable_stt
-    await ws.send_str(json.dumps({
-        "type": "state",
-        "muted": stt.muted if stt else False,
-        "stt_backend": stt.provider if stt else "FunASR",
-        "tts_backend": _tts_backend_key,
-    }, ensure_ascii=False))
+    await ws.send_str(
+        json.dumps(
+            {
+                "type": "state",
+                "muted": stt.muted if stt else False,
+                "stt_backend": stt.provider if stt else "FunASR",
+                "tts_backend": _tts_backend_key,
+            },
+            ensure_ascii=False,
+        )
+    )
 
     async for _ in ws:
         pass  # keep-alive; messages from browser not used
@@ -678,6 +702,7 @@ def _start_web_server_thread(port: int) -> None:
 
 # ─── Agent (mirrors qwen_funasr_bailian_voice_agent) ─────────────────────────
 
+
 class _Qwen3StreamSTT(Qwen3ASROfflineSTT):
     """Same growing-buffer WebSocket protocol as Qwen3ASROfflineSTT, different server."""
 
@@ -784,7 +809,7 @@ class VoiceAgent(Agent):
                 "默认使用中文回答。"
                 "回答简洁自然，像正常说话，不要使用 markdown。"
                 "当用户口述数字、编号、验证码、手机号或序号时，理解为逐位数字。"
-                "如果需要复述或确认，请逐位读出，并用停顿或顿号分隔，比如\"1、2、3、4、5\"，不要把它当成一个整数来念。"
+                '如果需要复述或确认，请逐位读出，并用停顿或顿号分隔，比如"1、2、3、4、5"，不要把它当成一个整数来念。'
                 "如果用户说停、好了，我知道了、行了，别说了等话时，不要做任何回复"
             )
         )
@@ -803,7 +828,9 @@ class VoiceAgent(Agent):
             yield chunk
         full_text = "".join(collected).strip()
         if full_text:
-            broadcast({"type": "message", "role": "assistant", "text": full_text, "ts": time.time()})
+            broadcast(
+                {"type": "message", "role": "assistant", "text": full_text, "ts": time.time()}
+            )
 
     async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
         spoke_over_agent = _overlap_turn_state["user_spoke_over_agent"]
@@ -901,8 +928,14 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info(line)
             _append_turn_log(line)
             # push to browser
-            broadcast({"type": "message", "role": "user",
-                       "text": item.text_content or "", "ts": time.time()})
+            broadcast(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "text": item.text_content or "",
+                    "ts": time.time(),
+                }
+            )
             return
 
         if item.role == "assistant":
@@ -1018,7 +1051,9 @@ async def entrypoint(ctx: JobContext) -> None:
         _recorder = AudioRecorder(session_dir="recordings")
         _recorder.install(session)
         ctx.add_shutdown_callback(_recorder.aclose)
-        _append_turn_log(f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}")
+        _append_turn_log(
+            f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}"
+        )
 
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
@@ -1076,9 +1111,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _online_reason = _online_unavailable_reason(_online_cfg)
     if _online_reason is None and session.input.audio is not None:
-        online_tap = OnlineAsrTap(
-            _online_cfg, hotwords=_funasr_hotwords(), on_text=_on_online_text
-        )
+        online_tap = OnlineAsrTap(_online_cfg, hotwords=_funasr_hotwords(), on_text=_on_online_text)
         online_tap.start()
         session.input.audio = OnlineTapAudioInput(session.input.audio, online_tap)
         ctx.add_shutdown_callback(online_tap.aclose)
@@ -1103,6 +1136,7 @@ if __name__ == "__main__":
 
     # Give the server a moment to bind, then open the browser
     import time as _time
+
     _time.sleep(0.8)
     webbrowser.open(f"http://localhost:{_WEB_PORT}")
     logger.info("Opening browser at http://localhost:%d", _WEB_PORT)

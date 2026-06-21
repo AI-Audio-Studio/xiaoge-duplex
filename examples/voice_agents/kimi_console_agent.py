@@ -22,9 +22,7 @@ class KimiAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        self.session.generate_reply(
-            instructions="用中文做一句简短自我介绍，并请用户直接提问。"
-        )
+        self.session.generate_reply(instructions="用中文做一句简短自我介绍，并请用户直接提问。")
 
 
 server = AgentServer()
