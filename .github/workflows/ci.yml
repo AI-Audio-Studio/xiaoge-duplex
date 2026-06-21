@@ -1,0 +1,36 @@
+name: CI
+
+# 轻量 CI,贴合本工程实际:只做不依赖外部服务/音频设备的静态检查——
+# ruff 代码规范 + 格式检查 + 字节编译(语法)检查,范围限定为小歌应用代码
+# examples/voice_agents(框架 livekit-agents 为上游代码,不在此校验)。
+# 完整对话/录音是端到端的,需要 Qwen/FunASR/百炼 端点和麦克风,无法在 CI 跑。
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/voice_agents/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "examples/voice_agents/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+jobs:
+  lint-compile:
+    name: Lint & byte-compile (examples/voice_agents)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install ruff
+        run: pip install ruff==0.15.18
+      - name: Ruff lint
+        run: ruff check examples/voice_agents
+      - name: Ruff format check
+        run: ruff format --check examples/voice_agents
+      - name: Byte-compile (syntax check)
+        run: python -m compileall -q examples/voice_agents
