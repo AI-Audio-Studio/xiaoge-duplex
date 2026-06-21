@@ -333,6 +333,7 @@ _web_loop: asyncio.AbstractEventLoop | None = None
 _agent_loop: asyncio.AbstractEventLoop | None = None
 _switchable_stt: SwitchableSTT | None = None
 _switchable_tts: SwitchableTTS | None = None
+_test_recorder = None  # 测试模式下的多轨录音器(供 /api/mic 暂停/继续录制)
 _tts_backend_key: str = "qwen"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -582,6 +583,9 @@ async def _handle_mic(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if stt is None:
         return aiohttp.web.json_response({"error": "agent not ready"}, status=503)
     stt.muted = not stt.muted
+    # 麦克风关闭 -> 暂停录制(用户轨),开启 -> 继续(测试模式下)。
+    if _test_recorder is not None:
+        _test_recorder.set_paused(stt.muted)
     broadcast({"type": "state", "muted": stt.muted})
     logger.info("mic %s", "muted" if stt.muted else "unmuted")
     return aiohttp.web.json_response({"muted": stt.muted})
@@ -786,7 +790,9 @@ class VoiceAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        self.session.generate_reply(instructions="用中文做一句简短自我介绍，并邀请用户开始说话。")
+        # 开场白不在这里触发:on_enter 在 session.start() 期间执行,早于录音 tap 安装,
+        # 会导致开场白漏录。改到 entrypoint 中、所有 tap 装好之后再触发(见 _GREETING)。
+        pass
 
     async def transcription_node(self, text, model_settings):  # type: ignore[override]
         """Intercept the LLM text stream to push the reply to the browser as soon as
@@ -838,7 +844,7 @@ server.setup_fnc = prewarm
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
-    global _switchable_stt, _switchable_tts, _agent_loop
+    global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder
     _agent_loop = asyncio.get_running_loop()
 
     stt_engine = build_stt()
@@ -1000,6 +1006,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
             _recorder: object = TestRecorder(_timeline.directory)
             _recorder.install(session)
+            _test_recorder = _recorder  # 暴露给 /api/mic 做暂停/继续
+            # 进入时与当前静音状态对齐(若启动时已静音则暂停录制)
+            _recorder.set_paused(bool(getattr(stt_engine, "muted", False)))
             ctx.add_shutdown_callback(_recorder.aclose)
             _append_turn_log(f"TEST_RECORDER dir={_recorder.directory}")
         except Exception as exc:  # 录音初始化失败绝不阻塞启动
@@ -1076,6 +1085,10 @@ async def entrypoint(ctx: JobContext) -> None:
         _append_turn_log(f"ONLINE_INTERRUPT_ACTIVE min_chars={_online_cfg.min_chars}")
     else:
         _append_turn_log(f"ONLINE_INTERRUPT_DISABLED reason={_online_reason!r}")
+
+    # 开场白:在所有 tap(录音/KWS/在线打断)装好之后触发,确保被如实录进录音
+    # (放在 on_enter 会早于录音 tap 安装 -> 漏录)。
+    session.generate_reply(instructions="用中文做一句简短自我介绍，并邀请用户开始说话。")
 
 
 if __name__ == "__main__":
