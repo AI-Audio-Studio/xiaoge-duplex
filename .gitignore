@@ -182,6 +182,7 @@ examples/dev/*
 # MVP runtime artifacts (start/stop scripts, recordings, metrics)
 .run/
 recordings/
+runs/
 logs/
 qwen_voice_turn_metrics.log
 

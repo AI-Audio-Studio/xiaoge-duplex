@@ -68,26 +68,9 @@ load_dotenv(override=True)
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-# Always-on debug log to <repo>/.run/agent.log so the agent's behaviour can be
-# inspected even when running in a visible console window (where the Rich TUI
-# owns the terminal). Overwritten each launch. Set AGENT_LOG_FILE to relocate.
-try:
-    _agent_log_path = Path(
-        os.getenv("AGENT_LOG_FILE")
-        or (Path(__file__).resolve().parents[2] / ".run" / "agent.log")
-    )
-    _agent_log_path.parent.mkdir(parents=True, exist_ok=True)
-    _agent_log_file_handler = logging.FileHandler(_agent_log_path, mode="w", encoding="utf-8")
-    _agent_log_file_handler.setLevel(logging.DEBUG)
-    _agent_log_file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
-    _root_logger = logging.getLogger()
-    _root_logger.addHandler(_agent_log_file_handler)
-    if _root_logger.level == logging.NOTSET or _root_logger.level > logging.DEBUG:
-        _root_logger.setLevel(logging.DEBUG)
-except Exception:  # never let logging setup block startup
-    pass
+# 注:全量 DEBUG 日志已整合进测试工具(AGENT_TIMELINE=1 时写 runs/<ts>/debug.log,
+# 见 event_timeline.install_debug_log)。正常运行不再挂任何文件日志处理器(零开销),
+# 也不再写 .run/agent.log。
 
 _TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
 _PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
@@ -350,6 +333,7 @@ _web_loop: asyncio.AbstractEventLoop | None = None
 _agent_loop: asyncio.AbstractEventLoop | None = None
 _switchable_stt: SwitchableSTT | None = None
 _switchable_tts: SwitchableTTS | None = None
+_test_recorder = None  # 测试模式下的多轨录音器(供 /api/mic 暂停/继续录制)
 _tts_backend_key: str = "qwen"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -599,6 +583,9 @@ async def _handle_mic(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if stt is None:
         return aiohttp.web.json_response({"error": "agent not ready"}, status=503)
     stt.muted = not stt.muted
+    # 麦克风关闭 -> 暂停录制(用户轨),开启 -> 继续(测试模式下)。
+    if _test_recorder is not None:
+        _test_recorder.set_paused(stt.muted)
     broadcast({"type": "state", "muted": stt.muted})
     logger.info("mic %s", "muted" if stt.muted else "unmuted")
     return aiohttp.web.json_response({"muted": stt.muted})
@@ -803,7 +790,9 @@ class VoiceAgent(Agent):
         )
 
     async def on_enter(self) -> None:
-        self.session.generate_reply(instructions="用中文做一句简短自我介绍，并邀请用户开始说话。")
+        # 开场白不在这里触发:on_enter 在 session.start() 期间执行,早于录音 tap 安装,
+        # 会导致开场白漏录。改到 entrypoint 中、所有 tap 装好之后再触发(见 _GREETING)。
+        pass
 
     async def transcription_node(self, text, model_settings):  # type: ignore[override]
         """Intercept the LLM text stream to push the reply to the browser as soon as
@@ -855,7 +844,7 @@ server.setup_fnc = prewarm
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
-    global _switchable_stt, _switchable_tts, _agent_loop
+    global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder
     _agent_loop = asyncio.get_running_loop()
 
     stt_engine = build_stt()
@@ -986,18 +975,58 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.debug("llm warmup skipped: %s", exc)
 
     asyncio.create_task(_warmup_llm())
+
+    # 结构化事件时间线(自动化测试 P0 数据基座)。**默认关闭**:正常运行完全不创建、不
+    # attach、零开销;仅测试时显式 AGENT_TIMELINE=1 启用。启用后也是纯旁路、后台线程写盘、
+    # 绝不阻塞/影响主流程。在 start() 之前 attach 才能捕获开场白那一轮。
+    _timeline = None
+    if os.getenv("AGENT_TIMELINE", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        try:
+            from event_timeline import EventTimeline, install_debug_log, remove_debug_log
+
+            _run_dir = Path(__file__).resolve().parents[2] / "runs" / time.strftime("%Y%m%d_%H%M%S")
+            _timeline = EventTimeline(_run_dir)
+            _timeline.attach(session)
+            ctx.add_shutdown_callback(_timeline.aclose)
+            # 全量 DEBUG 日志也整合进同一个 run 目录(取代旧的 .run/agent.log),非阻塞。
+            _dbg_state = install_debug_log(_run_dir)
+            ctx.add_shutdown_callback(lambda: remove_debug_log(_dbg_state))
+            _append_turn_log(f"TIMELINE dir={_timeline.directory}")
+            logger.info("event timeline + debug log -> %s", _timeline.directory)
+        except Exception as exc:  # 时间线初始化失败绝不阻塞启动
+            logger.warning("event timeline disabled: %s", exc)
+            _timeline = None
+
     await session.start(agent=VoiceAgent(), room=ctx.room)
 
-    _recorder = AudioRecorder(session_dir="recordings")
-    _recorder.install(session)
-    ctx.add_shutdown_callback(_recorder.aclose)
-    _append_turn_log(f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}")
+    if _timeline is not None:
+        # 测试模式:按真实时间轴录多轨(user/assistant/duplex)进同一个 run 目录。
+        try:
+            from test_recorder import TestRecorder
+
+            _recorder: object = TestRecorder(_timeline.directory)
+            _recorder.install(session)
+            _test_recorder = _recorder  # 暴露给 /api/mic 做暂停/继续
+            # 进入时与当前静音状态对齐(若启动时已静音则暂停录制)
+            _recorder.set_paused(bool(getattr(stt_engine, "muted", False)))
+            ctx.add_shutdown_callback(_recorder.aclose)
+            _append_turn_log(f"TEST_RECORDER dir={_recorder.directory}")
+        except Exception as exc:  # 录音初始化失败绝不阻塞启动
+            logger.warning("test recorder disabled: %s", exc)
+    else:
+        # 正常模式:沿用原有单文件混音录音(recordings/),不受测试功能影响。
+        _recorder = AudioRecorder(session_dir="recordings")
+        _recorder.install(session)
+        ctx.add_shutdown_callback(_recorder.aclose)
+        _append_turn_log(f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}")
 
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
         session.interrupt(force=True)
         logger.info("KWS strong interrupt: %r", keyword)
         _append_turn_log(f"STOP_KWS_EARLY keyword={keyword!r} -> force_interrupt")
+        if _timeline is not None:
+            _timeline.emit("interrupt.kws", {"keyword": keyword}, source="kws")
 
     _kws_config = KwsConfig.from_env()
     kws_spotter = NativeKwsSpotter.try_create(
@@ -1032,6 +1061,8 @@ async def entrypoint(ctx: JobContext) -> None:
             _online_state["accum"] = ""
             session.interrupt(force=True)
             _append_turn_log(f"STOP_ONLINE_EARLY text={accum!r} -> force_interrupt")
+            if _timeline is not None:
+                _timeline.emit("interrupt.online", {"text": accum, "kind": "stop"}, source="online")
             return
         core = _ACK_STRIP_RE.sub("", accum)
         meaningful = sum(1 for ch in core if ch not in _OVERLAP_ACK_CHARS)
@@ -1054,6 +1085,10 @@ async def entrypoint(ctx: JobContext) -> None:
         _append_turn_log(f"ONLINE_INTERRUPT_ACTIVE min_chars={_online_cfg.min_chars}")
     else:
         _append_turn_log(f"ONLINE_INTERRUPT_DISABLED reason={_online_reason!r}")
+
+    # 开场白:在所有 tap(录音/KWS/在线打断)装好之后触发,确保被如实录进录音
+    # (放在 on_enter 会早于录音 tap 安装 -> 漏录)。
+    session.generate_reply(instructions="用中文做一句简短自我介绍，并邀请用户开始说话。")
 
 
 if __name__ == "__main__":

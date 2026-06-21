@@ -23,7 +23,8 @@
 param(
     [int]$Port = 0,
     [switch]$Text,
-    [switch]$Background
+    [switch]$Background,
+    [switch]$Test
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,6 +69,13 @@ if (Test-Path $envFile) {
 if (-not $env:LIVEKIT_URL)        { $env:LIVEKIT_URL = "ws://127.0.0.1:7880" }
 if (-not $env:LIVEKIT_API_KEY)    { $env:LIVEKIT_API_KEY = "devkeydevkeydevkeydevkeydevkey12" }
 if (-not $env:LIVEKIT_API_SECRET) { $env:LIVEKIT_API_SECRET = "devsecretdevsecretdevsecretdevse" }
+
+# --- Test mode: enable the opt-in test tooling (timeline + debug log + aligned
+#     multi-track recording) into runs\<ts>\. Off by default; -Test turns it on. ---
+if ($Test) {
+    $env:AGENT_TIMELINE = "1"
+    Write-Host "Test mode ON: timeline + recording -> runs\<timestamp>\" -ForegroundColor Yellow
+}
 
 # --- UTF-8 so the Chinese console output doesn't crash on Windows ------------
 $env:PYTHONUTF8 = "1"
