@@ -15,9 +15,9 @@ import os
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from livekit import rtc
 from livekit.agents.voice import io
@@ -88,12 +88,15 @@ class KwsConfig:
     debounce_ms: int = 800
 
     @classmethod
-    def from_env(cls) -> "KwsConfig":
-        keywords = tuple(
-            token.strip()
-            for token in os.getenv("XIAOGE_KWS_KEYWORDS", "").split("|")
-            if token.strip()
-        ) or DEFAULT_KEYWORDS
+    def from_env(cls) -> KwsConfig:
+        keywords = (
+            tuple(
+                token.strip()
+                for token in os.getenv("XIAOGE_KWS_KEYWORDS", "").split("|")
+                if token.strip()
+            )
+            or DEFAULT_KEYWORDS
+        )
         return cls(
             enable=_parse_bool(os.getenv("XIAOGE_KWS_ENABLE_NATIVE", "1")),
             model_dir=(os.getenv("XIAOGE_KWS_MODEL_DIR", "").strip() or _default_model_dir()),
@@ -139,7 +142,7 @@ class NativeKwsSpotter:
         *,
         loop: asyncio.AbstractEventLoop,
         on_hit: Callable[[str], None],
-    ) -> "NativeKwsSpotter | None":
+    ) -> NativeKwsSpotter | None:
         reason = _unavailable_reason(config)
         if reason is not None:
             logger.info("native KWS disabled: %s", reason)
@@ -297,7 +300,9 @@ def _write_keywords_file(path: Path, keywords: tuple[str, ...]) -> None:
 def _phrase_to_keyword_line(phrase: str) -> str:
     if pinyin is None or Style is None:
         return ""
-    clean = "".join(ch for ch in phrase.strip() if not ch.isspace() and ch not in "，,。！？!?；;、")
+    clean = "".join(
+        ch for ch in phrase.strip() if not ch.isspace() and ch not in "，,。！？!?；;、"
+    )
     if not clean:
         return ""
     initials = pinyin(clean, style=Style.INITIALS, strict=False)

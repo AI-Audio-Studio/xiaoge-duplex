@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import queue
-import re
 import ssl
 import threading
 import time
@@ -17,11 +16,10 @@ import aiohttp
 import dashscope
 from dashscope.audio.qwen_tts_realtime.qwen_tts_realtime import (
     AudioFormat as BailianAudioFormat,
-)
-from dashscope.audio.qwen_tts_realtime.qwen_tts_realtime import (
     QwenTtsRealtime,
     QwenTtsRealtimeCallback,
 )
+
 from livekit import rtc
 from livekit.agents import APIConnectOptions, LanguageCode, stt, tts, utils
 from livekit.agents._exceptions import APIConnectionError, APIStatusError
@@ -136,7 +134,9 @@ class FunASROfflineSTT(stt.STT):
         self._opts = FunASROptions(
             websocket_url=websocket_url or os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090"),
             sample_rate=sample_rate,
-            verify_ssl=verify_ssl if verify_ssl is not None else _env_bool("FUNASR_VERIFY_SSL", False),
+            verify_ssl=verify_ssl
+            if verify_ssl is not None
+            else _env_bool("FUNASR_VERIFY_SSL", False),
             language=language,
         )
         self._session = session
@@ -269,7 +269,11 @@ class FunASROfflineSTT(stt.STT):
                 await self._reset_ws()
                 transcript, request_id = await self._recognize_once(pcm, conn_options)
 
-        event_language = LanguageCode(language) if language is not NOT_GIVEN else LanguageCode(self._opts.language)
+        event_language = (
+            LanguageCode(language)
+            if language is not NOT_GIVEN
+            else LanguageCode(self._opts.language)
+        )
         logger.info(
             "funasr final transcript request_id=%s text=%r",
             request_id,
@@ -493,7 +497,9 @@ class FunASRStreamingSTT(stt.STT):
         self._opts = FunASROptions(
             websocket_url=websocket_url or os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090"),
             sample_rate=sample_rate,
-            verify_ssl=verify_ssl if verify_ssl is not None else _env_bool("FUNASR_VERIFY_SSL", False),
+            verify_ssl=verify_ssl
+            if verify_ssl is not None
+            else _env_bool("FUNASR_VERIFY_SSL", False),
             language=language,
         )
         self._session = session
@@ -592,9 +598,7 @@ class _FunASRStream(stt.RecognizeStream):
                             await ws.send_bytes(bytes(data.data))
                 finally:
                     with contextlib.suppress(Exception):
-                        await ws.send_str(
-                            json.dumps({"is_speaking": False}, ensure_ascii=False)
-                        )
+                        await ws.send_str(json.dumps({"is_speaking": False}, ensure_ascii=False))
 
             # FunASR 2pass 常给碎片 final 加前导标点（"，这"/"。这片子"），判停模型会
             # 当成"句子没说完"而干等到 max_delay。剥掉前导标点让 EOU 判断更准。
@@ -676,7 +680,9 @@ class _BailianCallback(QwenTtsRealtimeCallback):
     def on_event(self, message: dict) -> None:
         event_type = message.get("type")
         if event_type == "response.audio.delta":
-            delta = message.get("delta") or message.get("response", {}).get("audio", {}).get("delta")
+            delta = message.get("delta") or message.get("response", {}).get("audio", {}).get(
+                "delta"
+            )
             if delta:
                 self.audio.extend(base64.b64decode(delta))
         elif event_type in ("error", "response.error"):
@@ -792,7 +798,9 @@ class _QwenStreamCallback(QwenTtsRealtimeCallback):
         self.audio_queue: queue.Queue[bytes | Exception | None] | None = None
         self.audio_done: threading.Event | None = None
 
-    def bind(self, audio_queue: queue.Queue[bytes | Exception | None], audio_done: threading.Event) -> None:
+    def bind(
+        self, audio_queue: queue.Queue[bytes | Exception | None], audio_done: threading.Event
+    ) -> None:
         self.audio_queue = audio_queue
         self.audio_done = audio_done
 
@@ -802,7 +810,9 @@ class _QwenStreamCallback(QwenTtsRealtimeCallback):
             q = self.audio_queue
             if q is None:
                 return  # 预热连接未绑定到某轮，丢弃悬空音频
-            delta = message.get("delta") or message.get("response", {}).get("audio", {}).get("delta")
+            delta = message.get("delta") or message.get("response", {}).get("audio", {}).get(
+                "delta"
+            )
             if delta:
                 try:
                     q.put(base64.b64decode(delta))
@@ -1080,9 +1090,9 @@ class HttpStreamingTTS(tts.TTS):
             sample_rate=sample_rate,
             num_channels=1,
         )
-        self._url = (
-            (base_url or os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")).rstrip("/") + "/tts"
-        )
+        self._url = (base_url or os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")).rstrip(
+            "/"
+        ) + "/tts"
         self._speaker = speaker
         self._speed = float(os.getenv("HTTP_TTS_SPEED", str(speed)))
         self._chunk_size = chunk_size
@@ -1120,7 +1130,9 @@ class HttpStreamingTTS(tts.TTS):
     ) -> None:
         """POST 单句文本，把 PCM 块逐一 push 到 emitter。不调用 flush()，由调用方决定时机。"""
         payload = {"text": text, "speaker": self._speaker, "speed": self._speed}
-        timeout = aiohttp.ClientTimeout(connect=_TTS_CONNECT_TIMEOUT, sock_connect=_TTS_CONNECT_TIMEOUT)
+        timeout = aiohttp.ClientTimeout(
+            connect=_TTS_CONNECT_TIMEOUT, sock_connect=_TTS_CONNECT_TIMEOUT
+        )
         async with session.post(self._url, json=payload, timeout=timeout) as resp:
             if resp.status != 200:
                 body = await resp.text()
@@ -1154,9 +1166,7 @@ class _HttpChunkedStream(tts.ChunkedStream):
 
 
 class _HttpSynthesizeStream(tts.SynthesizeStream):
-    def __init__(
-        self, *, tts: HttpStreamingTTS, conn_options: APIConnectOptions
-    ) -> None:
+    def __init__(self, *, tts: HttpStreamingTTS, conn_options: APIConnectOptions) -> None:
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts = tts
 

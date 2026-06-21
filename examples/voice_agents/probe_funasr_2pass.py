@@ -19,10 +19,13 @@ import time
 import wave
 
 import aiohttp
+
 from livekit import rtc
 
 WS_URL = os.getenv("FUNASR_WS_URL", "wss://60.205.197.165:10090")
-WAV_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "tests", "test_realtime", "weather_question.wav")
+WAV_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "..", "tests", "test_realtime", "weather_question.wav"
+)
 TARGET_SR = 16000
 CHUNK_BYTES = 3200  # 100ms @ 16k mono 16-bit
 SEND_INTERVAL = 0.01
@@ -60,7 +63,7 @@ def load_pcm_16k(path: str) -> bytes:
 
 async def main() -> int:
     pcm = load_pcm_16k(WAV_PATH)
-    print(f"[pcm] resampled 16k mono bytes={len(pcm)} (~{len(pcm)/2/TARGET_SR:.2f}s)")
+    print(f"[pcm] resampled 16k mono bytes={len(pcm)} (~{len(pcm) / 2 / TARGET_SR:.2f}s)")
 
     ssl_ctx = None
     if WS_URL.startswith("wss://"):

@@ -35,6 +35,7 @@ logger = logging.getLogger("audio-recorder")
 
 try:
     import numpy as _np
+
     _HAS_NUMPY = True
 except ImportError:
     _HAS_NUMPY = False
@@ -51,7 +52,7 @@ def _mix_pcm16(mic: bytes, tts: bytes) -> bytes:
     n = min(len(mic), len(tts)) // 2  # 可混音的采样数
     if _HAS_NUMPY:
         a = _np.frombuffer(mic, dtype=_np.int16).astype(_np.int32)
-        b = _np.frombuffer(tts[:n * 2], dtype=_np.int16).astype(_np.int32)
+        b = _np.frombuffer(tts[: n * 2], dtype=_np.int16).astype(_np.int32)
         a[:n] = _np.clip(a[:n] + b, -32768, 32767)
         return a.astype(_np.int16).tobytes()
     else:
@@ -171,6 +172,7 @@ class _ConversationWavWriter:
 
 # ── AudioInput / AudioOutput 旁路 ─────────────────────────────────────────────
 
+
 class RecordingTapAudioInput(io.AudioInput):
     def __init__(self, source: io.AudioInput, writer: _ConversationWavWriter) -> None:
         super().__init__(label="recording-tap-input", source=source)
@@ -209,6 +211,7 @@ class RecordingTapAudioOutput(io.AudioOutput):
 
 
 # ── 对外接口 ──────────────────────────────────────────────────────────────────
+
 
 class AudioRecorder:
     """安装到 AgentSession，把麦克风和 TTS 混音录成单个对话 WAV。"""

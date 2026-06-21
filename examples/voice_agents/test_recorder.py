@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+
 from livekit import rtc
 from livekit.agents.voice import io
 
@@ -53,7 +54,9 @@ def _frames_to_us(frame_count: int, rate: int) -> int:
     return int(round(frame_count * 1_000_000 / rate)) if (frame_count and rate) else 0
 
 
-def _smoothed_track(segments: list[tuple[int, np.ndarray]], *, rate: int, base_at_us: int) -> np.ndarray:
+def _smoothed_track(
+    segments: list[tuple[int, np.ndarray]], *, rate: int, base_at_us: int
+) -> np.ndarray:
     """按 at_us 放置(抖动容差内紧贴游标拼接、直接赋值),返回 mono int16 @ rate。
 
     连续采集的帧会被紧贴拼接成无缝音频;只有真实停顿(desired 远超 cursor)处才插静音。
@@ -88,12 +91,16 @@ def _resample_whole(track: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarr
     if src_rate == dst_rate or track.size == 0:
         return track
     rs = rtc.AudioResampler(
-        input_rate=src_rate, output_rate=dst_rate, num_channels=1,
+        input_rate=src_rate,
+        output_rate=dst_rate,
+        num_channels=1,
         quality=rtc.AudioResamplerQuality.HIGH,
     )
     frame = rtc.AudioFrame(
-        data=track.tobytes(), sample_rate=src_rate,
-        num_channels=1, samples_per_channel=int(track.shape[0]),
+        data=track.tobytes(),
+        sample_rate=src_rate,
+        num_channels=1,
+        samples_per_channel=int(track.shape[0]),
     )
     out = list(rs.push(frame)) + list(rs.flush())
     if not out:
@@ -148,8 +155,9 @@ class TestRecorder:
         """麦克风关闭 -> 暂停录用户轨;开启 -> 继续。按真实时间放置,暂停段在录音里
         表现为该时段的静默(如实反映"那段时间没采用户音")。助手轨不受影响。"""
         self._paused = bool(paused)
-        logger.info("recording %s (mic %s)", "paused" if paused else "resumed",
-                    "off" if paused else "on")
+        logger.info(
+            "recording %s (mic %s)", "paused" if paused else "resumed", "off" if paused else "on"
+        )
 
     # ── 采集(事件循环线程,非阻塞:仅 frombuffer/下混 + 加锁追加)──────────────
     @staticmethod
@@ -179,7 +187,7 @@ class TestRecorder:
         except Exception:
             pass
 
-    def install(self, session: "AgentSession") -> None:
+    def install(self, session: AgentSession) -> None:
         self._dir.mkdir(parents=True, exist_ok=True)
         if session.input.audio is not None:
             session.input.audio = _RecInput(session.input.audio, self)
@@ -249,16 +257,26 @@ class TestRecorder:
             out_rate = max(ur, ar)
 
         # 各轨按原生率平滑放置(不逐块重采样),再整轨一次性统一到 out_rate。
-        u = _smoothed_track([(a, m) for (a, m, _r) in user], rate=ur, base_at_us=base) if ur else np.zeros((0,), np.int16)
-        a = _smoothed_track([(a2, m) for (a2, m, _r) in assistant], rate=ar, base_at_us=base) if ar else np.zeros((0,), np.int16)
+        u = (
+            _smoothed_track([(a, m) for (a, m, _r) in user], rate=ur, base_at_us=base)
+            if ur
+            else np.zeros((0,), np.int16)
+        )
+        a = (
+            _smoothed_track([(a2, m) for (a2, m, _r) in assistant], rate=ar, base_at_us=base)
+            if ar
+            else np.zeros((0,), np.int16)
+        )
         if ur and ur != out_rate:
             u = _resample_whole(u, ur, out_rate)
         if ar and ar != out_rate:
             a = _resample_whole(a, ar, out_rate)
 
         n = max(int(u.shape[0]), int(a.shape[0]))
-        up = np.zeros((n,), dtype=np.int16); up[: u.shape[0]] = u
-        ap = np.zeros((n,), dtype=np.int16); ap[: a.shape[0]] = a
+        up = np.zeros((n,), dtype=np.int16)
+        up[: u.shape[0]] = u
+        ap = np.zeros((n,), dtype=np.int16)
+        ap[: a.shape[0]] = a
         stereo = np.zeros((n, 2), dtype=np.int16)
         stereo[:, 0] = up  # 左 = 用户
         stereo[:, 1] = ap  # 右 = 助手
@@ -273,14 +291,18 @@ class TestRecorder:
             "format": "pcm_s16le_wav",
             "tracks": [
                 {
-                    "name": "user", "file": "user.wav", "channels": 1,
+                    "name": "user",
+                    "file": "user.wav",
+                    "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in user), default=None),
                     "segmentCount": len(user),
                     "frameCount": int(up.shape[0]),
                     "durationUs": _frames_to_us(int(up.shape[0]), out_rate),
                 },
                 {
-                    "name": "assistant", "file": "assistant.wav", "channels": 1,
+                    "name": "assistant",
+                    "file": "assistant.wav",
+                    "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in assistant), default=None),
                     "segmentCount": len(assistant),
                     "frameCount": int(ap.shape[0]),
@@ -288,9 +310,12 @@ class TestRecorder:
                 },
             ],
             "duplex": {
-                "file": "duplex.wav", "channels": 2,
-                "left": "user", "right": "assistant",
-                "frameCount": n, "durationUs": _frames_to_us(n, out_rate),
+                "file": "duplex.wav",
+                "channels": 2,
+                "left": "user",
+                "right": "assistant",
+                "frameCount": n,
+                "durationUs": _frames_to_us(n, out_rate),
             },
         }
         _write_text_atomic(
