@@ -40,6 +40,7 @@ from custom_audio_providers import (
 )
 from dotenv import load_dotenv
 from kws_interrupt import KwsConfig, KwsTapAudioInput, NativeKwsSpotter, _unavailable_reason
+from live_transcript import LiveTranscript, LiveTranscriptConfig
 from online_interrupt import (
     OnlineAsrTap,
     OnlineInterruptConfig,
@@ -396,6 +397,12 @@ h1{font-size:16px;font-weight:600;flex:1}
 .bubble.assistant{align-self:flex-start;background:#1a1a2e;border:1px solid #252545;
   border-bottom-left-radius:3px}
 .bubble .ts{font-size:11px;margin-top:4px;opacity:.4}
+.bubble.appear{animation:bubbleIn .18s ease-out}
+@keyframes bubbleIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.bubble.user.live{opacity:.7}
+.live-dots i{animation:liveBlink 1.2s infinite}
+.live-dots i:nth-child(2){animation-delay:.2s}.live-dots i:nth-child(3){animation-delay:.4s}
+@keyframes liveBlink{0%,100%{opacity:.25}50%{opacity:1}}
 .sys-msg{align-self:center;font-size:11px;color:#374151;padding:2px 10px}
 .sbar{background:#0a0a11;padding:6px 20px;font-size:11px;color:#374151;display:flex;
   gap:16px;border-top:1px solid #131320;flex-shrink:0}
@@ -433,6 +440,8 @@ h1{font-size:16px;font-weight:600;flex:1}
 </div>
 <script>
 var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
+var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live 气泡
+var LIVE_DANGLING_MS=4000;                  // 无定稿的残留气泡兜底淡出(毫秒)
 
 function conn(){
   if(ws && ws.readyState===WebSocket.OPEN) return;
@@ -453,13 +462,54 @@ function conn(){
 }
 
 function handle(m){
-  if(m.type==='message') addMsg(m.role, m.text, m.ts);
+  if(m.type==='user_speaking' && m.state==='start') startLive();
+  if(m.type==='user_partial') updateLive(m.text);
+  if(m.type==='message'){
+    if(m.role==='user' && liveBubble) finalizeLive(m.text, m.ts);  // live 气泡定稿(看似修正)
+    else addMsg(m.role, m.text, m.ts);
+  }
   if(m.type==='state'){
     if(m.muted       !== undefined) setMic(m.muted);
     if(m.stt_backend !== undefined) setAsr(m.stt_backend);
     if(m.tts_backend !== undefined) setTts(m.tts_backend);
     if(m.agent_state !== undefined) setAgent(m.agent_state);
   }
+}
+
+// ── 用户实时转写:单一 live 气泡(开口出现、partial 边长、final 定稿)──────────
+// 一次连续说话 = 一个气泡:startLive 只在"新一轮"被后端调用(见 live_transcript.py);
+// 连续说话的小停顿不会重开。无定稿的残留气泡由超时兜底丢弃。
+function startLive(){
+  discardLive();
+  liveBubble=document.createElement('div');
+  liveBubble.className='bubble user live appear';
+  liveBubble.innerHTML='<div class="live-txt"><span class="live-dots">聆听中<i>.</i><i>.</i><i>.</i></span></div>';
+  log().appendChild(liveBubble); log().scrollTop=log().scrollHeight;
+  armLive();
+}
+function updateLive(text){
+  if(!liveBubble) startLive();
+  if(text){ liveBubble.querySelector('.live-txt').textContent=text; }
+  log().scrollTop=log().scrollHeight;
+  armLive();
+}
+function finalizeLive(text, ts){
+  if(!liveBubble){ addMsg('user', text, ts); return; }
+  if(liveTimer){ clearTimeout(liveTimer); liveTimer=null; }
+  liveBubble.className='bubble user';
+  var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
+  liveBubble.innerHTML='<div>'+esc(text||'')+'</div><div class="ts">'+t+'</div>';
+  liveBubble=null;
+  id('sbMsgs').textContent=(++msgN)+' 条消息';
+  log().scrollTop=log().scrollHeight;
+}
+function discardLive(){
+  if(liveTimer){ clearTimeout(liveTimer); liveTimer=null; }
+  if(liveBubble){ liveBubble.remove(); liveBubble=null; }
+}
+function armLive(){
+  if(liveTimer) clearTimeout(liveTimer);
+  liveTimer=setTimeout(discardLive, LIVE_DANGLING_MS);
 }
 
 function setAgent(s){
@@ -487,7 +537,7 @@ function setAsr(b){
 function addMsg(role, text, ts){
   if(!text) return;
   var d=document.createElement('div');
-  d.className='bubble '+role;
+  d.className='bubble '+role+' appear';
   var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
   d.innerHTML='<div>'+esc(text)+'</div><div class="ts">'+t+'</div>';
   log().appendChild(d);
@@ -1098,6 +1148,14 @@ async def entrypoint(ctx: JobContext) -> None:
             f"AUDIO_RECORDER dir={_recorder.directory} input={session.input.audio!r} output={session.output.audio!r}"
         )
 
+    # 实时转写显示(Web 面板 live 气泡):独立模块,解耦/非阻塞/默认可 LIVE_TRANSCRIPT=0 关。
+    # 数据源是下面在线 2pass tap 的"扇出";不动判停/STT/TTS/上下文路径。
+    _lt_cfg = LiveTranscriptConfig.from_env()
+    _live = LiveTranscript(broadcast, _lt_cfg, timeline=_timeline) if _lt_cfg.enabled else None
+    if _live is not None:
+        _live.attach(session)
+        _append_turn_log(f"LIVE_TRANSCRIPT new_turn_gap={_lt_cfg.new_turn_gap_s}")
+
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
         session.interrupt(force=True)
@@ -1152,9 +1210,17 @@ async def entrypoint(ctx: JobContext) -> None:
                 f"OVERLAP_ONLINE_INTERRUPT text={accum!r} chars={meaningful} -> interrupt"
             )
 
+    def _online_text_fanout(piece: str, segment_end: bool) -> None:
+        # 打断逻辑优先、原样执行;显示为 best-effort(feed_online 内部已全兜底,不会拖慢打断)。
+        _on_online_text(piece, segment_end)
+        if _live is not None:
+            _live.feed_online(piece, segment_end)
+
     _online_reason = _online_unavailable_reason(_online_cfg)
     if _online_reason is None and session.input.audio is not None:
-        online_tap = OnlineAsrTap(_online_cfg, hotwords=_funasr_hotwords(), on_text=_on_online_text)
+        online_tap = OnlineAsrTap(
+            _online_cfg, hotwords=_funasr_hotwords(), on_text=_online_text_fanout
+        )
         online_tap.start()
         session.input.audio = OnlineTapAudioInput(session.input.audio, online_tap)
         ctx.add_shutdown_callback(online_tap.aclose)
