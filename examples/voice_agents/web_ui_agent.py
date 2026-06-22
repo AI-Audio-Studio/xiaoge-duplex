@@ -31,6 +31,7 @@ import httpx
 import openai
 from audio_recorder import AudioRecorder
 from custom_audio_providers import (
+    CosyVoiceStreamingTTS,
     FunASROfflineSTT,
     HttpStreamingTTS,
     Qwen3ASROfflineSTT,
@@ -289,13 +290,15 @@ class SwitchableTTS(tts.TTS):
     here is enough — the next synthesis call will use the new backend.
     """
 
-    def __init__(self, initial_backend: QwenStreamingTTS | HttpStreamingTTS) -> None:
+    def __init__(
+        self, initial_backend: QwenStreamingTTS | HttpStreamingTTS | CosyVoiceStreamingTTS
+    ) -> None:
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=True),
             sample_rate=initial_backend.sample_rate,
             num_channels=initial_backend.num_channels,
         )
-        self._backend: QwenStreamingTTS | HttpStreamingTTS = initial_backend
+        self._backend: QwenStreamingTTS | HttpStreamingTTS | CosyVoiceStreamingTTS = initial_backend
         self._backend.on("error", self._on_backend_error)
 
     def _on_backend_error(self, error: object) -> None:
@@ -312,8 +315,8 @@ class SwitchableTTS(tts.TTS):
         return self._backend.provider
 
     def switch_backend(
-        self, new_backend: QwenStreamingTTS | HttpStreamingTTS
-    ) -> QwenStreamingTTS | HttpStreamingTTS:
+        self, new_backend: QwenStreamingTTS | HttpStreamingTTS | CosyVoiceStreamingTTS
+    ) -> QwenStreamingTTS | HttpStreamingTTS | CosyVoiceStreamingTTS:
         old = self._backend
         try:
             old.off("error", self._on_backend_error)
@@ -354,7 +357,7 @@ _agent_loop: asyncio.AbstractEventLoop | None = None
 _switchable_stt: SwitchableSTT | None = None
 _switchable_tts: SwitchableTTS | None = None
 _test_recorder = None  # 测试模式下的多轨录音器(供 /api/mic 暂停/继续录制)
-_tts_backend_key: str = "qwen"
+_tts_backend_key: str = "cosyvoice"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
 
@@ -414,7 +417,8 @@ h1{font-size:16px;font-weight:600;flex:1}
   </div>
   <div class="asr-grp">
     <label>TTS 模型：</label>
-    <button class="asr-tab on" id="tabTtsQwen" onclick="switchTTS('qwen')">Qwen DashScope</button>
+    <button class="asr-tab"    id="tabTtsQwen" onclick="switchTTS('qwen')">Qwen DashScope</button>
+    <button class="asr-tab on" id="tabTtsCosy" onclick="switchTTS('cosyvoice')">CosyVoice</button>
     <button class="asr-tab"    id="tabTtsHttp" onclick="switchTTS('http')">HTTP TTS</button>
   </div>
   <button class="btn" id="clearBtn" onclick="clearLog()">清空记录</button>
@@ -424,11 +428,11 @@ h1{font-size:16px;font-weight:600;flex:1}
   <span id="sbWs">WS: 断开</span>
   <span id="sbMic">麦克风: 开启</span>
   <span id="sbAsr">ASR: Qwen3-流式</span>
-  <span id="sbTts">TTS: Qwen DashScope</span>
+  <span id="sbTts">TTS: CosyVoice</span>
   <span id="sbMsgs" style="margin-left:auto">0 条消息</span>
 </div>
 <script>
-var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='qwen', rt=null;
+var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
 
 function conn(){
   if(ws && ws.readyState===WebSocket.OPEN) return;
@@ -507,15 +511,16 @@ async function toggleMic(){
 
 function setTts(b){
   curTts=b;
-  var label=b==='http'?'HTTP TTS':'Qwen DashScope';
+  var labels={'qwen':'Qwen DashScope','http':'HTTP TTS','cosyvoice':'CosyVoice'};
   id('tabTtsQwen').className='asr-tab'+(b==='qwen'?' on':'');
+  id('tabTtsCosy').className='asr-tab'+(b==='cosyvoice'?' on':'');
   id('tabTtsHttp').className='asr-tab'+(b==='http'?' on':'');
-  id('sbTts').textContent='TTS: '+label;
+  id('sbTts').textContent='TTS: '+(labels[b]||b);
 }
 
 async function switchTTS(b){
   if(b===curTts) return;
-  var labels={'qwen':'Qwen DashScope','http':'HTTP TTS'};
+  var labels={'qwen':'Qwen DashScope','http':'HTTP TTS','cosyvoice':'CosyVoice'};
   sysMsg('正在切换 TTS 到 '+(labels[b]||b)+'…');
   var r=await fetch('/api/tts',{method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -742,26 +747,35 @@ def build_stt() -> SwitchableSTT:
     return SwitchableSTT(_make_stt_backend(backend))
 
 
-_TTS_BACKENDS = {"qwen", "http"}
+_TTS_BACKENDS = {"qwen", "http", "cosyvoice"}
 
 
-def _make_tts_backend(backend: str) -> QwenStreamingTTS | HttpStreamingTTS:
+def _make_tts_backend(backend: str) -> QwenStreamingTTS | HttpStreamingTTS | CosyVoiceStreamingTTS:
     """Construct a (non-switchable) TTS backend. Single source of truth shared by
     build_tts() and the /api/tts switch handler — add a new backend only here."""
     if backend == "http":
         url = os.getenv("HTTP_TTS_URL", "http://10.212.164.230:8001")
         logger.info("TTS backend: HttpStreamingTTS  url=%s/tts", url)
         return HttpStreamingTTS(base_url=url)
+    if backend == "cosyvoice":
+        model = os.getenv("COSYVOICE_MODEL", "cosyvoice-v3-flash")
+        # 默认女声(贴小歌"暖心知己"人设)。可用 COSYVOICE_VOICE 覆盖切换试听。
+        # 其他候选女声(同为 cosyvoice-v3 系列):
+        #   longanwen_v3 龙安温 优雅知性女 · longanrou_v3 龙安柔 温柔闺蜜女
+        #   longanli_v3  龙安莉 利落从容女
+        voice = os.getenv("COSYVOICE_VOICE", "longxiaochun_v3")
+        logger.info("TTS backend: CosyVoiceStreamingTTS  model=%s voice=%s", model, voice)
+        return CosyVoiceStreamingTTS(model=model, voice=voice)
     logger.info("TTS backend: QwenStreamingTTS")
     return QwenStreamingTTS()
 
 
 def build_tts() -> SwitchableTTS:
     global _tts_backend_key
-    backend = os.getenv("TTS_BACKEND", "qwen").strip().lower()
+    backend = os.getenv("TTS_BACKEND", "cosyvoice").strip().lower()
     if backend not in _TTS_BACKENDS:
-        logger.warning("unknown TTS_BACKEND=%r, falling back to qwen", backend)
-        backend = "qwen"
+        logger.warning("unknown TTS_BACKEND=%r, falling back to cosyvoice", backend)
+        backend = "cosyvoice"
     _tts_backend_key = backend
     return SwitchableTTS(_make_tts_backend(backend))
 
@@ -815,6 +829,7 @@ class VoiceAgent(Agent):
 # 保持本色
 - 始终以小歌的身份自然回应，别动不动就说“我是AI”“我没有真实的……”来推开话题。
 - 对方让你讲故事、讲笑话、出主意、陪聊这类事，就直接做；可以先用一句问清想要哪种，再开始。
+- 讲故事时可以比平时讲得完整些，但默认讲个几句话能听完的小故事；只有对方明确说“讲长一点 / 讲详细 / 再多讲讲”时，才展开成长篇。
 
 # 怎么说话（语音场景，务必遵守）
 - 短句口语，像平常聊天，通常一到三句，别一次说太多。
