@@ -47,6 +47,7 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+from turn_config import TurnConfig
 
 from livekit.agents import (
     Agent,
@@ -956,7 +957,9 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.35)
+    # 判停旋钮集中在 TurnConfig;默认 = 原写死值(0.35),不设 TURN_* 即无变化。
+    _tc = TurnConfig.from_env()
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=_tc.vad_min_silence_s)
 
 
 server.setup_fnc = prewarm
@@ -982,21 +985,13 @@ async def entrypoint(ctx: JobContext) -> None:
     }
 
     llm = build_llm()
+    _turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参
     session = AgentSession(
         llm=llm,
         stt=StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"]),
         vad=ctx.proc.userdata["vad"],
         tts=tts_engine,
-        turn_handling={
-            "turn_detection": MultilingualModel(),
-            "interruption": {
-                "min_words": 3,
-                "min_duration": 2.0,
-                "backchannel_boundary": (1.8, 3.5),
-            },
-            "endpointing": {"min_delay": 0.3, "max_delay": 0.6},
-            "preemptive_generation": {"preemptive_tts": True},
-        },
+        turn_handling=_turn_cfg.turn_handling(MultilingualModel()),
     )
 
     turn_trace: dict[str, float] = {"started_at": time.time()}
@@ -1114,6 +1109,13 @@ async def entrypoint(ctx: JobContext) -> None:
             _timeline = EventTimeline(_run_dir)
             _timeline.attach(session)
             ctx.add_shutdown_callback(_timeline.aclose)
+            # 判停 KPI 仪表盘(仅测试模式;旁路只读,收尾写 runs/<ts>/turn_kpis.json)。
+            from turn_metrics import TurnMetrics
+
+            _turn_metrics = TurnMetrics(_timeline.directory, timeline=_timeline)
+            _turn_metrics.attach(session)
+            ctx.add_shutdown_callback(_turn_metrics.aclose)
+            _append_turn_log("TURN_METRICS attached")
             # 全量 DEBUG 日志也整合进同一个 run 目录(取代旧的 .run/agent.log),非阻塞。
             _dbg_state = install_debug_log(_run_dir)
             ctx.add_shutdown_callback(lambda: remove_debug_log(_dbg_state))
