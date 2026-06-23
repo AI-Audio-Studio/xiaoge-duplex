@@ -1101,6 +1101,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # attach、零开销;仅测试时显式 AGENT_TIMELINE=1 启用。启用后也是纯旁路、后台线程写盘、
     # 绝不阻塞/影响主流程。在 start() 之前 attach 才能捕获开场白那一轮。
     _timeline = None
+    _turn_metrics = None
     if os.getenv("AGENT_TIMELINE", "0").strip().lower() in {"1", "true", "yes", "on"}:
         try:
             from event_timeline import EventTimeline, install_debug_log, remove_debug_log
@@ -1126,6 +1127,24 @@ async def entrypoint(ctx: JobContext) -> None:
             _timeline = None
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
+
+    # 录音回放注入(自动化测试 阶段1):仅设了 AGENT_SCENARIO 才启用,默认正常麦克风。
+    # 必须在 recorder/KWS/online tap 包裹之前替换,使注入音频被如实录音并经各 tap。
+    _scenario = os.getenv("AGENT_SCENARIO", "").strip()
+    if _scenario:
+        try:
+            from scripted_audio import ScriptedAudioInput
+
+            _si = ScriptedAudioInput.from_scenario(_scenario)
+            session.input.audio = _si
+            if _turn_metrics is not None and _si.expect:
+                _turn_metrics.set_expected(_si.expect)
+            _append_turn_log(
+                f"SCENARIO_INJECT path={_scenario} expect={'Y' if _si.expect else 'N'}"
+            )
+            logger.info("scenario injection active: %s", _scenario)
+        except Exception as exc:  # 注入失败绝不阻塞:退回正常麦克风
+            logger.warning("scenario injection disabled: %s", exc)
 
     if _timeline is not None:
         # 测试模式:按真实时间轴录多轨(user/assistant/duplex)进同一个 run 目录。

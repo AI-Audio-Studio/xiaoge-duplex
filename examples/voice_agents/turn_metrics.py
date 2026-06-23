@@ -35,6 +35,19 @@ def _f(name: str, default: float) -> float:
         return default
 
 
+def _lcs_len(a: str, b: str) -> int:
+    """最长公共子序列长度(滚动数组,O(len(a)*len(b)))。"""
+    if not a or not b:
+        return 0
+    prev = [0] * (len(b) + 1)
+    for ca in a:
+        cur = [0] * (len(b) + 1)
+        for j, cb in enumerate(b, 1):
+            cur[j] = prev[j - 1] + 1 if ca == cb else max(prev[j], cur[j - 1])
+        prev = cur
+    return prev[len(b)]
+
+
 def _pctl(xs: list[float], p: float) -> float | None:
     if not xs:
         return None
@@ -197,6 +210,40 @@ class InterruptDetector(KpiDetector):
         return {"counts": dict(self.counts)}
 
 
+class CoverageDetector(KpiDetector):
+    """⑥ 识别覆盖率(注入模式真值):LCS(应识别文本, 实际合并文本)/len(应识别)。
+
+    ≈ 1 - 丢字率。仅当场景声明了 expect(由 TurnMetrics.set_expected 注入)才计算;
+    手测模式无 expect → {enabled: false},不影响其他 KPI。
+    """
+
+    key = "coverage"
+
+    def __init__(self) -> None:
+        self._expect: str | None = None
+        self._got = ""
+
+    def set_expected(self, text: str | None) -> None:
+        self._expect = (text or "").strip() or None
+
+    def feed_user_turn(self, rec: TurnRecord, prev_user: TurnRecord | None) -> None:
+        self._got += rec.text or ""
+
+    def summary(self) -> dict[str, Any]:
+        if not self._expect:
+            return {"enabled": False}
+        exp = "".join(self._expect.split())  # 去空白(中文无空格,英文也对齐)
+        got = "".join(self._got.split())
+        cov = (_lcs_len(exp, got) / len(exp)) if exp else 0.0
+        return {
+            "enabled": True,
+            "expected_chars": len(exp),
+            "recognized_chars": len(got),
+            "coverage": round(cov, 3),
+            "dropped_estimate": round(1 - cov, 3),
+        }
+
+
 class TurnMetrics:
     """挂到 AgentSession,旁路统计判停 KPI,收尾写 turn_kpis.json。"""
 
@@ -211,6 +258,7 @@ class TurnMetrics:
             FeltLatencyDetector(budget),
             EotDelayDetector(),
             InterruptDetector(),
+            CoverageDetector(),
         ]
         self._prev_user: TurnRecord | None = None
         self._last_user_stop_at: float | None = None
@@ -309,6 +357,12 @@ class TurnMetrics:
                 d.feed_felt(ms)
             except Exception:
                 pass
+
+    def set_expected(self, text: str | None) -> None:
+        """注入模式:把场景声明的应识别文本交给 CoverageDetector(算覆盖率/丢字)。"""
+        for d in self._detectors:
+            if isinstance(d, CoverageDetector):
+                d.set_expected(text)
 
     def _feed_interrupt(self, kind: str) -> None:
         for d in self._detectors:
