@@ -47,6 +47,7 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+from turn_config import TurnConfig
 
 from livekit.agents import (
     Agent,
@@ -956,7 +957,9 @@ server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.35)
+    # 判停旋钮集中在 TurnConfig;默认 = 原写死值(0.35),不设 TURN_* 即无变化。
+    _tc = TurnConfig.from_env()
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=_tc.vad_min_silence_s)
 
 
 server.setup_fnc = prewarm
@@ -982,21 +985,13 @@ async def entrypoint(ctx: JobContext) -> None:
     }
 
     llm = build_llm()
+    _turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参
     session = AgentSession(
         llm=llm,
         stt=StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"]),
         vad=ctx.proc.userdata["vad"],
         tts=tts_engine,
-        turn_handling={
-            "turn_detection": MultilingualModel(),
-            "interruption": {
-                "min_words": 3,
-                "min_duration": 2.0,
-                "backchannel_boundary": (1.8, 3.5),
-            },
-            "endpointing": {"min_delay": 0.3, "max_delay": 0.6},
-            "preemptive_generation": {"preemptive_tts": True},
-        },
+        turn_handling=_turn_cfg.turn_handling(MultilingualModel()),
     )
 
     turn_trace: dict[str, float] = {"started_at": time.time()}
@@ -1106,6 +1101,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # attach、零开销;仅测试时显式 AGENT_TIMELINE=1 启用。启用后也是纯旁路、后台线程写盘、
     # 绝不阻塞/影响主流程。在 start() 之前 attach 才能捕获开场白那一轮。
     _timeline = None
+    _turn_metrics = None
     if os.getenv("AGENT_TIMELINE", "0").strip().lower() in {"1", "true", "yes", "on"}:
         try:
             from event_timeline import EventTimeline, install_debug_log, remove_debug_log
@@ -1114,6 +1110,13 @@ async def entrypoint(ctx: JobContext) -> None:
             _timeline = EventTimeline(_run_dir)
             _timeline.attach(session)
             ctx.add_shutdown_callback(_timeline.aclose)
+            # 判停 KPI 仪表盘(仅测试模式;旁路只读,收尾写 runs/<ts>/turn_kpis.json)。
+            from turn_metrics import TurnMetrics
+
+            _turn_metrics = TurnMetrics(_timeline.directory, timeline=_timeline)
+            _turn_metrics.attach(session)
+            ctx.add_shutdown_callback(_turn_metrics.aclose)
+            _append_turn_log("TURN_METRICS attached")
             # 全量 DEBUG 日志也整合进同一个 run 目录(取代旧的 .run/agent.log),非阻塞。
             _dbg_state = install_debug_log(_run_dir)
             ctx.add_shutdown_callback(lambda: remove_debug_log(_dbg_state))
@@ -1124,6 +1127,24 @@ async def entrypoint(ctx: JobContext) -> None:
             _timeline = None
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
+
+    # 录音回放注入(自动化测试 阶段1):仅设了 AGENT_SCENARIO 才启用,默认正常麦克风。
+    # 必须在 recorder/KWS/online tap 包裹之前替换,使注入音频被如实录音并经各 tap。
+    _scenario = os.getenv("AGENT_SCENARIO", "").strip()
+    if _scenario:
+        try:
+            from scripted_audio import ScriptedAudioInput
+
+            _si = ScriptedAudioInput.from_scenario(_scenario)
+            session.input.audio = _si
+            if _turn_metrics is not None and _si.expect:
+                _turn_metrics.set_expected(_si.expect)
+            _append_turn_log(
+                f"SCENARIO_INJECT path={_scenario} expect={'Y' if _si.expect else 'N'}"
+            )
+            logger.info("scenario injection active: %s", _scenario)
+        except Exception as exc:  # 注入失败绝不阻塞:退回正常麦克风
+            logger.warning("scenario injection disabled: %s", exc)
 
     if _timeline is not None:
         # 测试模式:按真实时间轴录多轨(user/assistant/duplex)进同一个 run 目录。
