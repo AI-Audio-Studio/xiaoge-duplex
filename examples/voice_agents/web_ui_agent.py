@@ -970,9 +970,20 @@ async def entrypoint(ctx: JobContext) -> None:
     global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder
     _agent_loop = asyncio.get_running_loop()
 
-    stt_engine = build_stt()
-    _switchable_stt = stt_engine  # expose for web server
-    _append_turn_log(f"STT_START provider={stt_engine.provider}")
+    # 主STT:默认离线 FunASR(+StreamAdapter);STT_BACKEND=iflytek → 讯飞流式主STT
+    # (原生 interim/final、长句不丢内容、不过 StreamAdapter)。保留离线为回退。
+    _stt_mode = (os.getenv("STT_BACKEND") or "funasr").strip().lower()
+    if _stt_mode == "iflytek":
+        from iflytek_stt import IFlyTekRTASR
+
+        stt_engine = IFlyTekRTASR()
+        _switchable_stt = None  # 流式模式:面板 ASR 热切换不适用(改 .env 重启切换)
+        _stt_for_session = stt_engine
+    else:
+        stt_engine = build_stt()
+        _switchable_stt = stt_engine  # expose for web server(可热切换)
+        _stt_for_session = StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"])
+    _append_turn_log(f"STT_START provider={stt_engine.provider} mode={_stt_mode}")
 
     tts_engine = build_tts()
     _switchable_tts = tts_engine  # expose for web server
@@ -988,10 +999,12 @@ async def entrypoint(ctx: JobContext) -> None:
     _turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参
     session = AgentSession(
         llm=llm,
-        stt=StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"]),
+        stt=_stt_for_session,
         vad=ctx.proc.userdata["vad"],
         tts=tts_engine,
-        turn_handling=_turn_cfg.turn_handling(MultilingualModel()),
+        turn_handling=_turn_cfg.turn_handling(
+            MultilingualModel(unlikely_threshold=_turn_cfg.unlikely_threshold)
+        ),
     )
 
     turn_trace: dict[str, float] = {"started_at": time.time()}
@@ -1064,7 +1077,8 @@ async def entrypoint(ctx: JobContext) -> None:
         if event.new_state == "speaking":
             _overlap_turn_state["user_spoke_over_agent"] = session.agent_state == "speaking"
             asyncio.create_task(asyncio.to_thread(tts_engine.prewarm_connection))
-            asyncio.create_task(stt_engine.prewarm_connection())
+            if hasattr(stt_engine, "prewarm_connection"):
+                asyncio.create_task(stt_engine.prewarm_connection())
 
     @session.on("user_input_transcribed")
     def _on_stt(event) -> None:

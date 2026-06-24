@@ -48,6 +48,18 @@ def _b(name: str, default: bool) -> bool:
     return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _f_opt(name: str) -> float | None:
+    """可选 float:未设/空 → None(用模型默认值)。"""
+    v = os.getenv(name)
+    if v is None or not v.strip():
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        logger.warning("bad %s=%r, ignoring", name, v)
+        return None
+
+
 def _pair(name: str, default: tuple[float, float]) -> tuple[float, float]:
     v = os.getenv(name)
     if v is None or not v.strip():
@@ -75,6 +87,9 @@ class TurnConfig:
     interruption_min_words: int = 3
     interruption_min_duration_s: float = 2.0
     backchannel_boundary: tuple[float, float] = (1.8, 3.5)
+    # turn detector 判定阈值:EOU 概率 < 此值视作"没说完"→ 等 max_delay(更耐心)。
+    # None=用模型默认。调大=更多情况判"没说完"=更少过早提交(但延迟可能升)。
+    unlikely_threshold: float | None = None
 
     @classmethod
     def from_env(cls) -> TurnConfig:
@@ -86,6 +101,7 @@ class TurnConfig:
             interruption_min_words=_i("TURN_INTR_MIN_WORDS", 3),
             interruption_min_duration_s=_f("TURN_INTR_MIN_DURATION", 2.0),
             backchannel_boundary=_pair("TURN_INTR_BACKCHANNEL", (1.8, 3.5)),
+            unlikely_threshold=_f_opt("TURN_UNLIKELY_THRESHOLD"),
         )
 
     def turn_handling(self, turn_detection: Any) -> dict[str, Any]:
