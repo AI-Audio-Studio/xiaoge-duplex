@@ -41,6 +41,7 @@ from custom_audio_providers import (
 from dotenv import load_dotenv
 from kws_interrupt import KwsConfig, KwsTapAudioInput, NativeKwsSpotter, _unavailable_reason
 from live_transcript import LiveTranscript, LiveTranscriptConfig
+from mute_gate import MuteGate
 from online_interrupt import (
     OnlineAsrTap,
     OnlineInterruptConfig,
@@ -359,6 +360,7 @@ _agent_loop: asyncio.AbstractEventLoop | None = None
 _switchable_stt: SwitchableSTT | None = None
 _switchable_tts: SwitchableTTS | None = None
 _test_recorder = None  # 测试模式下的多轨录音器(供 /api/mic 暂停/继续录制)
+_mute_gate = None  # 输入源头静音门(关麦=真关麦,供 /api/mic 切换)
 _tts_backend_key: str = "cosyvoice"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -643,7 +645,7 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
         json.dumps(
             {
                 "type": "state",
-                "muted": stt.muted if stt else False,
+                "muted": _mute_gate.muted if _mute_gate else (stt.muted if stt else False),
                 "stt_backend": stt.provider if stt else "FunASR",
                 "tts_backend": _tts_backend_key,
             },
@@ -659,16 +661,21 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
 
 
 async def _handle_mic(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    stt = _switchable_stt
-    if stt is None:
+    # 关麦=真关麦:主机制是输入源头的静音门(对所有 STT 后端统一,关麦时全链路收静音)。
+    gate = _mute_gate
+    if gate is None:
         return aiohttp.web.json_response({"error": "agent not ready"}, status=503)
-    stt.muted = not stt.muted
+    gate.muted = not gate.muted
+    muted = gate.muted
+    # 上游(SwitchableSTT)路径若在,同步其 muted 以保持状态一致(冗余但无害)。
+    if _switchable_stt is not None:
+        _switchable_stt.muted = muted
     # 麦克风关闭 -> 暂停录制(用户轨),开启 -> 继续(测试模式下)。
     if _test_recorder is not None:
-        _test_recorder.set_paused(stt.muted)
-    broadcast({"type": "state", "muted": stt.muted})
-    logger.info("mic %s", "muted" if stt.muted else "unmuted")
-    return aiohttp.web.json_response({"muted": stt.muted})
+        _test_recorder.set_paused(muted)
+    broadcast({"type": "state", "muted": muted})
+    logger.info("mic %s (mute-gate)", "muted" if muted else "unmuted")
+    return aiohttp.web.json_response({"muted": muted})
 
 
 async def _handle_switch_asr(request: aiohttp.web.Request) -> aiohttp.web.Response:
@@ -967,12 +974,37 @@ server.setup_fnc = prewarm
 
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
-    global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder
+    global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder, _mute_gate
     _agent_loop = asyncio.get_running_loop()
 
-    stt_engine = build_stt()
-    _switchable_stt = stt_engine  # expose for web server
-    _append_turn_log(f"STT_START provider={stt_engine.provider}")
+    # 主STT 选择(XIAOGE_STACK=optimized 默认走 funasr-stream;STT_BACKEND 显式覆盖):
+    #   funasr(默认/upstream) = 离线 FunASR + StreamAdapter(VAD 硬切)
+    #   funasr-stream         = FunASR 2pass 流式(GAP 聚合 + VAD 门控,不过 StreamAdapter)
+    #   iflytek               = 讯飞 RTASR(可选第三方)
+    # 流式后端均"不过 StreamAdapter"且 _switchable_stt=None(面板 ASR 热切换不适用,重启切换)。
+    _stack = (os.getenv("XIAOGE_STACK") or "upstream").strip().lower()
+    _default_stt = "funasr-stream" if _stack == "optimized" else "funasr"
+    _stt_mode = (os.getenv("STT_BACKEND") or _default_stt).strip().lower()
+    if _stt_mode == "iflytek":
+        from iflytek_stt import IFlyTekRTASR
+
+        stt_engine = IFlyTekRTASR()
+        _switchable_stt = None
+        _stt_for_session = stt_engine
+    elif _stt_mode == "funasr-stream":
+        from funasr_stream_stt import FunASRStreamSTT
+
+        stt_engine = FunASRStreamSTT()  # 内置独立 silero VAD;GAP/门控见模块
+        _switchable_stt = None
+        _stt_for_session = stt_engine  # 流式,不过 StreamAdapter
+    else:
+        stt_engine = build_stt()
+        _switchable_stt = stt_engine  # expose for web server(可热切换)
+        _stt_for_session = StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"])
+    _append_turn_log(f"STT_START provider={stt_engine.provider} mode={_stt_mode} stack={_stack}")
+    # 显示同源:流式主STT(有原生 interim)用主STT 文本驱动 live 气泡(与内容/上下文同源);
+    # 离线后端无 interim,仍由在线2pass 驱动气泡。在线2pass tap 始终保留作打断用。
+    _live_from_main = _stt_mode in {"funasr-stream", "iflytek"}
 
     tts_engine = build_tts()
     _switchable_tts = tts_engine  # expose for web server
@@ -988,10 +1020,12 @@ async def entrypoint(ctx: JobContext) -> None:
     _turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参
     session = AgentSession(
         llm=llm,
-        stt=StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"]),
+        stt=_stt_for_session,
         vad=ctx.proc.userdata["vad"],
         tts=tts_engine,
-        turn_handling=_turn_cfg.turn_handling(MultilingualModel()),
+        turn_handling=_turn_cfg.turn_handling(
+            MultilingualModel(unlikely_threshold=_turn_cfg.unlikely_threshold)
+        ),
     )
 
     turn_trace: dict[str, float] = {"started_at": time.time()}
@@ -1064,11 +1098,15 @@ async def entrypoint(ctx: JobContext) -> None:
         if event.new_state == "speaking":
             _overlap_turn_state["user_spoke_over_agent"] = session.agent_state == "speaking"
             asyncio.create_task(asyncio.to_thread(tts_engine.prewarm_connection))
-            asyncio.create_task(stt_engine.prewarm_connection())
+            if hasattr(stt_engine, "prewarm_connection"):
+                asyncio.create_task(stt_engine.prewarm_connection())
 
     @session.on("user_input_transcribed")
     def _on_stt(event) -> None:
         if not event.is_final:
+            # 显示同源:流式主STT 的 interim 驱动 live 气泡(全量置换)。
+            if _live_from_main and _live is not None:
+                _live.feed_full(event.transcript)
             return
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
@@ -1145,6 +1183,12 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info("scenario injection active: %s", _scenario)
         except Exception as exc:  # 注入失败绝不阻塞:退回正常麦克风
             logger.warning("scenario injection disabled: %s", exc)
+
+    # 静音门(关麦=真关麦):最内层包裹(在 recorder/KWS/在线2pass 之前),关麦时下游
+    # 所有消费者收静音 → 不转写/不打断/真人声不出本机。默认直通,零影响。
+    if session.input.audio is not None:
+        _mute_gate = MuteGate(session.input.audio)
+        session.input.audio = _mute_gate
 
     if _timeline is not None:
         # 测试模式:按真实时间轴录多轨(user/assistant/duplex)进同一个 run 目录。
@@ -1234,7 +1278,8 @@ async def entrypoint(ctx: JobContext) -> None:
     def _online_text_fanout(piece: str, segment_end: bool) -> None:
         # 打断逻辑优先、原样执行;显示为 best-effort(feed_online 内部已全兜底,不会拖慢打断)。
         _on_online_text(piece, segment_end)
-        if _live is not None:
+        # 显示:流式主STT 模式下气泡由主STT 驱动(同源),此处不再喂在线2pass 以免双驱动。
+        if _live is not None and not _live_from_main:
             _live.feed_online(piece, segment_end)
 
     _online_reason = _online_unavailable_reason(_online_cfg)

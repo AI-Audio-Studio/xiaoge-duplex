@@ -117,6 +117,22 @@ class LiveTranscript:
         except Exception:
             pass
 
+    # ── 主 STT 原生 interim(全量文本)喂入:气泡与内容/上下文同源 ────────────
+    def feed_full(self, text: str) -> None:
+        """流式主 STT 的 interim 给的是当前轮**全量**文本(非增量),直接置换显示。"""
+        try:
+            now = time.monotonic()
+            self._maybe_open(now)
+            self._prefix = ""
+            self._seg = text or ""
+            self._last_ts = now
+            t = self._seg.strip()
+            if t:
+                self._emit({"type": "user_partial", "text": t})
+                self._debug("partial_full", {"len": len(t)})
+        except Exception:
+            pass
+
     # ── 单一判定点:开新轮 vs 续用当前气泡(以后联动判停只改这里)──────────
     def _maybe_open(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now

@@ -100,5 +100,248 @@
 
 **结论:阶段1 达标——可复现注入 + KPI 度量就位,181317 已成为稳定回归用例。**
 
-## 阶段1 状态:实现+自测+手测均通过 → 提交合入(review-before-merge)。
+## 阶段1 状态:实现+自测+手测均通过 → 已合入 main(PR #8)。
+
+---
+
+# 阶段 2:上半段——流式主STT(根治丢字 + 显示同源)
+
+## 2a 探活(2026-06-23)
+TCP 连通性:
+- `qwen3-stream` 10.212.164.230:10091 → **不通**(TimeoutError,内网地址)。
+- `qwen3` 60.205.197.165:10091 → ConnectionRefused(端口未服务)。
+- `funasr`(现用)60.205.197.165:10090 → OK 75ms。
+- **讯飞 RTASR** rtasr.xfyun.cn:443 → OK 112ms。
+→ 按降级链:qwen3-stream 不通 ⇒ **选讯飞 RTASR**。
+
+## 2a 讯飞协议 + 真服务验证(用本机 .env 密钥,已通过)
+- URL:`wss://rtasr.xfyun.cn/v1/ws?appid=&ts=&signa=`(signa 需 URL 编码)。
+- signa = `base64(hmac_sha1(key=APIKey, msg=md5_hex(appid+ts)))`。
+- 音频:PCM 16k/16bit/单声道,**1280 字节/帧、~40ms 间隔**,裸二进制发送;结束发文本 `{"end":true}`。
+- 结果:`{action:"result", data:"<json串>"}`;`data.cn.st.type`:`"0"`=final / `"1"`=partial;
+  文本路径 `data.cn.st.rt[].ws[].cw[].w` 拼接;`action:"started"`=鉴权成功。
+- **验证**:发 16.8s 中文(KWS 测试 wav)→ started + 7 条 final、79 字忠实转写。鉴权/流式/解析全通。
+
+## 2b 设计(讯飞流式主STT 接入)+ 自审
+**provider**:`IFlyTekRTASR(stt.STT)`,capabilities streaming=True / interim_results=True;
+`stream()`→ RecognizeStream:① 发送任务:输入帧→重采样16k单声道→攒1280字节→~40ms 节奏发,
+会话结束发 `{"end":true}`;② 接收任务:解析 → 发 `INTERIM_TRANSCRIPT`(type1)/`FINAL_TRANSCRIPT`(type0)。
+**整流式**:一条 WS 贯穿整轮会话(非每句新建),按 seg_id 出多条 final;判停仍由 AgentSession 的
+VAD + turn detector 负责(只是主STT 换成流式、**不再过 StreamAdapter**)。
+**接入**:启动期模式选择(`STT_BACKEND=iflytek` → session.stt=IFlyTekRTASR、跳过 StreamAdapter;
+否则走现有离线路径),**保留离线为回退**;先不热切换(流式/非流式接口差异大,降风险)。
+**显示同源**:后续用框架 `user_input_transcribed(is_final=False)` interim 驱动 live 气泡,在线2pass 降级 fallback。
+
+**自审(从严)发现/对策**:
+1. 15s 无音频会被服务端断开 → 会话中持续发帧(含静音)即可不触发;麦克风静音态需照发静音(注意)。
+2. RTASR 是**整段连续流**:WS 须贯穿整轮会话、用完才 `{"end":true}`;长会话可能需重连(列为风险,先不做,断了降级离线)。
+3. 发送过快会引擎报错 → 严格 ~40ms/1280 字节节奏,加节流。
+4. 付费云服务 + 可能 IP 白名单(本机已验通)→ 失败要优雅降级离线,绝不卡死主流程。
+5. 接口契合:须实现 livekit `stt.RecognizeStream`(_run/_event_ch/SpeechEvent),落地前对齐基类。
+6. A/B 依赖注入录音 —— **但 runs/ 录音当前为空(见下),需先恢复一条长独白用例**。
+
+## ⚠️ 数据问题:runs/ 目录为空
+2026-06-23 复核时发现 `runs/` 下所有 run(含手测的 144940、181317)**已不存在**(listdir=0)。
+我方未执行任何删除;与"不删 runs/recordings"约束相关,**待用户确认是否自行清理**。
+影响:阶段2 A/B 计划用的 `181317/user.wav` 回归用例丢失 → 需重录一条长独白(或改用 recordings/ 旧的
+conversation.wav)。
+
+## 2c 实现
+- 新增 `examples/voice_agents/iflytek_stt.py`:`IFlyTekRTASR(stt.STT)` + `_IFlyTekStream(stt.RecognizeStream)`。
+  一条 WS 贯穿整流;发送任务攒 1280 字节 ~40ms 节流推、输入结束发 `{"end":true}`;接收任务把
+  result 转 `INTERIM/FINAL` SpeechEvent。`sample_rate=16000` 由基类自动重采样。异常上抛交基类重试。
+- `web_ui_agent.py`:`STT_BACKEND=iflytek` → 启动期用 IFlyTekRTASR、**不过 StreamAdapter**、
+  `_switchable_stt=None`;否则走原离线路径(保留回退)。prewarm 加 `hasattr` 守卫。
+- `.env.example`:STT_BACKEND 增 iflytek + 讯飞密钥占位(真值在本地 .env)。
+
+## 2c 自测(全部通过)
+- `py_compile` / `ruff` / `format` 全绿。
+- **provider 真服务自测**:用 livekit `push_frame` 把 KWS 中文 wav(zh_0,5.6s)喂进
+  `IFlyTekRTASR().stream()` → 8 interim + 3 final、转写忠实("对我做了介绍啊。那么我想说的是呢…")。
+  证明 push_frame→重采样→WS→讯飞→SpeechEvent 端到端通。
+- **集成自测**:`STT_BACKEND=iflytek` 构建 streaming/interim=True、offline=False、不过 StreamAdapter;
+  默认 `funasr` 模式 `build_stt()` 仍正常。不设 iflytek 即零影响。
+
+## 2c 已知限制(诚实记录)
+- iflytek 模式下面板 ASR **热切换不可用**(改 .env 重启切换);WS 状态栏可能仍显示 "FunASR"(`_switchable_stt=None` 的占位,cosmetic)。
+- 显示仍走在线2pass(**显示同源**留到 2d:改用框架 `user_input_transcribed` interim 驱动 live 气泡)。
+- 讯飞为付费云服务 + 需联网(本机已验通);断连由基类重试,失败应降级离线(暂未做自动降级,先靠手动改回 funasr)。
+- 长会话/15s 无音频:会话持续推帧(含静音)可避免;长会话重连为已知风险点,后续观察。
+
+## 手测步骤(请用户验证:换讯飞后"丢字"是否根治)
+1. `.env` 设 `STT_BACKEND=iflytek`(讯飞密钥已在本地 .env)。
+2. `.\stop_agent.cmd ; .\start_agent.cmd`(带 -Test)。
+3. **live 说那段会丢字的长独白**(像 181317 那样,中间带停顿)。重点看:
+   - 小歌是否**完整接住**你说的内容(不再"我前面说的被你丢了");
+   - `runs/<新ts>/` 的 `user.wav` 是你说的;`turn_kpis.json` 看 `over_segmentation`(切分,Phase 3 才调)、`felt_latency`。
+4. **(可选)严格注入 A/B**:用同一段录音分别跑
+   `STT_BACKEND=funasr` 与 `=iflytek`(都设 `AGENT_SCENARIO=runs/<ts>/user.wav`),对比 KPI/识别完整度。
+5. 不满意可随时改回 `STT_BACKEND=funasr` 回退。
+
+> 预期:讯飞流式应**根治"超长段丢字"**(无 VAD 硬切段、无离线超时空丢弃);**切分(回多次)仍存在**——那是 Phase 3 判停时序的事,不在本阶段。
+
+## 阶段2 状态:provider 实现 + 自测(含真服务)通过 → 待用户手测确认 → 通过后提交合入。
+
+---
+
+# 阶段 3:下半段——判停时序调优(进行中)
+
+## 现象与根因(基于 iflytek 注入实测)
+- 讯飞已**根治丢字**(内容接全),但**仍切多轮/回多次**。
+- 数据:iflytek 注入跑 `eot_delay 中位≈460ms`(= min_delay,**没走 max_delay**)→ turn detector 把"讯飞按停顿切出的 final"判成"说完了"→ 立即提交。**所以 max_delay 不是 iflytek 的杠杆。**
+- 与离线不同:离线时 eot 顶在 max_delay(detector 判"没说完");iflytek 下 detector 判"说完"。
+
+## 自测发现(从严,两次自动调参均不成立)
+1. `TURN_ENDPOINT_MAX_DELAY=1.5`:切分 4/6,**没降**(eot 仍 460ms,未走 max)。
+2. `TURN_VAD_MIN_SILENCE=0.8`(换讯飞后调大 VAD 已安全,不再丢字):切分 3/5,**仍没明显降**;felt 中位 8s、eot/felt p90 10–12s。
+3. **关键结论:注入回放不适合调"判停时序"。** 注入停顿是固定的,而真实判停依赖"用户看小歌反应实时调整停顿";注入时小歌在播报、注入仍硬推 → 时间线失真、KPI 充满 8–12s 离群值,**不可用于时序调参**。
+   - 注入对**丢字(内容、确定性)**可靠 ✓;**判停时序必须 LIVE 真人调**。
+
+## 决定(修正方法论)
+- 判停旋钮已就位:`TURN_VAD_MIN_SILENCE / TURN_ENDPOINT_MIN_DELAY / TURN_ENDPOINT_MAX_DELAY / TURN_UNLIKELY_THRESHOLD / TURN_PREEMPTIVE_TTS`(均在 turn_config.py + .env)。
+- 新增 `unlikely_threshold` 旋钮并接入 `MultilingualModel(unlikely_threshold=...)`(已 compile/lint 通过)。
+- **判停调参改为 LIVE 手测驱动**(用户真实说话 + turn_kpis 看 over_segmentation/felt),迭代旋钮值;注入仅用于丢字回归。
+- 当前 .env 起点(供 LIVE 手测):`vad=0.8, min_delay=0.3, max_delay=1.2, unlikely=0.5, preemptive=false`。
+
+## 阶段3 状态:旋钮就位 + 方法论修正(注入→LIVE);**待用户 LIVE 手测调参**。
+
+---
+
+# 设计评审收尾 → 进入开发(optimized 栈)
+
+- **设计文档 `TURN_STT_DESIGN.md` 经四轮评审放行**(评审记录见 `TURN_STT_DESIGN_REVIEW.md`):延迟取舍/流式静音(B 真关麦)/2pass 重连/preemptive/防幽灵/双VAD/上游零改 全部收敛;剩余仅 LIVE 调参。
+- 开发顺序(评审建议):① `funasr_stream_stt.py`(GAP 聚合 + VAD 输出门控)② 静音门 ③ 注入 A/B 验丢字/覆盖率 ④ LIVE 调判停。`XIAOGE_STACK` 默认 `upstream`,LIVE 充分验证后再翻 optimized。
+
+## 开发 · Step 1:funasr_stream_stt.py(核心模块)— 已实现 + 自测通过
+- 新增 `examples/voice_agents/funasr_stream_stt.py`:FunASR 2pass 流式 + **内置独立 silero VAD 输出门控防幽灵** + **GAP 轮次聚合**(以最后有声帧起算,静默≥GAP 发一条 FINAL);livekit `RecognizeStream(sample_rate=16000)`;零改上游。
+- 自测:`py_compile`/`ruff` 通过;**真服务标准自测**——push 2.5s 语音 + 1.8s 尾随静音,得 3 条 INTERIM(边长)→ 静默≥GAP(1.0s)后**聚合出 1 条 FINAL**("对我做了介绍啊那么"),证明"流式识别 + 门控 + 一轮一 FINAL"成立。
+## 开发 · Step 2/3a:静音门 + funasr-stream 接线 — 已实现 + 自测通过
+- 新增 `mute_gate.py`:`MuteGate`(io.AudioInput),最内层包裹,`muted` 时输出等长静音帧。自测:直通非零、muted 全零且等长。
+- `web_ui_agent.py`:
+  - STT 选择加 `XIAOGE_STACK`(upstream/optimized)+ `STT_BACKEND=funasr-stream` 分支(用 FunASRStreamSTT、不过 StreamAdapter、`_switchable_stt=None`);默认仍 funasr(upstream),零行为变更。
+  - session.start 后(injection 之后、recorder/KWS/online 之前)插 `MuteGate` 为**最内层**;`/api/mic` 改走静音门(关麦=真关麦:全链路收静音 + 录音暂停);WS 初始 muted 状态读静音门。
+- `.env.example`:登记 `XIAOGE_STACK` / `funasr-stream` / `XIAOGE_AGG_GAP`。
+- 自测:py_compile / ruff / format 通过;集成构建 OK。
+
+## 开发 · Step 3b:显示同源 — 已实现 + 自测通过
+- `live_transcript.py`:加 `feed_full(text)`(主STT 原生 interim 是全量文本,直接置换显示)。
+- `web_ui_agent.py`:`_live_from_main = _stt_mode in {funasr-stream, iflytek}`;流式后端用主STT interim 驱动气泡(`_on_stt` 非 final 分支),`_online_text_fanout` 停止用在线2pass 喂气泡(免双驱动);在线2pass tap 仍保留作打断。
+- 自测:py_compile/ruff 通过;feed_full 单气泡全量置换 OK。
+
+## 开发 · 修复1:显示累积滞后(LIVE 手测发现)— 已定位 + 修复 + 延迟自测通过
+- **现象**(用户手测):ASR 显示远远跟不上说话节奏,说得越久越落后。
+- **证据**(`runs/20260624_165637`,mode=funasr-stream):45s 长故事 `transcription_delay=8375.9ms`、`end_of_turn_delay=8702.9ms` → 滞后随时长累积。
+- **根因**:`_forward` 加了 `_SEND_INTERVAL=0.05` 的 sleep 节流,强制每块 ≥50ms + 每块开销 → **送音频慢于实时 → backlog 持续累积**。对照在线tap(`online_interrupt.py:166-167`)是队列即取即发、**无节流**。
+- **修复**:`_forward` 改为**实时即送**(帧到即 `send_bytes`,去掉 buf/分块/sleep);`chunk_size` [5,10,5]→[5,8,4](480ms,与tap一致,更跟手)。
+- **延迟自测**(22s 连续语音,实时喂):`last_interim` 落后说完 **-0.43s(≈0,不累积)**;旧代码此处会落后数秒。
+- 教训:自测必须含**节奏/延迟**项,不能只验正确性(上次漏了,LIVE 才暴露)。
+
+## 待续:在线2pass 打断加 VAD 佐证(防幽灵误打断)+ Step 4 注入 A/B(覆盖率/丢字)+ Step 5 LIVE 调参。
+**optimized 核心已 LIVE 可测**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦 + **显示与内容同源**。
+
+
+---
+
+# 优化方案定稿(阶段2+3 合并,待确认后实现)
+
+> 经多轮讨论收敛。核心:用**流式 FunASR(2pass)做主STT**根治丢字+显示同源;判停的
+> "轮边界"裁判从"VAD/上游 endpointing"挪到**我们 STT 层的 GAP 聚合**;并用 **VAD 给流式
+> ASR 把关防幽灵**。**上游代码零改**,一切在 examples/voice_agents/,可 `XIAOGE_STACK` 一键 A/B。
+
+## 设计纪律(5 条)
+1. 零改上游(`livekit-agents/`、`livekit-plugins/` 不动)。
+2. 每个优化可开关、默认保留原行为。
+3. `XIAOGE_STACK=upstream|optimized` 一键切换整条 ④ 做 A/B。
+4. 判停/聚合逻辑放我们 STT 层,上游 endpointing/turn-detect 不改、只消费我们的事件。
+5. 注入测内容/准确度,LIVE 测判停时序;KPI/录音对比。
+
+## 组件职责
+| 组件 | 优化版职责 |
+|---|---|
+| **AgentSession 的 VAD**(`vad=` 传入,上游) | ① 发 START/END_OF_SPEECH 给上游 → **续话取消合并** ② 打断(声学) ③ 用户状态 |
+| **我们 STT 内置的 VAD** | ① **防幽灵门控**(静音/底噪不喂 FunASR、不收其文本) ② **量静默驱动 GAP 轮次聚合** |
+| **FunASR 2pass(我们的流式主STT)** | 对 VAD 确认的语音连续识别;online=增量(显示)、offline=段尾 |
+| **轮次聚合(我们 STT 层)** | 累加本轮文本;**VAD 静音 ≥ GAP 才发一条 FINAL**(=一轮) |
+| **上游 endpointing / turn detector**(不改) | 收到我们 FINAL 后:**语义判完句**(EOU 概率)+ **续话合并**(max_delay 窗内 VAD 又开口则取消提交、累加下一条 FINAL) |
+| **打断源** | AgentSession-VAD(声学)/ KWS / 在线2pass(**+VAD 佐证防幽灵**) |
+
+> 两处 VAD 都是 silero、读同一路麦克风,行为一致、互不冲突:上游那条管"打断 + 续话取消",我们那条管"防幽灵 + 聚合"。
+
+## 防幽灵(FunASR 偶发"没说话却蹦字")
+- 根因:流式 ASR 在静音/底噪上会凭空吐字;原始离线 ④ 因"VAD 先切段"天然带一点防护,换流式后丢了 → 必须补回。
+- 主防线:**我们 STT 用 VAD 门控**——VAD 判静音时蹦出的文本一律丢弃(不累加、不计 GAP、不发 FINAL)→ 不会误提交、不会误回复。
+- 打断侧:在线2pass 文本打断**加 VAD 佐证**(仅当 AgentSession-VAD 确认在出声才打断)。VAD 打断本身是声学的、天然抗幽灵。
+- 兜底:既有附和/停止词过滤继续挡"嗯/啊"类。
+
+## 两层"说完了"判断
+1. **声学(我们 GAP,主边界)**:VAD 静音 ≥ GAP → 发一条 FINAL。
+2. **语义(上游 turn detector,第二意见)**:读本轮文本判 EOU——
+   - 说完了(完整句)→ min_delay → 提交、回复;
+   - 没说完(半句/以"然后"结尾)→ max_delay 窗:窗内用户又开口(AgentSession-VAD)→ **取消提交、与下条 FINAL 合并成同一轮**;仍沉默 → 到点照常提交。
+
+## 流程图
+```
+麦克风(连续音频;已经过 录音/KWS/在线2pass tap)= session.input.audio
+   │
+   ├─► AgentSession VAD(上游,独立读麦克风)
+   │        ├─ START/END_OF_SPEECH ─► 上游 audio_recognition(续话取消 + 打断)
+   │        └─ 声学打断 ─────────────────────────────┐
+   │                                                  │
+   └─► 我们的 funasr-stream STT ───────────────────┐  │
+          VAD 判语音?                              │  │
+            ├─否(静音/底噪)► 丢弃(防幽灵)        │  │
+            └─是► 送 FunASR 2pass(流式)           │  │
+                   online=增量 / offline=段尾        │  │
+                   ▼                                  │  │
+                累加"本轮文本" + 发 INTERIM ──► live 气泡(同源显示)
+                   ▼                                  │  │
+                VAD 静音 ≥ GAP ?(轮次聚合)          │  │
+                  ├─否► 继续累加(同一轮)            │  │
+                  └─是► 发【一条 FINAL】+ 清空 ──► 上游 audio_recognition
+                                                       │  │
+   ┌───────────────────────────────────────────────────┘  │
+   ▼ (上游,代码不改)                                       │
+ turn detector 读"本轮文本"判 EOU:                          │
+   ├ 说完了 ─► min_delay ─► 提交 ─► 附和/停止词过滤 ─► 回复一次
+   └ 没说完 ─► max_delay 窗内:
+        ├ 用户又开口(AgentSession-VAD START_OF_SPEECH)► 取消提交 + 与下条FINAL合并=同轮
+        └ 仍沉默到点 ─► 提交 ─► 回复一次
+                                                          │
+ 打断 agent 播报 ◄── 声学(VAD)/ KWS / 在线2pass(+VAD佐证)┘
+```
+
+## `XIAOGE_STACK` 映射(一键 A/B)
+| 维度 | upstream(原始,基线) | optimized(我们的) |
+|---|---|---|
+| 主STT | 离线FunASR+StreamAdapter(VAD硬切) | funasr-stream(VAD门控+GAP聚合) |
+| 轮边界裁判 | VAD + 上游 endpointing | 我们 STT 的 GAP(+上游语义兜底) |
+| 防幽灵 | VAD切段天然带一点 | VAD 门控显式防 |
+| live 显示 | 关 | 开 + 同源(主STT interim) |
+| 在线2pass 打断 | 纯文本 | +VAD 佐证 |
+| 上游文件 | 原样 | 原样(零改) |
+
+## 旋钮(env)
+- `XIAOGE_STACK`(总开关)
+- `XIAOGE_AGG_GAP`(GAP 聚合静默阈值,默认 1.2–1.5s)= 连续/新轮容忍窗
+- STT 内 VAD 门控阈值(activation / min_silence)
+- `TURN_ENDPOINT_MIN/MAX_DELAY`、`TURN_UNLIKELY_THRESHOLD`(上游语义兜底)
+- 在线2pass `min_chars`
+- 粒度 env 覆盖 profile,便于精细 A/B
+
+## 实现范围(确认后)
+- 新增 `funasr_stream_stt.py`:内置 VAD 门控 + 2pass 流式识别 + GAP 轮次聚合,发 INTERIM/FINAL(复用已验证的 2pass 协议)。
+- `web_ui_agent.py`:`XIAOGE_STACK`/`STT_BACKEND=funasr-stream` 选用、不过 StreamAdapter、**继续传 `vad=`**;live 气泡改主STT 同源;在线2pass 打断加 VAD 佐证。
+- `iflytek_stt.py` 保留为可选第三方(默认不用)。
+- 离线原始 ④ 全程保留(`XIAOGE_STACK=upstream` 可切回)。
+- 出 SVG 流程图入 diagrams/。
+
+## 待确认(讨论点)
+1. 两层判停(GAP 声学 + 上游语义兜底 + 续话合并)模型是否认可?
+2. 两处 VAD(上游打断/续话 + 我们门控/聚合)是否接受?(可否合一另议)
+3. `XIAOGE_AGG_GAP` 起点 1.2–1.5s、`max_delay` ~0.8–1.0s 是否合适?
+4. 主STT 用 funasr-stream(不用讯飞)是否拍板?(实测它对你的音频更准 + 免费 + 同源)
+
+
+
+
 
