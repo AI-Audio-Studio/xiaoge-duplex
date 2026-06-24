@@ -236,8 +236,21 @@ conversation.wav)。
 - **延迟自测**(22s 连续语音,实时喂):`last_interim` 落后说完 **-0.43s(≈0,不累积)**;旧代码此处会落后数秒。
 - 教训:自测必须含**节奏/延迟**项,不能只验正确性(上次漏了,LIVE 才暴露)。
 
-## 待续:在线2pass 打断加 VAD 佐证(防幽灵误打断)+ Step 4 注入 A/B(覆盖率/丢字)+ Step 5 LIVE 调参。
-**optimized 核心已 LIVE 可测**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦 + **显示与内容同源**。
+## 修复1 已合入 main(PR,cbcb0aa)。分支 feat/turn-stt-optimized 保留。
+
+## LIVE 手测2 分析(`runs/20260624_172809`,修复1 之后)
+- ✅ **显示滞后已根治**:`transcription_delay` 中位 **1010ms 且恒定**(17.5s 长句 965ms,不累积);felt 中位 2018ms(合设计预期);长连续句完整不丢字。
+- ❌ **新暴露:判停过切**(backlog 修掉后才显形):`turn_kpis` 过切率 **25.8%**(24/93,by_small_gap)、残片回复 **8**、false_interruption 2、在线打断频繁(短词即打断)。实锤:用户说"你听不懂中文吗""你是搞笑吗""为什么停了呢";小歌把被切碎的半句当字面意思答非所问、两次道歉重启。
+- 根因:① GAP=1.0 对带思考停顿/重复的口语过切;② 在线2pass 软打断只看文本无 VAD 佐证 → 短幽灵/接话误打断。
+
+## 开发 · 修复2:判停过切 + 在线打断防幽灵(分支 feat/turn-judou-tuning)— 已实现 + 自测通过
+- **#1 GAP 默认 1.0→1.5**(`funasr_stream_stt.py` + `.env.example`):减少思考停顿被误判一轮结束,代价 felt +~0.5s。
+- **#2 在线软打断加 VAD 佐证**(`web_ui_agent.py`):`_online_state` 加 `vad_speaking`/`vad_off_ts`(由 `user_state_changed` 维护);软打断(`meaningful>=min_chars`)前要求 VAD 确认用户此刻在说话或刚停 <`XIAOGE_ONLINE_VAD_GRACE`(默认 0.6s),否则判幽灵→不打断+清累积。STOP-phrase 强打断与 KWS 不变。
+- 自测:py_compile/ruff 通过;VAD 佐证逻辑 4 例(说话放行/纯幽灵拦截/刚停0.3s放行/停1.0s拦截)全过;GAP 默认=1.5 确认。
+- 待 LIVE:看过切率↓、误打断↓、felt 体感是否可接受;再决定要不要做 #3(语义判停兜底)。
+
+## 待续:#3 语义判停兜底(GAP-FINAL 若话未说完交上游 turn detector 多等)+ 注入 A/B(覆盖率/丢字)。
+**optimized 已 LIVE 可测**:流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦 + 显示同源 + 实时不滞后 + 在线打断防幽灵。
 
 
 ---
