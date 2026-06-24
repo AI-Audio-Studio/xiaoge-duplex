@@ -116,6 +116,8 @@ _BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
 _BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
 _OVERLAP_ACK_CHARS = _BACKCHANNEL_CHARS + "对好是行的呀嘛"
 _ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
+# 在线软打断的 VAD 佐证宽限(秒):VAD 刚停说话后这段时间内仍接受打断(容忍识别滞后)。
+_ONLINE_VAD_GRACE = float(os.getenv("XIAOGE_ONLINE_VAD_GRACE", "0.6"))
 _SEGMENT_SPLIT_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
 _overlap_turn_state: dict[str, bool] = {"user_spoke_over_agent": False}
 
@@ -1029,7 +1031,13 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     turn_trace: dict[str, float] = {"started_at": time.time()}
-    _online_state: dict[str, object] = {"accum": "", "fired_at": 0.0}
+    # vad_speaking/vad_off_ts:用于在线软打断的 VAD 佐证(防短幽灵词/接话误打断)。
+    _online_state: dict[str, object] = {
+        "accum": "",
+        "fired_at": 0.0,
+        "vad_speaking": False,
+        "vad_off_ts": 0.0,
+    }
 
     @session.on("conversation_item_added")
     def _on_item(event) -> None:
@@ -1095,8 +1103,11 @@ async def entrypoint(ctx: JobContext) -> None:
         if event.old_state == "speaking" and event.new_state != "speaking":
             turn_trace["user_stopped_at"] = event.created_at
             _online_state["accum"] = ""
+            _online_state["vad_speaking"] = False
+            _online_state["vad_off_ts"] = time.monotonic()
         if event.new_state == "speaking":
             _overlap_turn_state["user_spoke_over_agent"] = session.agent_state == "speaking"
+            _online_state["vad_speaking"] = True
             asyncio.create_task(asyncio.to_thread(tts_engine.prewarm_connection))
             if hasattr(stt_engine, "prewarm_connection"):
                 asyncio.create_task(stt_engine.prewarm_connection())
@@ -1268,6 +1279,16 @@ async def entrypoint(ctx: JobContext) -> None:
         core = _ACK_STRIP_RE.sub("", accum)
         meaningful = sum(1 for ch in core if ch not in _OVERLAP_ACK_CHARS)
         if meaningful >= _online_cfg.min_chars:
+            # VAD 佐证:仅当 VAD 也确认用户此刻(或刚刚)在说话,才认为是真打断。
+            # 在线2pass 文本比音频滞后 ~0.5s,而 VAD 开口几乎即时——若文本到了 VAD 仍
+            # 从未开口,几乎必是幽灵词/识别噪声 → 不打断、清掉累积,免误打断。
+            vad_ok = bool(_online_state["vad_speaking"]) or (
+                now - float(_online_state["vad_off_ts"]) < _ONLINE_VAD_GRACE
+            )
+            if not vad_ok:
+                _online_state["accum"] = ""
+                _append_turn_log(f"ONLINE_INTERRUPT_SKIP_NO_VAD text={accum!r} chars={meaningful}")
+                return
             _online_state["fired_at"] = now
             _online_state["accum"] = ""
             session.interrupt()

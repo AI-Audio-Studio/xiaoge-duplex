@@ -67,7 +67,7 @@ class FunASRStreamSTT(stt.STT):
             if verify_ssl is not None
             else os.getenv("FUNASR_VERIFY_SSL", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
-        self._gap_s = gap_s if gap_s is not None else _env_f("XIAOGE_AGG_GAP", 1.0)
+        self._gap_s = gap_s if gap_s is not None else _env_f("XIAOGE_AGG_GAP", 1.5)
         self._vad_activation = (
             vad_activation
             if vad_activation is not None
