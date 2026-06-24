@@ -31,8 +31,6 @@ from livekit.agents.vad import VADEventType
 logger = logging.getLogger("funasr-stream")
 
 _SAMPLE_RATE = 16000
-_CHUNK_BYTES = 1600  # ~50ms @16k/16bit/mono
-_SEND_INTERVAL = 0.05
 _WATCHDOG_INTERVAL = 0.05
 
 
@@ -131,7 +129,7 @@ class _FunASRStreamStream(stt.RecognizeStream):
                 json.dumps(
                     {
                         "mode": "2pass",
-                        "chunk_size": [5, 10, 5],
+                        "chunk_size": [5, 8, 4],
                         "chunk_interval": 10,
                         "wav_name": "funasr-stream",
                         "wav_format": "pcm",
@@ -163,27 +161,18 @@ class _FunASRStreamStream(stt.RecognizeStream):
                 await session.close()
 
     async def _forward(self, ws, vad_stream) -> None:
-        """读输入帧:同帧喂 FunASR(节流分片)与内置 VAD。"""
-        buf = bytearray()
-        last = 0.0
+        """读输入帧:**实时即送**(帧到即发,无节流),同帧喂内置 VAD。
+
+        关键:输入帧本身已是实时节奏(`async for` 被帧到达驱动),所以直接发送即等于
+        实时发送,不会堆积;任何人为节流(sleep)都会让发送慢于实时 → backlog 累积 →
+        说得越久显示越落后。参照在线 tap(队列即取即发)。
+        """
         async for frame in self._input_ch:
             if isinstance(frame, self._FlushSentinel):
                 continue
             with contextlib.suppress(Exception):
                 vad_stream.push_frame(frame)  # 基类已重采样到 16k
-            buf.extend(bytes(frame.data))
-            while len(buf) >= _CHUNK_BYTES:
-                chunk = bytes(buf[:_CHUNK_BYTES])
-                del buf[:_CHUNK_BYTES]
-                if last:
-                    wait = _SEND_INTERVAL - (time.monotonic() - last)
-                    if wait > 0:
-                        await asyncio.sleep(wait)
-                last = time.monotonic()
-                await ws.send_bytes(chunk)
-        if buf:
-            with contextlib.suppress(Exception):
-                await ws.send_bytes(bytes(buf))
+            await ws.send_bytes(bytes(frame.data))
 
     async def _vad_consume(self, vad_stream) -> None:
         """逐帧读 VAD 概率,维护 voiced / last_voiced(门控 + GAP 起算)。"""

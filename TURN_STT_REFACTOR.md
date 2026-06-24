@@ -228,6 +228,14 @@ conversation.wav)。
 - `web_ui_agent.py`:`_live_from_main = _stt_mode in {funasr-stream, iflytek}`;流式后端用主STT interim 驱动气泡(`_on_stt` 非 final 分支),`_online_text_fanout` 停止用在线2pass 喂气泡(免双驱动);在线2pass tap 仍保留作打断。
 - 自测:py_compile/ruff 通过;feed_full 单气泡全量置换 OK。
 
+## 开发 · 修复1:显示累积滞后(LIVE 手测发现)— 已定位 + 修复 + 延迟自测通过
+- **现象**(用户手测):ASR 显示远远跟不上说话节奏,说得越久越落后。
+- **证据**(`runs/20260624_165637`,mode=funasr-stream):45s 长故事 `transcription_delay=8375.9ms`、`end_of_turn_delay=8702.9ms` → 滞后随时长累积。
+- **根因**:`_forward` 加了 `_SEND_INTERVAL=0.05` 的 sleep 节流,强制每块 ≥50ms + 每块开销 → **送音频慢于实时 → backlog 持续累积**。对照在线tap(`online_interrupt.py:166-167`)是队列即取即发、**无节流**。
+- **修复**:`_forward` 改为**实时即送**(帧到即 `send_bytes`,去掉 buf/分块/sleep);`chunk_size` [5,10,5]→[5,8,4](480ms,与tap一致,更跟手)。
+- **延迟自测**(22s 连续语音,实时喂):`last_interim` 落后说完 **-0.43s(≈0,不累积)**;旧代码此处会落后数秒。
+- 教训:自测必须含**节奏/延迟**项,不能只验正确性(上次漏了,LIVE 才暴露)。
+
 ## 待续:在线2pass 打断加 VAD 佐证(防幽灵误打断)+ Step 4 注入 A/B(覆盖率/丢字)+ Step 5 LIVE 调参。
 **optimized 核心已 LIVE 可测**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦 + **显示与内容同源**。
 
