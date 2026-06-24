@@ -215,7 +215,16 @@ conversation.wav)。
 ## 开发 · Step 1:funasr_stream_stt.py(核心模块)— 已实现 + 自测通过
 - 新增 `examples/voice_agents/funasr_stream_stt.py`:FunASR 2pass 流式 + **内置独立 silero VAD 输出门控防幽灵** + **GAP 轮次聚合**(以最后有声帧起算,静默≥GAP 发一条 FINAL);livekit `RecognizeStream(sample_rate=16000)`;零改上游。
 - 自测:`py_compile`/`ruff` 通过;**真服务标准自测**——push 2.5s 语音 + 1.8s 尾随静音,得 3 条 INTERIM(边长)→ 静默≥GAP(1.0s)后**聚合出 1 条 FINAL**("对我做了介绍啊那么"),证明"流式识别 + 门控 + 一轮一 FINAL"成立。
-- 待续:静音门(最内层)+ web 接线(XIAOGE_STACK/不过 StreamAdapter/显示同源/在线2pass 加 VAD 佐证)+ 注入 A/B + LIVE。
+## 开发 · Step 2/3a:静音门 + funasr-stream 接线 — 已实现 + 自测通过
+- 新增 `mute_gate.py`:`MuteGate`(io.AudioInput),最内层包裹,`muted` 时输出等长静音帧。自测:直通非零、muted 全零且等长。
+- `web_ui_agent.py`:
+  - STT 选择加 `XIAOGE_STACK`(upstream/optimized)+ `STT_BACKEND=funasr-stream` 分支(用 FunASRStreamSTT、不过 StreamAdapter、`_switchable_stt=None`);默认仍 funasr(upstream),零行为变更。
+  - session.start 后(injection 之后、recorder/KWS/online 之前)插 `MuteGate` 为**最内层**;`/api/mic` 改走静音门(关麦=真关麦:全链路收静音 + 录音暂停);WS 初始 muted 状态读静音门。
+- `.env.example`:登记 `XIAOGE_STACK` / `funasr-stream` / `XIAOGE_AGG_GAP`。
+- 自测:py_compile / ruff / format 通过;集成构建 OK。
+
+## 待续:Step 3b 显示同源(live 气泡改用主STT interim)+ 在线2pass 打断加 VAD 佐证 + Step 4 注入 A/B + Step 5 LIVE 调参。
+**当前已可 LIVE 跑 optimized 核心**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦;**显示暂仍走在线2pass(可能与内容不完全一致,Step 3b 修)**。
 
 
 ---
