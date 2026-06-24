@@ -1002,6 +1002,9 @@ async def entrypoint(ctx: JobContext) -> None:
         _switchable_stt = stt_engine  # expose for web server(可热切换)
         _stt_for_session = StreamAdapter(stt=stt_engine, vad=ctx.proc.userdata["vad"])
     _append_turn_log(f"STT_START provider={stt_engine.provider} mode={_stt_mode} stack={_stack}")
+    # 显示同源:流式主STT(有原生 interim)用主STT 文本驱动 live 气泡(与内容/上下文同源);
+    # 离线后端无 interim,仍由在线2pass 驱动气泡。在线2pass tap 始终保留作打断用。
+    _live_from_main = _stt_mode in {"funasr-stream", "iflytek"}
 
     tts_engine = build_tts()
     _switchable_tts = tts_engine  # expose for web server
@@ -1101,6 +1104,9 @@ async def entrypoint(ctx: JobContext) -> None:
     @session.on("user_input_transcribed")
     def _on_stt(event) -> None:
         if not event.is_final:
+            # 显示同源:流式主STT 的 interim 驱动 live 气泡(全量置换)。
+            if _live_from_main and _live is not None:
+                _live.feed_full(event.transcript)
             return
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
@@ -1272,7 +1278,8 @@ async def entrypoint(ctx: JobContext) -> None:
     def _online_text_fanout(piece: str, segment_end: bool) -> None:
         # 打断逻辑优先、原样执行;显示为 best-effort(feed_online 内部已全兜底,不会拖慢打断)。
         _on_online_text(piece, segment_end)
-        if _live is not None:
+        # 显示:流式主STT 模式下气泡由主STT 驱动(同源),此处不再喂在线2pass 以免双驱动。
+        if _live is not None and not _live_from_main:
             _live.feed_online(piece, segment_end)
 
     _online_reason = _online_unavailable_reason(_online_cfg)

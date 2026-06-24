@@ -223,8 +223,13 @@ conversation.wav)。
 - `.env.example`:登记 `XIAOGE_STACK` / `funasr-stream` / `XIAOGE_AGG_GAP`。
 - 自测:py_compile / ruff / format 通过;集成构建 OK。
 
-## 待续:Step 3b 显示同源(live 气泡改用主STT interim)+ 在线2pass 打断加 VAD 佐证 + Step 4 注入 A/B + Step 5 LIVE 调参。
-**当前已可 LIVE 跑 optimized 核心**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦;**显示暂仍走在线2pass(可能与内容不完全一致,Step 3b 修)**。
+## 开发 · Step 3b:显示同源 — 已实现 + 自测通过
+- `live_transcript.py`:加 `feed_full(text)`(主STT 原生 interim 是全量文本,直接置换显示)。
+- `web_ui_agent.py`:`_live_from_main = _stt_mode in {funasr-stream, iflytek}`;流式后端用主STT interim 驱动气泡(`_on_stt` 非 final 分支),`_online_text_fanout` 停止用在线2pass 喂气泡(免双驱动);在线2pass tap 仍保留作打断。
+- 自测:py_compile/ruff 通过;feed_full 单气泡全量置换 OK。
+
+## 待续:在线2pass 打断加 VAD 佐证(防幽灵误打断)+ Step 4 注入 A/B(覆盖率/丢字)+ Step 5 LIVE 调参。
+**optimized 核心已 LIVE 可测**(`XIAOGE_STACK=optimized`):流式主STT + GAP 一轮一回复 + 不丢字 + 关麦真关麦 + **显示与内容同源**。
 
 
 ---
