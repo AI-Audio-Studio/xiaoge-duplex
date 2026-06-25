@@ -369,6 +369,8 @@ _mute_gate = None  # 输入源头静音门(关麦=真关麦,供 /api/mic 切换)
 _session = None  # AgentSession 引用(供模块级聆听助手在 agent 循环里 say/收尾)
 _listen_ctrl: ListeningController | None = None  # 聆听模式控制器(纯状态机)
 _listen_ttl_handle = None  # 聆听临时内容 TTL 定时器句柄(asyncio,agent 循环)
+_listen_guard_until = 0.0  # 退出提示保护窗截止(monotonic):此前用户语音不得打断小歌
+_LISTEN_GUARD_S = 6.0  # 退出"要整理吗"播报的打断保护时长(秒)
 _tts_backend_key: str = "cosyvoice"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -418,7 +420,7 @@ main{flex:1;display:flex;min-height:0}
 .bubble.appear{animation:bubbleIn .18s ease-out}
 @keyframes bubbleIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .sys-msg{align-self:center;font-size:11px;color:#B6B8BE;padding:2px 10px}
-.dock{display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:0.5px solid #ECECEF;background:#fff;flex-shrink:0}
+.dock{display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:0.5px solid #ECECEF;background:#fff;flex-shrink:0;position:relative;z-index:25}
 .manual{flex:1;min-width:0;height:44px;border:1px dashed #D6D7DB;border-radius:10px;padding:0 13px;
   color:#9CA3AF;font-size:13px;background:#fff;font-family:inherit}
 .manual::placeholder{color:#B6B8BE}
@@ -430,12 +432,12 @@ main{flex:1;display:flex;min-height:0}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
-/* 聆听横幅:挂在对话区(.left)顶部,不覆盖底部 dock 的通话键 */
-#listenMask{position:absolute;top:12px;left:16px;right:16px;z-index:30;display:none}
-.listen-card{display:flex;align-items:center;gap:10px;background:#FFF7F3;border:0.5px solid #F2C6B4;border-radius:12px;padding:11px 15px;box-shadow:0 4px 16px rgba(31,32,36,.10)}
-.listen-title{font-size:14px;font-weight:600;color:#C2410C;display:flex;align-items:center;gap:8px;white-space:nowrap}
-.listen-dot{width:9px;height:9px;border-radius:50%;background:#E86A43;animation:blink 1s infinite;flex-shrink:0}
-.listen-hint{font-size:12.5px;color:#9A6A52;border-left:1px solid #F2C6B4;padding-left:10px}
+/* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。提示居顶、字大。 */
+#listenMask{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;background:rgba(255,247,243,.80);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.listen-card{display:flex;flex-direction:column;align-items:center;gap:12px;margin-top:54px;padding:22px 30px;background:rgba(255,255,255,.92);border:0.5px solid #F2C6B4;border-radius:16px;box-shadow:0 10px 30px rgba(31,32,36,.13)}
+.listen-title{font-size:23px;font-weight:700;color:#C2410C;display:flex;align-items:center;gap:12px}
+.listen-dot{width:13px;height:13px;border-radius:50%;background:#E86A43;animation:blink 1s infinite;flex-shrink:0}
+.listen-hint{font-size:15.5px;color:#9A6A52;text-align:center;max-width:88%;line-height:1.6}
 .right{width:280px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
   padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
 .cfg-title{font-size:13px;font-weight:500;color:#1F2024}
@@ -740,6 +742,28 @@ def _listen_broadcast(on: bool) -> None:
     broadcast(msg)
 
 
+def _listen_interrupt_blocked() -> bool:
+    """聆听期 OR 退出提示保护窗内:用户语音不得打断小歌(进入提示 / 要整理吗)。
+
+    聆听期间用户说的话本就不进显示/上下文,也不应能打断小歌的受控播报;退出后短暂保护
+    "要整理吗",免被刚说的退出指令/前一句的残留 STT/在线2pass 切掉。关闭或正常态恒为 False。
+    """
+    c = _listen_ctrl
+    if c is None or not c.enabled:
+        return False
+    return c.active or time.monotonic() < _listen_guard_until
+
+
+def _listen_arm_guard() -> None:
+    global _listen_guard_until
+    _listen_guard_until = time.monotonic() + _LISTEN_GUARD_S
+
+
+def _listen_clear_guard() -> None:
+    global _listen_guard_until
+    _listen_guard_until = 0.0
+
+
 def _listen_cancel_ttl() -> None:
     global _listen_ttl_handle
     if _listen_ttl_handle is not None:
@@ -770,7 +794,8 @@ def _listen_ask_organize() -> None:
     if _listen_ctrl is None or _session is None:
         return
     _listen_ctrl.awaiting_organize_answer = True
-    _session.say("刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False)
+    _listen_arm_guard()  # 保护这句不被刚说完的退出指令/前一句残留打断
+    _session.say("刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False, allow_interruptions=False)
     _append_turn_log("LISTEN_ORGANIZE_ASK")
 
 
@@ -780,7 +805,8 @@ def _listen_enter_aftermath(via: str, *, notice: bool) -> None:
         return
     _listen_cancel_ttl()  # 再入:旧待整理的定时器关掉(ctrl._enter 已 drop_temp)
     if notice and _listen_ctrl.enter_notice and _session is not None:
-        _session.say(_listen_ctrl.enter_notice, add_to_chat_ctx=False)
+        # 进入提示不可打断;聆听期(active)用户语音已被 _listen_interrupt_blocked 挡住打断路径
+        _session.say(_listen_ctrl.enter_notice, add_to_chat_ctx=False, allow_interruptions=False)
     _listen_broadcast(True)
     _append_turn_log(f"LISTEN_ENTER via {via}")
 
@@ -1124,6 +1150,7 @@ class VoiceAgent(Agent):
         # ② 退出后等"要整理吗"的回答(命令词回声已在 ⓪ 处理)
         if ctrl is not None and ctrl.awaiting_organize_answer:
             ctrl.clear_awaiting()
+            _listen_clear_guard()  # 用户已回答,后续回复(摘要/正常)恢复可打断
             if ctrl.is_affirmative(original):
                 _listen_cancel_ttl()
                 turn_ctx.add_message(
@@ -1150,7 +1177,8 @@ class VoiceAgent(Agent):
         if _should_ignore_user_turn(original):
             logger.info("stop phrase -> force interrupt + skip reply: %r", original)
             _append_turn_log(f"STOP_PHRASE text={original!r} -> force_interrupt + skip_reply")
-            self.session.interrupt(force=True)
+            if not _listen_interrupt_blocked():  # 聆听期/保护窗内不打断小歌(仍跳过回复)
+                self.session.interrupt(force=True)
             raise StopResponse()
 
         if _is_backchannel(original):
@@ -1334,10 +1362,16 @@ async def entrypoint(ctx: JobContext) -> None:
             _live.feed_commit(event.transcript)
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
-            session.interrupt(force=True)
-            _append_turn_log(f"STOP_PHRASE_EARLY text={event.transcript!r} -> force_interrupt")
+            if not _listen_interrupt_blocked():  # 聆听期/保护窗内的"停"等不打断小歌
+                session.interrupt(force=True)
+                _append_turn_log(f"STOP_PHRASE_EARLY text={event.transcript!r} -> force_interrupt")
             return
-        if _overlap_turn_state["user_spoke_over_agent"] and _is_overlap_ack(event.transcript):
+        # 聆听期不做 overlap-ack 早清(让该轮流到 on_user_turn_completed 由 ① capture)
+        if (
+            not _listening
+            and _overlap_turn_state["user_spoke_over_agent"]
+            and _is_overlap_ack(event.transcript)
+        ):
             session.clear_user_turn()
             _append_turn_log(
                 f"BACKCHANNEL_OVERLAP_EARLY text={event.transcript!r} -> clear_user_turn"
@@ -1448,7 +1482,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
-        session.interrupt(force=True)  # 进入聆听希望立即停;退出/停止词也无妨——统一保留强打断
+        # 进入聆听(尚未 active)需立即停小歌→强打断;聆听期/退出保护窗内不打断(用户聆听语句不应能打断)
+        if not _listen_interrupt_blocked():
+            session.interrupt(force=True)
         # 聆听命令词优先(本回调已在 agent 循环):进入/退出后 return,不走停止词逻辑
         if _listen_ctrl is not None and _listen_ctrl.enabled:
             evt = _listen_ctrl.observe_keyword(keyword)
@@ -1487,6 +1523,9 @@ async def entrypoint(ctx: JobContext) -> None:
     _online_cfg = OnlineInterruptConfig.from_env()
 
     def _on_online_text(piece: str, segment_end: bool) -> None:
+        if _listen_interrupt_blocked():  # 聆听期/退出保护窗:用户语音不得打断小歌
+            _online_state["accum"] = ""
+            return
         if segment_end:
             _online_state["accum"] = ""
             return

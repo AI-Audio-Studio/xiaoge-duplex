@@ -101,12 +101,16 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 
 ### 5.3 聆听期行为 + UI 冻结(host 侧 gate)
 - 每个**成轮**的 ASR final → `capture(text)` → `StopResponse()`(不回复、不入 ctx;StopResponse 足够,§9.1)。
-  - 注:overlap-ack 轮被更早的 `_on_stt`→`clear_user_turn()` 清掉(`web_ui_agent.py:1189-1190`),到不了本回调,不会 capture——可接受。
+  - 注:`_on_stt` 的 overlap-ack 早清(`clear_user_turn()`)在聆听期被跳过(`not _listening` 条件),让该轮流到 `on_user_turn_completed` 由 ① `capture`,避免聆听内容被早清丢掉。
 - **UI 干净(host gate,优于纯前端遮罩)**:
   - 聆听 `active` 期,`_on_stt` 里**跳过 `_live.feed_*`**(不再广播 `user_partial` 闪动气泡;证据现状 `web_ui_agent.py:1174-1183`)。
   - `transcription_node` 在 `active` 时**只跳过 broadcast(`web_ui_agent.py:988`)**,不广播 assistant 气泡——故进入提示**不会变成气泡**。
-  - **必守边界**:只 gate 上述**广播 + `_live.feed_*`**;**绝不 gate `tts_node`(`web_ui_agent.py:994`,独立路径)**——否则进入提示就不出声了;也**不动 `_on_stt` 内停止词/`clear_user_turn` 早处理**。
-  - 进入/退出广播 `{type:"listening", on, hint}`,前端据此显示/撤销一个**全屏"聆听中"横幅**(列出退出方式),屏幕不残留底层气泡。
+  - **必守边界**:只 gate 上述**广播 + `_live.feed_*`**;**绝不 gate `tts_node`(`web_ui_agent.py:994`,独立路径)**——否则进入提示就不出声了。
+  - 进入/退出广播 `{type:"listening", on, hint}`,前端据此显示/撤销一层**纱状遮罩**(`backdrop-filter` 半透明)**完整覆盖会话显示区**,顶部居中大字"聆听中"+退出方式提示;**底部 dock 的通话键 `z-index` 浮于遮罩之上仍可点**(退出路径不被挡)。
+- **打断抑制(关键:聆听语句不应能打断小歌)**:聆听期用户的话不进显示/上下文,**也不该打断小歌的受控播报**(进入提示 / "要整理吗")。实测发现仅 gate 显示/`on_user_turn_completed` 不够——KWS 强打断、在线2pass 文本抢断、停止词早断、框架 VAD barge-in 仍会切掉小歌的提示。
+  - 统一守卫 `_listen_interrupt_blocked()` = `active`(聆听期)**或**退出后保护窗内(`_LISTEN_GUARD_S`,默认 6s;退出"要整理吗"播报期 + 刚说的退出指令/前一句残留 STT 到达窗)。
+  - 该守卫为真时,**全部直接打断路径短路**:`_on_kws_hit`、`_on_online_text`、`_on_stt` 停止词早断、`on_user_turn_completed` 停止词。进入提示与"要整理吗"用 `session.say(..., allow_interruptions=False)` 挡掉框架 VAD barge-in。
+  - **进入瞬间**(尚未 `active`、保护窗未开)KWS 仍正常强打断小歌当前话(要立刻停下来听)。用户答完整理问题(②)即 `_listen_clear_guard()`,摘要/正常回复恢复可打断。关闭或正常态守卫恒 False → 主链路零影响。
 
 ### 5.4 退出 + 临时内容生命周期(G4 核心)
 退出(命令词/通话键)时:控制器把工作缓冲转入 `temp_transcript`。
