@@ -815,10 +815,10 @@ def _listen_exit_aftermath(via: str, *, ask: bool) -> None:
     """退出收尾:启动 TTL、撤 UI;ask 且有实质内容则主动问。"""
     if _listen_ctrl is None:
         return
-    _listen_arm_ttl()
+    _listen_arm_ttl()  # 定时删除(TTL)独立保留,不随整理开关
     _listen_broadcast(False)
     _append_turn_log(f"LISTEN_EXIT via {via}")
-    if ask and _listen_ctrl.temp_has_substance():
+    if ask and _listen_ctrl.organize_enabled and _listen_ctrl.temp_has_substance():
         _listen_ask_organize()
 
 
@@ -832,6 +832,7 @@ def _listen_on_mic_toggle(now_muted: bool) -> None:
         _listen_exit_aftermath("mic", ask=False)  # 用户挂起中,不在此问
     elif (
         (not now_muted)
+        and c.organize_enabled
         and c.temp_transcript
         and c.temp_has_substance()
         and not c.awaiting_organize_answer

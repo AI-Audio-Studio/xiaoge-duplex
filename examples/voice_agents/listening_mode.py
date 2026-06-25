@@ -80,6 +80,7 @@ class ListeningController:
     auto_min_chars: int = 20
     temp_ttl_s: float = 120.0
     min_organize_chars: int = 15
+    organize_enabled: bool = False  # 退出后"问是否整理 + 整理动作"总开关;先关,定时删除(TTL)不受影响
     enter_notice: str = _DEFAULT_NOTICE
     # 运行状态(只在 agent 循环线程被改,见模块 docstring)
     active: bool = False
@@ -101,6 +102,7 @@ class ListeningController:
             auto_min_chars=_env_int("XIAOGE_LISTEN_AUTO_MINCHARS", 20),
             temp_ttl_s=_env_float("XIAOGE_LISTEN_TEMP_TTL", 120.0),
             min_organize_chars=_env_int("XIAOGE_LISTEN_MIN_ORGANIZE_CHARS", 15),
+            organize_enabled=_env_bool("XIAOGE_LISTEN_ORGANIZE", False),
             enter_notice=_env_str("XIAOGE_LISTEN_ENTER_NOTICE", _DEFAULT_NOTICE),
         )
 

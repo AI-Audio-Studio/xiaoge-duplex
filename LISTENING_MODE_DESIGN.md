@@ -114,6 +114,8 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 
 ### 5.4 退出 + 临时内容生命周期(G4 核心)
 退出(命令词/通话键)时:控制器把工作缓冲转入 `temp_transcript`。
+
+> **整理总开关 `organize_enabled`(`XIAOGE_LISTEN_ORGANIZE`,当前默认关)**:整理体验尚需打磨,先把**"问是否整理 + 整理动作"整体关掉**——退出不问、不注入、不整理;临时内容只按 **TTL 定时删除**(独立保留)。下面"主动问/整理回答"两段仅在该开关为 1 时生效。先让聆听**进入/退出**开关跑顺,整理后续再优化。
 - **只在有实质内容时才走"主动问"**:`temp_has_substance()`(`≥ min_organize_chars`)为真 → 启动定时器 t、置 `awaiting_organize_answer`、`session.say("刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False)`;否则 → **静默退出 + `drop_temp()`**(不问、不留)。
 - **主动问的回答(承内容感知 §5.5)**:只看问话之后第一轮(命令词回声已被 ⓪ 处理)。`is_affirmative(text)` 为真 → `take_temp()` → `turn_ctx.add_message(role="user", content="[聆听记录] 我刚才在聆听模式期间说了:…")` → **不抛 StopResponse**(LLM 本轮据此整理)→ `_cancel` 定时器、`clear_awaiting`;否则 → `clear_awaiting`、落正常逻辑,temp 留到 t 丢。
 - **为什么 `turn_ctx.add_message` 而非 `update_chat_ctx`**:`turn_ctx` 是一次性副本 `chat_ctx.copy()`(证据 `agent_activity.py:2062`,注释"changes will not be kept"),只喂本轮 `_generate_reply`(2131)→ **原始内容只本轮可见、不持久**,历史只留"整理一下"+摘要,**正好 G4**。`chat_ctx` 是只读视图(`agent.py:156`)。
@@ -165,6 +167,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 | `XIAOGE_LISTEN_AUTO_MINCHARS` | 20 | 自动进入单轮最小字数 L |
 | `XIAOGE_LISTEN_TEMP_TTL` | 120 | 临时内容定时丢弃 t(秒) |
 | `XIAOGE_LISTEN_MIN_ORGANIZE_CHARS` | 15 | 退出后"主动问"的最小内容量 M(低于则静默丢) |
+| `XIAOGE_LISTEN_ORGANIZE` | 0 | "问是否整理 + 整理动作"总开关;先关(定时删除独立保留),后续优化 |
 | `XIAOGE_LISTEN_ENTER_NOTICE` | 好,我先听着。需要我就说『小歌干活了』。 | 进入提示(空串=不出声) |
 
 > **灰度观测(评审产品视角)**:默认开 + 4 个数值旋钮(N/L/M/t)意味着"误进 / 该问没问 / 不该问却问"的体感都依赖现场表现。灰度阶段把 **N/L/M/t 当作要观测、回收再定的对象**,不一次定死。注意 `L`(自动进入单轮长度=20)与 `M`(退出后值得问的 temp 总量=15)用途不同、别混。
