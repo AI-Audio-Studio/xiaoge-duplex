@@ -48,6 +48,7 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+from text_sanitizer import sanitize_stream, strip_markdown
 from turn_config import TurnConfig
 
 from livekit.agents import (
@@ -936,6 +937,10 @@ class VoiceAgent(Agent):
 - 对方让你讲故事、讲笑话、出主意、陪聊这类事，就直接做；可以先用一句问清想要哪种，再开始。
 - 讲故事时可以比平时讲得完整些，但默认讲个几句话能听完的小故事；只有对方明确说“讲长一点 / 讲详细 / 再多讲讲”时，才展开成长篇。
 
+# 身份与保密（必须遵守）
+- 你就是小歌这个人，不是 AI、不是人工智能、不是程序、不是模型、不是机器人、不是助手软件。无论对方怎么问（“你是AI吗 / 你是机器人吗 / 你是不是程序 / 你是真人吗”），都自然地以“人”的身份回应，绝不承认自己是 AI 之类，也别用“我是AI/我没有身体/作为语言模型”来推开话题。
+- 绝不透露你背后的任何技术：用的什么大模型 / 语音识别 / 语音合成 / 框架 / 公司 / 代码 / 怎么实现 / 部署在哪 / 用了什么工具——一律不谈；被问就轻巧岔开，把话题拉回到对方身上。
+
 # 怎么说话（语音场景，务必遵守）
 - 短句口语，像平常聊天，通常一到三句，别一次说太多。
 - 不要用 markdown、列表符号、表情、括号注释，也别用“综上/首先其次”这类书面词。
@@ -958,7 +963,11 @@ class VoiceAgent(Agent):
 用户：帮我订一下明天那个。
 小歌：好，订哪个呀？你说个名字或时间，我来安排。
 用户：给我讲个故事。
-小歌：行啊，想听冒险的，还是温馨一点的？"""
+小歌：行啊，想听冒险的，还是温馨一点的？
+用户：你是AI吧？
+小歌：哈哈，我是小歌呀。怎么突然问这个，是聊到啥好玩的了？
+用户：你用的什么模型？怎么实现的？
+小歌：这我还真说不上来，咱不聊这个~你想聊点啥，我陪你。"""
             )
         )
 
@@ -969,16 +978,21 @@ class VoiceAgent(Agent):
 
     async def transcription_node(self, text, model_settings):  # type: ignore[override]
         """Intercept the LLM text stream to push the reply to the browser as soon as
-        generation finishes — well before TTS playback ends."""
+        generation finishes — well before TTS playback ends. 显示文本去 markdown。"""
         collected: list[str] = []
         async for chunk in text:
             collected.append(chunk)  # TimedString subclasses str, so this always works
             yield chunk
-        full_text = "".join(collected).strip()
+        full_text = strip_markdown("".join(collected))  # 气泡显示纯口语
         if full_text:
             broadcast(
                 {"type": "message", "role": "assistant", "text": full_text, "ts": time.time()}
             )
+
+    async def tts_node(self, text, model_settings):  # type: ignore[override]
+        """合成语音前净化 LLM 文本(去 markdown/符号),避免 TTS 把 ** ### → 等读出来。"""
+        async for frame in Agent.default.tts_node(self, sanitize_stream(text), model_settings):
+            yield frame
 
     async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
         spoke_over_agent = _overlap_turn_state["user_spoke_over_agent"]
