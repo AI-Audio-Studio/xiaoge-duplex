@@ -372,77 +372,124 @@ _HTML = """\
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>小歌语音助手 · 测试面板</title>
+<title>小歌 · 全双工语音交互引擎</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:system-ui,-apple-system,sans-serif;background:#0d0d14;color:#e0e0ee;
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#FFFFFF;color:#1F2024;
   height:100vh;display:flex;flex-direction:column;overflow:hidden}
-header{background:#131320;padding:12px 20px;display:flex;align-items:center;gap:10px;
-  border-bottom:1px solid #232340;flex-shrink:0}
-.dot{width:9px;height:9px;border-radius:50%;background:#333;transition:background .3s}
-.dot.ok{background:#4ade80}.dot.speak{background:#fbbf24;animation:blink 1s infinite}
-@keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
-h1{font-size:16px;font-weight:600;flex:1}
-#badge{font-size:12px;padding:3px 10px;border-radius:10px;background:#1e1e30;color:#6b7280}
-.ctrl{background:#131320;padding:10px 20px;display:flex;gap:10px;align-items:center;
-  border-bottom:1px solid #232340;flex-shrink:0;flex-wrap:wrap}
-.btn{padding:7px 15px;border:none;border-radius:7px;cursor:pointer;
-  font-size:13px;font-weight:500;transition:all .2s}
-#micBtn{background:#22c55e;color:#000}
-#micBtn.muted{background:#ef4444;color:#fff}
-.asr-grp{display:flex;gap:6px;align-items:center}
-.asr-grp label{font-size:12px;color:#6b7280}
-.asr-tab{padding:5px 12px;border:1px solid #2a2a50;border-radius:6px;
-  background:transparent;color:#6b7280;cursor:pointer;font-size:12px;transition:all .2s}
-.asr-tab.on{background:#6d28d9;border-color:#6d28d9;color:#fff}
-#clearBtn{background:#1a1a2a;color:#6b7280;margin-left:auto}
-.log{flex:1;overflow-y:auto;padding:16px 20px;display:flex;flex-direction:column;gap:10px}
-.bubble{max-width:72%;padding:10px 14px;border-radius:12px;font-size:14px;line-height:1.55;word-break:break-all}
-.bubble.user{align-self:flex-end;background:#5b21b6;color:#f0f0ff;border-bottom-right-radius:3px}
-.bubble.assistant{align-self:flex-start;background:#1a1a2e;border:1px solid #252545;
-  border-bottom-left-radius:3px}
-.bubble .ts{font-size:11px;margin-top:4px;opacity:.4}
-.bubble.appear{animation:bubbleIn .18s ease-out}
-@keyframes bubbleIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-.bubble.user.live{opacity:.7}
+header{display:flex;align-items:center;gap:9px;padding:12px 18px;border-bottom:0.5px solid #ECECEF;flex-shrink:0}
+.logo{width:26px;height:26px;border-radius:8px;background:#E86A43;color:#fff;display:flex;
+  align-items:center;justify-content:center;font-size:14px;font-weight:500}
+h1{font-size:15px;font-weight:500;color:#1F2024}
+.sub{font-size:12px;color:#9CA3AF}
+.statepill{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:12px;
+  color:#15803D;background:#E7F6EF;padding:4px 12px;border-radius:999px}
+.dot{width:7px;height:7px;border-radius:50%;background:#9CA3AF;transition:background .3s}
+.dot.ok{background:#22C55E}.dot.speak{background:#F59E0B;animation:blink 1s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+main{flex:1;display:flex;min-height:0}
+.left{flex:1;display:flex;flex-direction:column;min-width:0}
+.log{flex:1;overflow-y:auto;padding:16px 22px;display:flex;flex-direction:column;gap:13px;background:#FBFBFC}
+.bubble{position:relative;max-width:min(78%,560px);padding:9px 13px;border-radius:13px;
+  font-size:14px;line-height:1.6;word-break:break-word}
+.bubble .ts{font-size:11px;margin-top:4px;color:#B6B8BE}
+.bubble.assistant{align-self:flex-start;margin-left:36px;background:#FFFFFF;border:0.5px solid #EAEAEE;
+  border-bottom-left-radius:4px}
+.bubble.user{align-self:flex-end;margin-right:36px;background:#E86A43;color:#fff;border-bottom-right-radius:4px}
+.bubble.user .ts{color:#F6D3C6}
+.bubble.assistant::before{content:"歌";position:absolute;left:-36px;bottom:0;width:28px;height:28px;
+  border-radius:50%;background:#FBEEE8;color:#E86A43;display:flex;align-items:center;justify-content:center;font-size:12px}
+.bubble.user::after{content:"我";position:absolute;right:-36px;bottom:0;width:28px;height:28px;
+  border-radius:50%;background:#ECEDF0;color:#6B7280;display:flex;align-items:center;justify-content:center;font-size:12px}
+.bubble.user.live{background:#FDF1EC;border:1px dashed #F2C3B0;color:#9A3C1E}
+.bubble.user.live .ts{color:#C9A08F}
 .live-dots i{animation:liveBlink 1.2s infinite}
 .live-dots i:nth-child(2){animation-delay:.2s}.live-dots i:nth-child(3){animation-delay:.4s}
 @keyframes liveBlink{0%,100%{opacity:.25}50%{opacity:1}}
-.sys-msg{align-self:center;font-size:11px;color:#374151;padding:2px 10px}
-.sbar{background:#0a0a11;padding:6px 20px;font-size:11px;color:#374151;display:flex;
-  gap:16px;border-top:1px solid #131320;flex-shrink:0}
+.bubble.appear{animation:bubbleIn .18s ease-out}
+@keyframes bubbleIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.sys-msg{align-self:center;font-size:11px;color:#B6B8BE;padding:2px 10px}
+.dock{display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:0.5px solid #ECECEF;background:#fff;flex-shrink:0}
+.manual{flex:1;min-width:0;height:44px;border:1px dashed #D6D7DB;border-radius:10px;padding:0 13px;
+  color:#9CA3AF;font-size:13px;background:#fff;font-family:inherit}
+.manual::placeholder{color:#B6B8BE}
+.rnd{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;flex-shrink:0;border:none;background:transparent}
+#micBtn{background:#E86A43;color:#fff}
+#micBtn.off{background:#FDECEC;color:#DC2626;border:1px solid #F4C9C9}
+.ico-on,.ico-off{display:inline-flex;align-items:center;justify-content:center}
+#micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
+#spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
+.right{width:320px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
+  padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+.cfg-title{font-size:13px;font-weight:500;color:#1F2024}
+.cfg-label{font-size:11px;color:#9CA3AF;margin-bottom:7px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px}
+.asr-tab{font-size:12px;padding:6px 11px;border-radius:8px;border:none;background:#F3F4F6;
+  color:#6B7280;cursor:pointer;font-family:inherit}
+.asr-tab.on{background:#FBEEE8;color:#9A3C1E}
+.exp-tag{font-size:10px;color:#9A3C1E;background:#FBEEE8;padding:1px 6px;border-radius:6px}
+.param-row{font-size:12px;color:#6B7280;display:flex;justify-content:space-between;margin-bottom:4px}
+.track{height:4px;background:#EDEEF1;border-radius:999px;position:relative;margin-bottom:12px}
+.track i{position:absolute;left:0;top:0;height:4px;width:62%;background:#E86A43;border-radius:999px}
+.track b{position:absolute;left:60%;top:-5px;width:14px;height:14px;border-radius:50%;background:#fff;border:2px solid #E86A43}
+.hint{font-size:11px;color:#B6B8BE}
+#clearBtn{margin-top:auto;border:none;background:transparent;color:#6B7280;font-size:13px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;padding:11px 0 0;border-top:0.5px solid #ECECEF;font-family:inherit}
+footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-size:11px;color:#B6B8BE;flex-shrink:0}
+.sbar{display:none}
 </style>
 </head>
 <body>
 <header>
-  <div class="dot" id="dot"></div>
-  <h1>小歌语音助手</h1>
-  <span id="badge">未连接</span>
+  <span class="logo">歌</span>
+  <h1>小歌</h1>
+  <span class="sub">· 全双工语音交互引擎</span>
+  <span class="statepill"><span class="dot" id="dot"></span><span id="badge">连接中…</span></span>
 </header>
-<div class="ctrl">
-  <button class="btn" id="micBtn" onclick="toggleMic()">&#127908; 麦克风开启</button>
-  <div class="asr-grp">
-    <label>ASR 模型：</label>
-    <button class="asr-tab"    id="tabQwen3Stream" onclick="switchASR('qwen3-stream')">Qwen3-流式</button>
-    <button class="asr-tab"    id="tabQwen3"       onclick="switchASR('qwen3')">Qwen3-ASR</button>
-    <button class="asr-tab on" id="tabFunasr"      onclick="switchASR('funasr')">FunASR</button>
+<main>
+  <div class="left">
+    <div class="log" id="log"></div>
+    <div class="dock">
+      <input class="manual" disabled placeholder="手动输入消息 · 即将上线">
+      <button class="rnd" id="micBtn" onclick="toggleMic()" aria-label="麦克风开关">
+        <span class="ico-on"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></span>
+        <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
+      </button>
+      <button class="rnd" id="spkBtn" onclick="sysMsg('扬声器开关即将上线')" aria-label="扬声器开关(即将上线)" title="即将上线">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>
+      </button>
+    </div>
   </div>
-  <div class="asr-grp">
-    <label>TTS 模型：</label>
-    <button class="asr-tab"    id="tabTtsQwen" onclick="switchTTS('qwen')">Qwen DashScope</button>
-    <button class="asr-tab on" id="tabTtsCosy" onclick="switchTTS('cosyvoice')">CosyVoice</button>
-    <button class="asr-tab"    id="tabTtsHttp" onclick="switchTTS('http')">HTTP TTS</button>
+  <div class="right">
+    <div class="cfg-title">配置</div>
+    <div>
+      <div class="cfg-label">ASR 模型</div>
+      <div class="tabs">
+        <button class="asr-tab" id="tabFunasr"      onclick="switchASR('funasr')">FunASR</button>
+        <button class="asr-tab" id="tabQwen3"       onclick="switchASR('qwen3')">Qwen3-ASR</button>
+        <button class="asr-tab" id="tabQwen3Stream" onclick="switchASR('qwen3-stream')">Qwen3-流式</button>
+      </div>
+    </div>
+    <div>
+      <div class="cfg-label">TTS 模型</div>
+      <div class="tabs">
+        <button class="asr-tab" id="tabTtsCosy" onclick="switchTTS('cosyvoice')">CosyVoice</button>
+        <button class="asr-tab" id="tabTtsQwen" onclick="switchTTS('qwen')">Qwen DashScope</button>
+        <button class="asr-tab" id="tabTtsHttp" onclick="switchTTS('http')">HTTP TTS</button>
+      </div>
+    </div>
+    <div>
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:9px"><span class="cfg-label" style="margin:0">判停参数</span><span class="exp-tag">实验</span></div>
+      <div class="param-row"><span>GAP 静默阈值</span><span style="color:#1F2024">1.5s</span></div>
+      <div class="track"><i></i><b></b></div>
+      <div class="hint">更多可调参数陆续加入…</div>
+    </div>
+    <button id="clearBtn" onclick="clearLog()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4h6v3"/></svg>清空会话记录</button>
   </div>
-  <button class="btn" id="clearBtn" onclick="clearLog()">清空记录</button>
-</div>
-<div class="log" id="log"></div>
-<div class="sbar">
-  <span id="sbWs">WS: 断开</span>
-  <span id="sbMic">麦克风: 开启</span>
-  <span id="sbAsr">ASR: Qwen3-流式</span>
-  <span id="sbTts">TTS: CosyVoice</span>
-  <span id="sbMsgs" style="margin-left:auto">0 条消息</span>
-</div>
+</main>
+<footer>© 2026 小歌 Duplex · ATC- AI音频研发部 · 内部测试面板</footer>
+<div class="sbar"><span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbMsgs"></span></div>
 <script>
 var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
 var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live 气泡
@@ -525,8 +572,8 @@ function setAgent(s){
 
 function setMic(m){
   muted=m;
-  id('micBtn').className='btn'+(m?' muted':'');
-  id('micBtn').textContent=(m?'&#128263; 麦克风关闭':'&#127908; 麦克风开启');
+  id('micBtn').className='rnd'+(m?' off':'');   // 图标(开/带斜线关)由 CSS 切换,勿动 innerHTML
+  id('micBtn').setAttribute('aria-label', m?'麦克风,当前关闭':'麦克风,当前开启');
   id('sbMic').textContent='麦克风: '+(m?'关闭':'开启');
 }
 
