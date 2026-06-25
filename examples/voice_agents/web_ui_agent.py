@@ -386,6 +386,9 @@ h1{font-size:15px;font-weight:500;color:#1F2024}
   color:#15803D;background:#E7F6EF;padding:4px 12px;border-radius:999px}
 .dot{width:7px;height:7px;border-radius:50%;background:#9CA3AF;transition:background .3s}
 .dot.ok{background:#22C55E}.dot.speak{background:#F59E0B;animation:blink 1s infinite}
+.dot.off{background:#DC2626}.dot.susp{background:#F59E0B}
+.statepill.off{color:#DC2626;background:#FDECEC}
+.statepill.susp{color:#B45309;background:#FEF3E2}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 main{flex:1;display:flex;min-height:0}
 .left{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -420,7 +423,8 @@ main{flex:1;display:flex;min-height:0}
 .ico-on,.ico-off{display:inline-flex;align-items:center;justify-content:center}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
-.right{width:320px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
+.cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
+.right{width:280px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
   padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
 .cfg-title{font-size:13px;font-weight:500;color:#1F2024}
 .cfg-label{font-size:11px;color:#9CA3AF;margin-bottom:7px}
@@ -445,51 +449,36 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
   <span class="logo">歌</span>
   <h1>小歌</h1>
   <span class="sub">· 全双工语音交互引擎</span>
-  <span class="statepill"><span class="dot" id="dot"></span><span id="badge">连接中…</span></span>
+  <span class="statepill" id="statepill"><span class="dot" id="dot"></span><span id="badge">连接中…</span></span>
 </header>
 <main>
   <div class="left">
     <div class="log" id="log"></div>
     <div class="dock">
       <input class="manual" disabled placeholder="手动输入消息 · 即将上线">
-      <button class="rnd" id="micBtn" onclick="toggleMic()" aria-label="麦克风开关">
+      <button class="rnd" id="micBtn" onclick="toggleMic()" aria-label="录音中,点击关麦">
         <span class="ico-on"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></span>
         <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
-      </button>
-      <button class="rnd" id="spkBtn" onclick="sysMsg('扬声器开关即将上线')" aria-label="扬声器开关(即将上线)" title="即将上线">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>
       </button>
     </div>
   </div>
   <div class="right">
     <div class="cfg-title">配置</div>
-    <div>
-      <div class="cfg-label">ASR 模型</div>
-      <div class="tabs">
-        <button class="asr-tab" id="tabFunasr"      onclick="switchASR('funasr')">FunASR</button>
-        <button class="asr-tab" id="tabQwen3"       onclick="switchASR('qwen3')">Qwen3-ASR</button>
-        <button class="asr-tab" id="tabQwen3Stream" onclick="switchASR('qwen3-stream')">Qwen3-流式</button>
-      </div>
-    </div>
-    <div>
-      <div class="cfg-label">TTS 模型</div>
-      <div class="tabs">
-        <button class="asr-tab" id="tabTtsCosy" onclick="switchTTS('cosyvoice')">CosyVoice</button>
-        <button class="asr-tab" id="tabTtsQwen" onclick="switchTTS('qwen')">Qwen DashScope</button>
-        <button class="asr-tab" id="tabTtsHttp" onclick="switchTTS('http')">HTTP TTS</button>
-      </div>
-    </div>
-    <div>
-      <div style="display:flex;align-items:center;gap:6px;margin-bottom:9px"><span class="cfg-label" style="margin:0">判停参数</span><span class="exp-tag">实验</span></div>
-      <div class="param-row"><span>GAP 静默阈值</span><span style="color:#1F2024">1.5s</span></div>
-      <div class="track"><i></i><b></b></div>
-      <div class="hint">更多可调参数陆续加入…</div>
-    </div>
-    <button id="clearBtn" onclick="clearLog()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4h6v3"/></svg>清空会话记录</button>
+    <div class="cfg-empty">待补充</div>
+    <button id="clearBtn" onclick="clearLog()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4h6v3"/></svg>清空记录</button>
   </div>
 </main>
 <footer>© 2026 小歌 Duplex · ATC- AI音频研发部 · 内部测试面板</footer>
-<div class="sbar"><span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbMsgs"></span></div>
+<!-- 隐藏状态镜像 + 配置控件(暂从界面移除,保留以维持 JS 现状,后续可放回面板) -->
+<div class="sbar">
+  <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbMsgs"></span>
+  <button id="tabFunasr" onclick="switchASR('funasr')"></button>
+  <button id="tabQwen3" onclick="switchASR('qwen3')"></button>
+  <button id="tabQwen3Stream" onclick="switchASR('qwen3-stream')"></button>
+  <button id="tabTtsCosy" onclick="switchTTS('cosyvoice')"></button>
+  <button id="tabTtsQwen" onclick="switchTTS('qwen')"></button>
+  <button id="tabTtsHttp" onclick="switchTTS('http')"></button>
+</div>
 <script>
 var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
 var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live 气泡
@@ -499,14 +488,12 @@ function conn(){
   if(ws && ws.readyState===WebSocket.OPEN) return;
   ws = new WebSocket('ws://localhost:'+location.port+'/ws');
   ws.onopen = function(){
-    id('dot').className='dot ok';
-    id('sbWs').textContent='WS: 已连接';
+    stConn=true; updateStatus();
     sysMsg('已连接到语音助手');
     if(rt){clearTimeout(rt);rt=null;}
   };
   ws.onclose = function(){
-    id('dot').className='dot';
-    id('sbWs').textContent='WS: 断开';
+    stConn=false; updateStatus();
     sysMsg('连接断开，5 秒后重连…');
     rt = setTimeout(conn, 5000);
   };
@@ -564,17 +551,25 @@ function armLive(){
   liveTimer=setTimeout(discardLive, LIVE_DANGLING_MS);
 }
 
-function setAgent(s){
+// 状态优先级:服务断开 > 挂起中(关麦)> 正常 agent 状态
+var stConn=true, stMuted=false, stAgent='';
+function updateStatus(){
+  var pill=id('statepill'), dot=id('dot'), bg=id('badge');
+  if(!stConn){ pill.className='statepill off'; dot.className='dot off'; bg.textContent='服务断开'; return; }
+  if(stMuted){ pill.className='statepill susp'; dot.className='dot susp'; bg.textContent='挂起中'; return; }
   var labels={idle:'空闲', listening:'监听中', thinking:'思考中', speaking:'播报中'};
-  id('badge').textContent = labels[s]||s;
-  id('dot').className = 'dot '+(s==='speaking'?'speak':'ok');
+  pill.className='statepill';
+  dot.className='dot '+(stAgent==='speaking'?'speak':'ok');
+  bg.textContent = labels[stAgent] || stAgent || '已连接';
 }
+function setAgent(s){ stAgent=s; updateStatus(); }
 
 function setMic(m){
-  muted=m;
+  stMuted=m;
   id('micBtn').className='rnd'+(m?' off':'');   // 图标(开/带斜线关)由 CSS 切换,勿动 innerHTML
-  id('micBtn').setAttribute('aria-label', m?'麦克风,当前关闭':'麦克风,当前开启');
+  id('micBtn').setAttribute('aria-label', m?'已关麦,点击开麦':'录音中,点击关麦');
   id('sbMic').textContent='麦克风: '+(m?'关闭':'开启');
+  updateStatus();   // 关麦→挂起中,开麦→正常
 }
 
 function setAsr(b){
@@ -697,7 +692,7 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
         json.dumps(
             {
                 "type": "state",
-                "muted": _mute_gate.muted if _mute_gate else (stt.muted if stt else False),
+                "muted": _mute_gate.muted if _mute_gate else False,
                 "stt_backend": stt.provider if stt else "FunASR",
                 "tts_backend": _tts_backend_key,
             },
