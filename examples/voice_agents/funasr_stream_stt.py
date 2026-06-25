@@ -44,6 +44,68 @@ def _env_f(name: str, default: float) -> float:
         return default
 
 
+# ── 语义判停兜底:一句话"像说完了吗"(用于自适应 GAP 提前提交) ──────────────────
+_COMPLETE_END = "。！？!?…"  # 终止标点 → 多半说完
+_MIDCLAUSE_PUNCT = "，,、；;：:"  # 句中标点 → 多半没说完
+_FINAL_PARTICLES = "了吧吗呢啊嘛呀哈"  # 句末语气词 → 多半说完
+# 结尾连接词/悬词 → 多半没说完(还要接着说):
+_CONTINUE_TAILS = (
+    "而且",
+    "并且",
+    "然后",
+    "接着",
+    "因为",
+    "所以",
+    "但是",
+    "不过",
+    "就是",
+    "还有",
+    "或者",
+    "以及",
+    "的",
+    "和",
+    "跟",
+    "与",
+    "把",
+    "被",
+    "在",
+    "也",
+    "还",
+    "这个",
+    "那个",
+    "嗯",
+    "呃",
+    "那",
+    "这",
+)
+
+
+def _looks_complete(text: str) -> bool:
+    """保守判断一句话是否"像说完了"。仅明显说完才 True;不确定一律 False(等满 GAP_MAX)。"""
+    t = text.rstrip()
+    if not t:
+        return False
+    last = t[-1]
+    if last in _COMPLETE_END:
+        return True
+    if last in _MIDCLAUSE_PUNCT:
+        return False
+    if any(t.endswith(w) for w in _CONTINUE_TAILS):
+        return False
+    if last in _FINAL_PARTICLES:
+        return True
+    return False  # 无明显信号 → 保守等满 GAP_MAX
+
+
+def _commit_ready(silence: float, pending: str, gap_min: float, gap_max: float) -> bool:
+    """轮次提交判定:静默 ≥GAP_MAX 必发;[GAP_MIN,GAP_MAX) 间仅"像说完"才发。"""
+    if silence >= gap_max:
+        return True
+    if gap_min < gap_max and silence >= gap_min:
+        return _looks_complete(pending)
+    return False
+
+
 class FunASRStreamSTT(stt.STT):
     """FunASR 2pass 流式主 STT(内置 VAD 门控 + GAP 聚合)。"""
 
@@ -68,6 +130,9 @@ class FunASRStreamSTT(stt.STT):
             else os.getenv("FUNASR_VERIFY_SSL", "0").strip().lower() in {"1", "true", "yes", "on"}
         )
         self._gap_s = gap_s if gap_s is not None else _env_f("XIAOGE_AGG_GAP", 1.5)
+        # 自适应 GAP 下限:句子"像说完"时静默达此值即提交(快);否则等满 _gap_s(稳)。
+        # GAP_MIN >= GAP 时退化为恒定 GAP(=关闭自适应)。
+        self._gap_min = _env_f("XIAOGE_AGG_GAP_MIN", 0.8)
         self._vad_activation = (
             vad_activation
             if vad_activation is not None
@@ -108,6 +173,7 @@ class _FunASRStreamStream(stt.RecognizeStream):
         super().__init__(stt=stt, conn_options=conn_options, sample_rate=_SAMPLE_RATE)
         self._impl = stt
         self._gap = stt._gap_s
+        self._gap_min = stt._gap_min
         self._activation = stt._vad_activation
         # 聚合状态(单事件循环,无需锁)
         self._prefix = ""  # 已收尾段落
@@ -221,15 +287,13 @@ class _FunASRStreamStream(stt.RecognizeStream):
         while True:
             await asyncio.sleep(_WATCHDOG_INTERVAL)
             pending = (self._prefix + self._seg).strip()
-            if (
-                pending
-                and self._last_voiced is not None
-                and (time.monotonic() - self._last_voiced) >= self._gap
-            ):
-                self._emit_final(pending)
-                self._prefix = ""
-                self._seg = ""
-                self._last_voiced = None
+            if pending and self._last_voiced is not None:
+                silence = time.monotonic() - self._last_voiced
+                if _commit_ready(silence, pending, self._gap_min, self._gap):
+                    self._emit_final(pending)
+                    self._prefix = ""
+                    self._seg = ""
+                    self._last_voiced = None
 
     def _emit_interim(self) -> None:
         text = (self._prefix + self._seg).strip()

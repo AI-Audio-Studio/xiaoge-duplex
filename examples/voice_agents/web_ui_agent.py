@@ -532,7 +532,7 @@ function handle(m){
 // 一次连续说话 = 一个气泡:startLive 只在"新一轮"被后端调用(见 live_transcript.py);
 // 连续说话的小停顿不会重开。无定稿的残留气泡由超时兜底丢弃。
 function startLive(){
-  discardLive();
+  if(liveBubble){ armLive(); return; }   // Bug2 修复:已有正在涨的气泡→续用,不清空重建(防中途消失)
   liveBubble=document.createElement('div');
   liveBubble.className='bubble user live appear';
   liveBubble.innerHTML='<div class="live-txt"><span class="live-dots">聆听中<i>.</i><i>.</i><i>.</i></span></div>';
@@ -592,7 +592,10 @@ function addMsg(role, text, ts){
   d.className='bubble '+role+' appear';
   var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
   d.innerHTML='<div>'+esc(text)+'</div><div class="ts">'+t+'</div>';
-  log().appendChild(d);
+  // Bug1 修复:助手回复(LLM 生成完才广播)若晚于用户已开口的 live 气泡到达,
+  // 插到 live 气泡之上,保持时序 [用户上一轮][小歌回复][用户进行中],不被排到下面。
+  if(role==='assistant' && liveBubble){ log().insertBefore(d, liveBubble); }
+  else { log().appendChild(d); }
   log().scrollTop=log().scrollHeight;
   id('sbMsgs').textContent=(++msgN)+' 条消息';
 }
@@ -1166,6 +1169,9 @@ async def entrypoint(ctx: JobContext) -> None:
             if _live_from_main and _live is not None:
                 _live.feed_full(event.transcript)
             return
+        # 中途 FINAL:并入 live 气泡累计,防超长轮内 interim 清零导致气泡缩水(消失再重来)。
+        if _live_from_main and _live is not None:
+            _live.feed_commit(event.transcript)
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
             session.interrupt(force=True)

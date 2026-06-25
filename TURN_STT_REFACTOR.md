@@ -354,6 +354,77 @@ conversation.wav)。
 3. `XIAOGE_AGG_GAP` 起点 1.2–1.5s、`max_delay` ~0.8–1.0s 是否合适?
 4. 主STT 用 funasr-stream(不用讯飞)是否拍板?(实测它对你的音频更准 + 免费 + 同源)
 
+---
+
+# 开发 · #3 语义判停兜底(自适应 GAP)— 分支 feat/turn-semantic-endpoint
+
+## 背景
+LIVE 手测多版后:过切已 0%、显示跟手,但 GAP 固定 1.5s 使 felt 中位 ~2.4s。目标:felt→~1.9s 且**过切不退化**。
+
+## 方案(自审从严后)
+`funasr_stream_stt._gap_watchdog` 改双阈值:
+- `GAP_MIN`(新,`XIAOGE_AGG_GAP_MIN` 默认 0.8s):句子"像说完"时静默达此值即提交(快)。
+- `GAP_MAX`(= `XIAOGE_AGG_GAP` 1.5s):兜底上限,任何情况静默满 MAX 必提交。
+- `_looks_complete(text)`:结尾 `。！？…` 或句末语气词(了/吧/吗/呢/啊/嘛/呀/哈)→ True;
+  句中标点(，、；)/连接词悬词(然后/因为/的/把/这个/嗯…)/无明显信号 → False(保守等满 MAX)。
+- `_commit_ready(silence,pending,min,max)`:≥MAX 必发;[MIN,MAX) 仅 `_looks_complete` 才发。
+- `GAP_MIN ≥ GAP_MAX` → 退化为恒定 GAP(=一键关)。零改上游。
+
+## 自审结论
+- 过切不退化:不确定一律等 MAX,= 现状;只对"明显说完"的句子提速。
+- FunASR 2pass-offline 带标点(实证),完成信号可靠。
+- 残余风险:"对。然后…"在句号处提前切——但句号后静默 0.8s 多为真边界 + 上游 cancel-on-resume 兜底 + 可调 GAP_MIN。
+
+## 自测(通过)
+- 单测 `_looks_complete`:5 完成句全 True、7 未完成句全 False。
+- 单测 `_commit_ready`:<MIN 不发 / [MIN,MAX)完成发未完成等 / ≥MAX 必发 / GAP_MIN≥MAX 关闭分支 —— 全过。
+- 旋钮接线:GAP_MAX=1.5 / GAP_MIN=0.8。
+- 真服务 smoke:端到端 1 条 FINAL,无崩溃(测试音尾"…想说"非完成信号→正确等满 MAX)。
+- py_compile / ruff 通过。
+- `.env.example` + 本机 `.env` 登记 `XIAOGE_AGG_GAP_MIN=0.8`。
+
+## 待手测
+LIVE 真人:句子以 。/语气词 收尾的轮次应"说完更快回"(felt↓),带停顿/连接词的轮次仍不被切。
+felt 体感、过切率与上版对比。可调 `XIAOGE_AGG_GAP_MIN`(0.7~0.9)。
+
+---
+
+# 开发 · 气泡顺序两 bug 修复(LIVE 手测 runs/20260625_131151 发现)
+
+## 现象(用户手测,快速连续说话)
+- Bug1:答完立刻说下一句,我的新气泡跑到小歌上一条回复**之上**。
+- Bug2:一直说,气泡涨着突然"很多内容消失"→ 续说进一个**小气泡**→ 停下后消失的+小气泡内容又**合并成一个大气泡**。
+
+## 根因(都在前端 live 气泡,与判停/STT 无关)
+- 时间线实证:`open=37 > 用户轮=32`;partial 文本几乎不回落(非文本缩水)。
+- Bug1:助手气泡在 **LLM 生成完成**才广播(`transcription_node`);用户 live 气泡**一开口(VAD)即建**并 `appendChild` 到底 → 抢答时用户新气泡先落底、助手随后落到其下。
+- Bug2:live 气泡开/关由 VAD 事件(`user_speaking`→`startLive`→`discardLive`)驱动,与主STT 流两条线;中途一个多余"开"把已涨大的气泡清空(消失),新 partial 进小气泡,整轮单 final 定稿时全量回填(合并)。
+
+## 修复(纯前端 web_ui_agent 内嵌 JS,解耦零后端)
+- Bug1:`addMsg` 收到 `assistant` 且有 live 气泡时 `insertBefore(liveBubble)` → 顺序恒为 [用户上轮][小歌回复][用户进行中]。
+- Bug2:`startLive` 幂等 —— 已有正在涨的气泡则续用、不清空重建;气泡只由真正 final 收尾。
+
+## 自测(通过)
+py_compile / ruff / `node --check`(JS 语法)通过;HTML 标签全闭合;16 个 JS 函数完整;两处修复标记在位。
+#3(自适应 GAP)本次**保留不动、不合**,待气泡修好后干净复测再定去留。
+
+## 待手测
+快速连续说话:① 新气泡不再跑到小歌回复上面;② 长说话气泡不再中途消失/分裂。
+
+## 追加 · 后端根因修复(runs/20260625_140017 复测发现:open=75>用户轮=65,10 次中途多余"开")
+- 根因:`live_transcript` 的"新轮 gap"按 interim 文本到达时刻算;funasr-stream 说话中途 FunASR 偶尔 >1.5s 不吐字,被误判新轮 → 后端多发"开"。
+- 修复:`feed_full` 改为**只在未开时开一次、不按 gap 中途重开**(轮边界由主STT 真 final→`_close` 决定);`feed_online`(旧在线2pass,无 final、确需 gap 兜底)**不动**。
+- 无副作用论证 + 自测:feed_full 中途模拟 5s 不吐字仍只 1 次"开"、真 final 后正常重开(2 次);feed_online gap 重开兜底保留(2 次)。py_compile/ruff 通过。与前端 startLive 幂等形成双保险。
+- 注:气泡两 bug 为浏览器 DOM 行为,日志不可直接证实;本轮用户手测"不明显/暂无法确认",根因修复后理应消除。
+
+## 追加2 · 超长轮"气泡消失再重来"根因(runs/20260625_150231 实测铁证)
+- 实测:超长轮(652 partial、峰值 912 字)内,partial 长度 **912→1、332→1 骤降**,且在**同一 open..close 组内**;轮内最大间隔仅 3.03s(排除 4s 兜底)、finals 连贯(排除乱码)。
+- 真因:长篇叙述句间停顿 ≥GAP → **主STT 中途发 FINAL → 其 interim 随即清零**;live 气泡只跟 interim,于是从 912 掉到 1(消失)、下条 interim 再从头涨(新小气泡)。上游把中途 FINAL 合并/暂不提交,故全在同一显示轮内。
+- 修复(显示层,根上):`live_transcript` 新增 `_committed`(本轮已提交的中途 FINAL 累计);显示 = `_committed + interim`;新增 `feed_commit(final)` 由 `_on_stt` 的 final 分支调用(仅 `_live_from_main`);`_close` 时清空 `_committed`。FunASR 每次 FINAL 只含新增量(非累计)→ 无重复;真 final 仍由上游 `conversation_item_added` 收尾、前端用权威文本定稿。
+- 无副作用:只在 feed_full 路径生效;feed_online(旧在线2pass)不动。
+- 自测:模拟"涨到30→中途FINAL→interim清零→再涨" → 显示 30→35→38→41 **全程不缩水**、一轮一次开、`_close` 后新轮独立(=4);feed_online gap 兜底回归 OK;py_compile/ruff 通过。
+- 待手测:超长一段话(句间带停顿)→ 气泡只涨不"消失再重来"。
+
 
 
 
