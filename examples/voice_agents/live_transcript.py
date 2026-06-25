@@ -119,10 +119,18 @@ class LiveTranscript:
 
     # ── 主 STT 原生 interim(全量文本)喂入:气泡与内容/上下文同源 ────────────
     def feed_full(self, text: str) -> None:
-        """流式主 STT 的 interim 给的是当前轮**全量**文本(非增量),直接置换显示。"""
+        """流式主 STT 的 interim 给的是当前轮**全量**文本(非增量),直接置换显示。
+
+        轮边界由主STT 的真 final 决定(conversation_item_added→_close),故这里**只在未开时
+        开一次**、不按 gap 中途重开——避免 FunASR 说话中途 >gap 不吐字时被误判"新轮"(气泡中途
+        消失/分裂)。gap 重开仅旧在线2pass 路径(feed_online)需要,保留不动。
+        """
         try:
             now = time.monotonic()
-            self._maybe_open(now)
+            if not self._open:
+                self._open = True
+                self._emit({"type": "user_speaking", "state": "start"})
+                self._debug("open", {})
             self._prefix = ""
             self._seg = text or ""
             self._last_ts = now

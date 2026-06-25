@@ -411,6 +411,12 @@ py_compile / ruff / `node --check`(JS 语法)通过;HTML 标签全闭合;16 个 
 ## 待手测
 快速连续说话:① 新气泡不再跑到小歌回复上面;② 长说话气泡不再中途消失/分裂。
 
+## 追加 · 后端根因修复(runs/20260625_140017 复测发现:open=75>用户轮=65,10 次中途多余"开")
+- 根因:`live_transcript` 的"新轮 gap"按 interim 文本到达时刻算;funasr-stream 说话中途 FunASR 偶尔 >1.5s 不吐字,被误判新轮 → 后端多发"开"。
+- 修复:`feed_full` 改为**只在未开时开一次、不按 gap 中途重开**(轮边界由主STT 真 final→`_close` 决定);`feed_online`(旧在线2pass,无 final、确需 gap 兜底)**不动**。
+- 无副作用论证 + 自测:feed_full 中途模拟 5s 不吐字仍只 1 次"开"、真 final 后正常重开(2 次);feed_online gap 重开兜底保留(2 次)。py_compile/ruff 通过。与前端 startLive 幂等形成双保险。
+- 注:气泡两 bug 为浏览器 DOM 行为,日志不可直接证实;本轮用户手测"不明显/暂无法确认",根因修复后理应消除。
+
 
 
 
