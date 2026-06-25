@@ -11,6 +11,7 @@ broadcast、turn_ctx 注入全在 host。**线程安全靠 host 把所有变更�
 
 from __future__ import annotations
 
+import difflib
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +22,9 @@ _DEFAULT_NOTICE = "好,我先听着。需要我就说『小歌干活了』。"
 # "要整理吗"的回答:肯定/整理类(先判否定,避免"不要"误判为肯定)
 _AFFIRMATIVE = ("要", "好", "行", "可以", "嗯", "整理", "总结", "汇总", "归纳", "理一下", "整一下")
 _NEGATIVE = ("不用", "不要", "不想", "别", "算了", "没必要", "不必")
+# 命令词回声整体近似阈值:KWS 按读音命中,但 STT 可能把命令词听岔(小歌干活了→小郭/小哥干活了)。
+# 归一化后整体相似度≥此值即视为同一条命令词的回声(KWS 才是命中真源)。
+_ECHO_FUZZY_RATIO = 0.6
 
 
 class ListeningEvent(Enum):
@@ -86,7 +90,7 @@ class ListeningController:
     _auto_count: int = 0  # 连续自说自话计数
 
     @classmethod
-    def from_environment(cls) -> "ListeningController":
+    def from_environment(cls) -> ListeningController:
         return cls(
             enabled=_env_bool("XIAOGE_LISTEN_ENABLE", False),
             command_keyword=_env_str("XIAOGE_LISTEN_COMMAND", _DEFAULT_COMMAND).strip()
@@ -130,16 +134,22 @@ class ListeningController:
     def observe_turn(self, text: str, interrupted_agent: bool) -> AutoDecision:
         if not self.enabled or not self.auto_enabled or self.active:
             return AutoDecision.NONE
-        talk_over = bool(interrupted_agent) and len((text or "").strip()) >= self.auto_min_chars
-        if talk_over:
-            self._auto_count += 1
+        n = len((text or "").strip())
+        if n < self.auto_min_chars:
+            return AutoDecision.NONE  # 短噪声(ack/停顿/backchannel):既不计也不重置连击
+        if interrupted_agent:
+            self._auto_count += 1  # 长输入且打断了小歌=自说自话信号
             if self._auto_count >= self.auto_turns:
                 self._auto_count = 0
                 self._enter()  # 自动进入(无 pending_command_echo)
                 return AutoDecision.ENTER
         else:
-            self._auto_count = 0
+            self._auto_count = 0  # 长输入但没打断小歌=在正常对话→重置
         return AutoDecision.NONE
+
+    @property
+    def auto_count(self) -> int:
+        return self._auto_count
 
     # ── 内容:聆听期吞入缓冲 ─────────────────────────────────────────────────
     def capture(self, text: str) -> None:
@@ -160,14 +170,21 @@ class ListeningController:
             return None
         self.pending_command_echo = ""
         raw = (text or "").strip()
-        if _norm(kw) and _norm(kw) in _norm(raw):
-            idx = raw.find(kw)  # 原词精确出现 → 去掉它
+        nkw, nraw = _norm(kw), _norm(raw)
+        if not nkw:
+            return raw
+        # 1) 精确包含(连说 / 准确转写):去掉命令词,返回剩余
+        if nkw in nraw:
+            idx = raw.find(kw)
             if idx >= 0:
-                rem = (raw[:idx] + raw[idx + len(kw) :]).strip(" ,，。、!！?？")
-            else:
-                rem = "" if _norm(raw) == _norm(kw) else raw  # STT 略有出入:归一化相等则视为纯回声
-            return rem
-        return raw  # 回声轮没来、下一轮直接是真答 → 原样返回(不卡死)
+                return (raw[:idx] + raw[idx + len(kw) :]).strip(" ,，。、!！?？")
+            return "" if nraw == nkw else raw
+        # 2) 整体近似(KWS 按读音命中、STT 把命令词听岔,如 小歌干活了→小郭干活了):
+        #    视为纯回声吞掉——KWS 才是命中真源,不被 STT 错字带偏。
+        if difflib.SequenceMatcher(None, nkw, nraw).ratio() >= _ECHO_FUZZY_RATIO:
+            return ""
+        # 3) 回声轮没来、下一轮直接是真答 → 原样返回(不卡死)
+        return raw
 
     # ── 整理回答判定 / 临时内容 ──────────────────────────────────────────────
     def is_affirmative(self, text: str) -> bool:

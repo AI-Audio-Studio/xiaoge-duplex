@@ -397,7 +397,7 @@ h1{font-size:15px;font-weight:500;color:#1F2024}
 .statepill.susp{color:#B45309;background:#FEF3E2}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 main{flex:1;display:flex;min-height:0}
-.left{flex:1;display:flex;flex-direction:column;min-width:0}
+.left{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
 .log{flex:1;overflow-y:auto;padding:16px 22px;display:flex;flex-direction:column;gap:13px;background:#FBFBFC}
 .bubble{position:relative;max-width:min(78%,560px);padding:9px 13px;border-radius:13px;
   font-size:14px;line-height:1.6;word-break:break-word}
@@ -430,11 +430,12 @@ main{flex:1;display:flex;min-height:0}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
-#listenMask{position:fixed;inset:0;z-index:50;background:rgba(31,32,36,.55);display:flex;align-items:center;justify-content:center}
-.listen-card{background:#fff;border:0.5px solid #E2E3E7;border-radius:14px;padding:22px 28px;text-align:center;max-width:80%}
-.listen-title{font-size:18px;font-weight:500;color:#1F2024;display:flex;align-items:center;justify-content:center;gap:9px}
-.listen-dot{width:9px;height:9px;border-radius:50%;background:#E86A43;animation:blink 1s infinite}
-.listen-hint{margin-top:8px;font-size:13px;color:#6B7280}
+/* 聆听横幅:挂在对话区(.left)顶部,不覆盖底部 dock 的通话键 */
+#listenMask{position:absolute;top:12px;left:16px;right:16px;z-index:30;display:none}
+.listen-card{display:flex;align-items:center;gap:10px;background:#FFF7F3;border:0.5px solid #F2C6B4;border-radius:12px;padding:11px 15px;box-shadow:0 4px 16px rgba(31,32,36,.10)}
+.listen-title{font-size:14px;font-weight:600;color:#C2410C;display:flex;align-items:center;gap:8px;white-space:nowrap}
+.listen-dot{width:9px;height:9px;border-radius:50%;background:#E86A43;animation:blink 1s infinite;flex-shrink:0}
+.listen-hint{font-size:12.5px;color:#9A6A52;border-left:1px solid #F2C6B4;padding-left:10px}
 .right{width:280px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
   padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
 .cfg-title{font-size:13px;font-weight:500;color:#1F2024}
@@ -472,6 +473,12 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
         <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
       </button>
     </div>
+    <div id="listenMask" style="display:none">
+      <div class="listen-card">
+        <div class="listen-title"><span class="listen-dot"></span>聆听中</div>
+        <div id="listenHint" class="listen-hint"></div>
+      </div>
+    </div>
   </div>
   <div class="right">
     <div class="cfg-title">配置</div>
@@ -480,12 +487,6 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
   </div>
 </main>
 <footer>© 2026 小歌 Duplex · ATC- AI音频研发部 · 内部测试面板</footer>
-<div id="listenMask" style="display:none">
-  <div class="listen-card">
-    <div class="listen-title"><span class="listen-dot"></span>聆听中</div>
-    <div id="listenHint" class="listen-hint"></div>
-  </div>
-</div>
 <!-- 隐藏状态镜像 + 配置控件(暂从界面移除,保留以维持 JS 现状,后续可放回面板) -->
 <div class="sbar">
   <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbMsgs"></span>
@@ -1132,6 +1133,20 @@ class VoiceAgent(Agent):
                 _append_turn_log("LISTEN_ORGANIZE_DO")
                 return  # 不抛 StopResponse → 正常生成整理回复(摘要);原始内容只本轮可见
 
+        # ④ 自动进入(放在停止词/backchannel 过滤之前:短噪声在 observe_turn 内被忽略、不重置连击;
+        #    长且打断小歌的轮才计数)。连续 N 轮 → 进入。
+        if ctrl is not None:
+            _len = len(original.strip())
+            dec = ctrl.observe_turn(original, spoke_over_agent)
+            if _len >= ctrl.auto_min_chars or ctrl.auto_count or dec != AutoDecision.NONE:
+                _append_turn_log(
+                    f"LISTEN_AUTO over={spoke_over_agent} len={_len} "
+                    f"count={ctrl.auto_count}/{ctrl.auto_turns} dec={dec.value}"
+                )
+            if dec == AutoDecision.ENTER:
+                _listen_enter_aftermath("auto", notice=True)
+                raise StopResponse()  # 触发轮不回复、不 capture(见设计 §5.2)
+
         if _should_ignore_user_turn(original):
             logger.info("stop phrase -> force interrupt + skip reply: %r", original)
             _append_turn_log(f"STOP_PHRASE text={original!r} -> force_interrupt + skip_reply")
@@ -1147,11 +1162,6 @@ class VoiceAgent(Agent):
             logger.info("overlap ack -> skip reply: %r", original)
             _append_turn_log(f"BACKCHANNEL_OVERLAP text={original!r} -> skip_reply")
             raise StopResponse()
-
-        # ④ 自动进入:走到这=会被正常回复的真实轮;连续 N 轮"长输入且打断小歌"→进入
-        if ctrl is not None and ctrl.observe_turn(original, spoke_over_agent) == AutoDecision.ENTER:
-            _listen_enter_aftermath("auto", notice=True)
-            raise StopResponse()  # 触发轮不回复、不 capture(见设计 §5.2)
 
         normalized = _normalize_spoken_digit_sequence(original)
         if normalized is None or normalized == original:
