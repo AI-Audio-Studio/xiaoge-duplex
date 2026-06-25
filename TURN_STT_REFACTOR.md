@@ -417,6 +417,14 @@ py_compile / ruff / `node --check`(JS 语法)通过;HTML 标签全闭合;16 个 
 - 无副作用论证 + 自测:feed_full 中途模拟 5s 不吐字仍只 1 次"开"、真 final 后正常重开(2 次);feed_online gap 重开兜底保留(2 次)。py_compile/ruff 通过。与前端 startLive 幂等形成双保险。
 - 注:气泡两 bug 为浏览器 DOM 行为,日志不可直接证实;本轮用户手测"不明显/暂无法确认",根因修复后理应消除。
 
+## 追加2 · 超长轮"气泡消失再重来"根因(runs/20260625_150231 实测铁证)
+- 实测:超长轮(652 partial、峰值 912 字)内,partial 长度 **912→1、332→1 骤降**,且在**同一 open..close 组内**;轮内最大间隔仅 3.03s(排除 4s 兜底)、finals 连贯(排除乱码)。
+- 真因:长篇叙述句间停顿 ≥GAP → **主STT 中途发 FINAL → 其 interim 随即清零**;live 气泡只跟 interim,于是从 912 掉到 1(消失)、下条 interim 再从头涨(新小气泡)。上游把中途 FINAL 合并/暂不提交,故全在同一显示轮内。
+- 修复(显示层,根上):`live_transcript` 新增 `_committed`(本轮已提交的中途 FINAL 累计);显示 = `_committed + interim`;新增 `feed_commit(final)` 由 `_on_stt` 的 final 分支调用(仅 `_live_from_main`);`_close` 时清空 `_committed`。FunASR 每次 FINAL 只含新增量(非累计)→ 无重复;真 final 仍由上游 `conversation_item_added` 收尾、前端用权威文本定稿。
+- 无副作用:只在 feed_full 路径生效;feed_online(旧在线2pass)不动。
+- 自测:模拟"涨到30→中途FINAL→interim清零→再涨" → 显示 30→35→38→41 **全程不缩水**、一轮一次开、`_close` 后新轮独立(=4);feed_online gap 兜底回归 OK;py_compile/ruff 通过。
+- 待手测:超长一段话(句间带停顿)→ 气泡只涨不"消失再重来"。
+
 
 
 

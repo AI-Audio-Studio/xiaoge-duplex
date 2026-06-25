@@ -1169,6 +1169,9 @@ async def entrypoint(ctx: JobContext) -> None:
             if _live_from_main and _live is not None:
                 _live.feed_full(event.transcript)
             return
+        # 中途 FINAL:并入 live 气泡累计,防超长轮内 interim 清零导致气泡缩水(消失再重来)。
+        if _live_from_main and _live is not None:
+            _live.feed_commit(event.transcript)
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
             session.interrupt(force=True)

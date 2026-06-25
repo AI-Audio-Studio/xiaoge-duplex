@@ -72,6 +72,7 @@ class LiveTranscript:
         self._open = False
         self._prefix = ""  # 已收尾段落的累计文本
         self._seg = ""  # 当前段落的在线增量累计
+        self._committed = ""  # 本轮内主STT 已提交的中途 FINAL 累计(防 interim 清零→气泡缩水)
         self._last_ts = 0.0
 
     # ── 安装:自注册 session 监听(与现有处理器并存,各自 try/except)────────
@@ -134,10 +135,30 @@ class LiveTranscript:
             self._prefix = ""
             self._seg = text or ""
             self._last_ts = now
-            t = self._seg.strip()
+            t = (self._committed + self._seg).strip()  # 已提交累计 + 当前 interim
             if t:
                 self._emit({"type": "user_partial", "text": t})
                 self._debug("partial_full", {"len": len(t)})
+        except Exception:
+            pass
+
+    # ── 主 STT 中途 FINAL 并入本轮累计(超长轮内 interim 会清零,防气泡缩水)──────
+    def feed_commit(self, final_text: str) -> None:
+        """主STT 发了一个 FINAL(其 interim 随即清零):把该段并入 `_committed`,使气泡不缩水。
+
+        本轮真正的结束仍由上游 `conversation_item_added`→`_close` 决定(届时 `_committed` 清空、
+        前端用权威 final 定稿)。FunASR 每次 FINAL 只含上次提交后的新增量(非累计),故无重复。
+        """
+        try:
+            if not final_text:
+                return
+            self._committed = (self._committed + final_text).strip()
+            self._seg = ""
+            self._last_ts = time.monotonic()
+            t = self._committed.strip()
+            if t:
+                self._emit({"type": "user_partial", "text": t})
+                self._debug("partial_commit", {"len": len(t)})
         except Exception:
             pass
 
@@ -158,6 +179,9 @@ class LiveTranscript:
         if not self._open:
             return
         self._open = False
+        self._committed = ""  # 本轮结束:清空累计(下条 interim 开新轮)
+        self._seg = ""
+        self._prefix = ""
         self._debug("close", {"reason": reason})
 
     def _emit(self, msg: dict[str, Any]) -> None:
