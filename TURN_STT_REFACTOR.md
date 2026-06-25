@@ -354,6 +354,39 @@ conversation.wav)。
 3. `XIAOGE_AGG_GAP` 起点 1.2–1.5s、`max_delay` ~0.8–1.0s 是否合适?
 4. 主STT 用 funasr-stream(不用讯飞)是否拍板?(实测它对你的音频更准 + 免费 + 同源)
 
+---
+
+# 开发 · #3 语义判停兜底(自适应 GAP)— 分支 feat/turn-semantic-endpoint
+
+## 背景
+LIVE 手测多版后:过切已 0%、显示跟手,但 GAP 固定 1.5s 使 felt 中位 ~2.4s。目标:felt→~1.9s 且**过切不退化**。
+
+## 方案(自审从严后)
+`funasr_stream_stt._gap_watchdog` 改双阈值:
+- `GAP_MIN`(新,`XIAOGE_AGG_GAP_MIN` 默认 0.8s):句子"像说完"时静默达此值即提交(快)。
+- `GAP_MAX`(= `XIAOGE_AGG_GAP` 1.5s):兜底上限,任何情况静默满 MAX 必提交。
+- `_looks_complete(text)`:结尾 `。！？…` 或句末语气词(了/吧/吗/呢/啊/嘛/呀/哈)→ True;
+  句中标点(，、；)/连接词悬词(然后/因为/的/把/这个/嗯…)/无明显信号 → False(保守等满 MAX)。
+- `_commit_ready(silence,pending,min,max)`:≥MAX 必发;[MIN,MAX) 仅 `_looks_complete` 才发。
+- `GAP_MIN ≥ GAP_MAX` → 退化为恒定 GAP(=一键关)。零改上游。
+
+## 自审结论
+- 过切不退化:不确定一律等 MAX,= 现状;只对"明显说完"的句子提速。
+- FunASR 2pass-offline 带标点(实证),完成信号可靠。
+- 残余风险:"对。然后…"在句号处提前切——但句号后静默 0.8s 多为真边界 + 上游 cancel-on-resume 兜底 + 可调 GAP_MIN。
+
+## 自测(通过)
+- 单测 `_looks_complete`:5 完成句全 True、7 未完成句全 False。
+- 单测 `_commit_ready`:<MIN 不发 / [MIN,MAX)完成发未完成等 / ≥MAX 必发 / GAP_MIN≥MAX 关闭分支 —— 全过。
+- 旋钮接线:GAP_MAX=1.5 / GAP_MIN=0.8。
+- 真服务 smoke:端到端 1 条 FINAL,无崩溃(测试音尾"…想说"非完成信号→正确等满 MAX)。
+- py_compile / ruff 通过。
+- `.env.example` + 本机 `.env` 登记 `XIAOGE_AGG_GAP_MIN=0.8`。
+
+## 待手测
+LIVE 真人:句子以 。/语气词 收尾的轮次应"说完更快回"(felt↓),带停顿/连接词的轮次仍不被切。
+felt 体感、过切率与上版对比。可调 `XIAOGE_AGG_GAP_MIN`(0.7~0.9)。
+
 
 
 
