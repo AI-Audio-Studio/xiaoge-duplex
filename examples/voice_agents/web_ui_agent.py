@@ -467,7 +467,7 @@ main{flex:1;display:flex;min-height:0}
 #micBtn.off{background:#FDECEC;color:#DC2626;border:1px solid #F4C9C9}
 .ico-on,.ico-off{display:inline-flex;align-items:center;justify-content:center}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
-#spkBtn{background:#fff;color:#6B7280;border:1px solid #D6D7DB}
+#spkBtn{display:none;background:#fff;color:#6B7280;border:1px solid #D6D7DB}
 #spkBtn.on{background:#E86A43;color:#fff;border-color:#E86A43}
 #spkBtn.err{background:#FEF2F2;color:#B91C1C;border-color:#FECACA}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
@@ -591,9 +591,13 @@ function handle(m){
     if(m.tts_backend !== undefined) setTts(m.tts_backend);
     if(m.agent_state !== undefined) setAgent(m.agent_state);
     if(m.audio_mode !== undefined && m.audio_mode && !voiceActive){
+      id('spkBtn').style.display='flex';
       id('spkBtn').title='连接语音通话';
       id('sbVoice').textContent='Voice: disconnected';
       sysMsg('点击通话按钮连接浏览器麦克风和播放声音');
+    }
+    if(m.audio_mode !== undefined && !m.audio_mode){
+      id('spkBtn').style.display='none';
     }
   }
 }
@@ -959,12 +963,13 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
 
 
 async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    primary = _ws_primary_client
-    audio_primary = _audio_ws_primary_client
-    if (primary is not None and not primary.closed) or (
-        audio_primary is not None and not audio_primary.closed
-    ):
-        return aiohttp.web.Response(text=_BUSY_HTML, content_type="text/html", charset="utf-8")
+    if _WEB_AUDIO:
+        primary = _ws_primary_client
+        audio_primary = _audio_ws_primary_client
+        if (primary is not None and not primary.closed) or (
+            audio_primary is not None and not audio_primary.closed
+        ):
+            return aiohttp.web.Response(text=_BUSY_HTML, content_type="text/html", charset="utf-8")
     return aiohttp.web.Response(text=_HTML, content_type="text/html", charset="utf-8")
 
 
@@ -973,7 +978,7 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
     ws = aiohttp.web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     lock = _connection_lock
-    if lock is not None:
+    if _WEB_AUDIO and lock is not None:
         async with lock:
             if (
                 _ws_primary_client is not None
@@ -987,7 +992,8 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
             _ws_primary_client = ws
             _ws_clients.add(ws)
     else:
-        _ws_primary_client = ws
+        if _WEB_AUDIO:
+            _ws_primary_client = ws
         _ws_clients.add(ws)
 
     # Push current state immediately on connect
@@ -1004,6 +1010,13 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
             ensure_ascii=False,
         )
     )
+    if not _WEB_AUDIO:
+        aloop = _agent_loop
+        if aloop is not None and aloop.is_running():
+            logger.info("local welcome scheduled")
+            aloop.call_soon_threadsafe(_say_voice_welcome)
+        else:
+            logger.info("local welcome skipped: agent loop not ready")
 
     async for _ in ws:
         pass  # keep-alive; messages from browser not used
