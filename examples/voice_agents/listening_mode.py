@@ -11,6 +11,7 @@ broadcast、turn_ctx 注入全在 host。**线程安全靠 host 把所有变更�
 
 from __future__ import annotations
 
+import difflib
 import os
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +22,9 @@ _DEFAULT_NOTICE = "好,我先听着。需要我就说『小歌干活了』。"
 # "要整理吗"的回答:肯定/整理类(先判否定,避免"不要"误判为肯定)
 _AFFIRMATIVE = ("要", "好", "行", "可以", "嗯", "整理", "总结", "汇总", "归纳", "理一下", "整一下")
 _NEGATIVE = ("不用", "不要", "不想", "别", "算了", "没必要", "不必")
+# 退出尾巴切分:定位命令词的归一化相似度阈值(容忍 STT 把命令词听岔,如 小歌干活了→小郭/小哥干活了)
+_CMD_LOCATE_RATIO = 0.6
+_SPLIT_STRIP = " ,，。、!！?？:：;；…—-"
 
 
 class ListeningEvent(Enum):
@@ -153,6 +157,39 @@ class ListeningController:
         t = (text or "").strip()
         if t:
             self._buffer.append(t)
+
+    # ── 退出尾巴切分:丢命令词及之前(聆听内容),留之后(退出后接着说的真话)──────
+    def split_after_command(self, text: str, keyword: str) -> str | None:
+        """在 text 中定位命令词,返回其**之后**的内容:
+
+        - 命令词后有内容("小歌干活了今天天气"→"今天天气")→ 返回该内容;
+        - 命令词在结尾/整条就是命令词 → 返回 "";
+        - 定位不到(被 STT 听得太离谱)→ 返回 None(host 据此兜底整条吞)。
+        命令词及其之前的内容(聆听尾巴)一律丢弃。先精确匹配,失败用归一化滑窗模糊定位。
+        """
+        raw = (text or "").strip()
+        kw = (keyword or "").strip()
+        if not raw or not kw:
+            return None
+        idx = raw.find(kw)  # 1) 精确(连说/准确转写)
+        if idx >= 0:
+            return raw[idx + len(kw) :].strip(_SPLIT_STRIP)
+        nkw = _norm(kw)  # 2) 归一化滑窗模糊定位(容忍听岔/夹标点)
+        if not nkw:
+            return None
+        best_ratio, best_end = 0.0, -1
+        n = len(raw)
+        for start in range(n):
+            for width in range(len(nkw) - 1, len(nkw) + 4):
+                end = start + width
+                if end > n:
+                    break
+                ratio = difflib.SequenceMatcher(None, nkw, _norm(raw[start:end])).ratio()
+                if ratio > best_ratio:
+                    best_ratio, best_end = ratio, end
+        if best_ratio >= _CMD_LOCATE_RATIO and best_end >= 0:
+            return raw[best_end:].strip(_SPLIT_STRIP)
+        return None
 
 
     # ── 整理回答判定 / 临时内容 ──────────────────────────────────────────────
