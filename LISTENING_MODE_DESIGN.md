@@ -87,7 +87,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 ## 5. 详细设计
 
 ### 5.1 命令词(KWS)
-- 进入 `小歌聆听模式`、退出 `小歌干活了`。`on_hit` 回传原词串,`observe_keyword` 按归一化匹配。
+- 进入命令词**可多个**(默认 `小歌聆听模式` / `小歌进入聆听模式` / `聆听模式`,`XIAOGE_LISTEN_COMMAND` 用 `|` 配,任一命中即进入;`enter_keywords` 属性汇总),退出 `小歌干活了`。`on_hit` 回传原词串,`observe_keyword` 按归一化匹配(进入侧 `hit in {归一化的各进入词}`)。注:`聆听模式`(4 字)较短,KWS 灵敏度高时偶有误触概率,作为便利项接受、可在 env 去掉。
 - **词表合并(必做)**:`KwsConfig.from_env()` 设了 `XIAOGE_KWS_KEYWORDS` 时**整体覆盖**默认(证据 `kws_interrupt.py:92-99`)。故用 `dataclasses.replace` 把命令词**追加到已解析的 `_kws_config.keywords` 元组**。
 - `_on_kws_hit`:**保留**顶部 `session.interrupt(force=True)`(证据 `web_ui_agent.py:1299`)——进入时希望小歌立刻停、退出时无妨;随后 `evt=observe_keyword(kw)`,ENTERED/EXITED 按聆听处理(并置回声标志,§5.5),NONE 落原打断逻辑。
 
@@ -162,7 +162,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 | key | 默认 | 说明 |
 |---|---|---|
 | `XIAOGE_LISTEN_ENABLE` | 0 | 总开关 |
-| `XIAOGE_LISTEN_COMMAND` | 小歌聆听模式 | 进入命令词(KWS) |
+| `XIAOGE_LISTEN_COMMAND` | 小歌聆听模式\|小歌进入聆听模式\|聆听模式 | 进入命令词(KWS);`\|` 配多个,任一命中即进入 |
 | `XIAOGE_LISTEN_WAKE` | 小歌干活了 | 退出命令词(KWS) |
 | `XIAOGE_LISTEN_AUTO_ENABLE` | 1 | 自动进入(产品定默认开) |
 | `XIAOGE_LISTEN_AUTO_TURNS` | 3 | 自动进入连续轮数 N |

@@ -434,12 +434,13 @@ main{flex:1;display:flex;min-height:0}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
-/* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。提示居顶、字大。 */
-#listenMask{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:center;background:rgba(255,247,243,.80);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
-.listen-card{display:flex;flex-direction:column;align-items:center;gap:12px;margin-top:54px;padding:22px 30px;background:rgba(255,255,255,.92);border:0.5px solid #F2C6B4;border-radius:16px;box-shadow:0 10px 30px rgba(31,32,36,.13)}
-.listen-title{font-size:23px;font-weight:700;color:#C2410C;display:flex;align-items:center;gap:12px}
+/* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。
+   顶部横幅跟随会话区宽度(align-items:stretch 撑满),提示单行不换行。 */
+#listenMask{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:stretch;background:rgba(255,247,243,.80);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.listen-card{margin:16px;padding:15px 22px;display:flex;flex-direction:column;align-items:center;gap:8px;background:rgba(255,255,255,.93);border:0.5px solid #F2C6B4;border-radius:14px;box-shadow:0 8px 26px rgba(31,32,36,.12)}
+.listen-title{font-size:22px;font-weight:700;color:#C2410C;display:flex;align-items:center;gap:11px}
 .listen-dot{width:13px;height:13px;border-radius:50%;background:#E86A43;animation:blink 1s infinite;flex-shrink:0}
-.listen-hint{font-size:15.5px;color:#9A6A52;text-align:center;max-width:88%;line-height:1.6}
+.listen-hint{font-size:16px;color:#9A6A52;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .right{width:280px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
   padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
 .cfg-title{font-size:13px;font-weight:500;color:#1F2024}

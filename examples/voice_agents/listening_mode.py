@@ -16,7 +16,8 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 
-_DEFAULT_COMMAND = "小歌聆听模式"
+_DEFAULT_COMMAND = "小歌聆听模式"  # 主进入命令词(显示用)
+_DEFAULT_COMMAND_ALIASES = ("小歌进入聆听模式", "聆听模式")  # 其他进入命令词(同样进入聆听)
 _DEFAULT_WAKE = "小歌干活了"
 _DEFAULT_NOTICE = "好,我先听着。需要我就说『小歌干活了』。"
 # "要整理吗"的回答:肯定/整理类(先判否定,避免"不要"误判为肯定)
@@ -73,7 +74,8 @@ def _env_str(name: str, default: str) -> str:
 class ListeningController:
     # 配置
     enabled: bool = False
-    command_keyword: str = _DEFAULT_COMMAND
+    command_keyword: str = _DEFAULT_COMMAND  # 主进入命令词
+    command_aliases: tuple[str, ...] = _DEFAULT_COMMAND_ALIASES  # 其他进入命令词(任一命中即进入)
     wake_keyword: str = _DEFAULT_WAKE
     auto_enabled: bool = True
     auto_turns: int = 3
@@ -92,10 +94,16 @@ class ListeningController:
 
     @classmethod
     def from_environment(cls) -> ListeningController:
+        cmd_env = _env_str("XIAOGE_LISTEN_COMMAND", "").strip()  # 多个进入命令词用 | 分隔
+        if cmd_env:
+            cmds = [c.strip() for c in cmd_env.split("|") if c.strip()] or [_DEFAULT_COMMAND]
+            command_keyword, command_aliases = cmds[0], tuple(cmds[1:])
+        else:
+            command_keyword, command_aliases = _DEFAULT_COMMAND, _DEFAULT_COMMAND_ALIASES
         return cls(
             enabled=_env_bool("XIAOGE_LISTEN_ENABLE", False),
-            command_keyword=_env_str("XIAOGE_LISTEN_COMMAND", _DEFAULT_COMMAND).strip()
-            or _DEFAULT_COMMAND,
+            command_keyword=command_keyword,
+            command_aliases=command_aliases,
             wake_keyword=_env_str("XIAOGE_LISTEN_WAKE", _DEFAULT_WAKE).strip() or _DEFAULT_WAKE,
             auto_enabled=_env_bool("XIAOGE_LISTEN_AUTO_ENABLE", True),
             auto_turns=_env_int("XIAOGE_LISTEN_AUTO_TURNS", 3),
@@ -109,10 +117,15 @@ class ListeningController:
 
     # ── 供 KWS 词表合并 ──────────────────────────────────────────────────────
     @property
+    def enter_keywords(self) -> tuple[str, ...]:
+        """所有进入命令词(主词 + 别名)。"""
+        return tuple(k for k in ((self.command_keyword, *self.command_aliases)) if k)
+
+    @property
     def keywords(self) -> tuple[str, ...]:
         if not self.enabled:
             return ()
-        return tuple(k for k in (self.command_keyword, self.wake_keyword) if k)
+        return tuple(k for k in (*self.enter_keywords, self.wake_keyword) if k)
 
     # ── 控制:KWS 命中 ───────────────────────────────────────────────────────
     def observe_keyword(self, keyword: str) -> ListeningEvent:
@@ -122,7 +135,7 @@ class ListeningController:
         if not hit:
             return ListeningEvent.NONE
         if not self.active:
-            if hit == _norm(self.command_keyword):
+            if hit in {_norm(k) for k in self.enter_keywords}:  # 任一进入命令词命中
                 self._enter()
                 return ListeningEvent.ENTERED
             return ListeningEvent.NONE
