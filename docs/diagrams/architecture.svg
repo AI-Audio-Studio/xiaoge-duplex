@@ -30,7 +30,7 @@
   <rect x="24" y="172" width="720" height="118" rx="8" fill="#f5f9ff" stroke="#bfdbfe"/>
   <text x="36" y="192" font-size="12" font-weight="700" fill="#2563eb">② 应用编排层 · web_ui_agent.py (单事件循环)</text>
   <rect x="40" y="200" width="200" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="140" y="220" font-size="12.5" fill="#111827" text-anchor="middle">taps 链(透传旁路)</text><text x="140" y="236" font-size="11" fill="#475569" text-anchor="middle">KWS · Online · Recorder</text>
-  <rect x="262" y="200" width="170" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="347" y="220" font-size="12.5" fill="#111827" text-anchor="middle">AgentSession</text><text x="347" y="236" font-size="11" fill="#475569" text-anchor="middle">turn_handling 配置</text>
+  <rect x="262" y="200" width="170" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="347" y="220" font-size="12.5" fill="#111827" text-anchor="middle">AgentSession</text><text x="347" y="236" font-size="11" fill="#475569" text-anchor="middle">判停配置 · turn_config</text>
   <rect x="454" y="200" width="130" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="519" y="220" font-size="12.5" fill="#111827" text-anchor="middle">Switchable</text><text x="519" y="236" font-size="11" fill="#475569" text-anchor="middle">STT/TTS 切换</text>
   <rect x="606" y="200" width="122" height="44" rx="6" fill="#dbeafe" stroke="#2563eb"/><text x="667" y="220" font-size="12.5" fill="#111827" text-anchor="middle">停止词/附和</text><text x="667" y="236" font-size="11" fill="#475569" text-anchor="middle">数字归一化</text>
   <text x="40" y="266" font-size="11" fill="#475569">VoiceAgent.transcription_node / on_user_turn_completed → StopResponse</text>
@@ -39,7 +39,7 @@
   <rect x="24" y="310" width="720" height="118" rx="8" fill="#fafafa" stroke="#e5e7eb"/>
   <text x="36" y="330" font-size="12" font-weight="700" fill="#6b7280">③ 框架内核 · livekit-agents (AudioRecognition / AgentActivity)</text>
   <rect x="40" y="338" width="150" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="115" y="358" font-size="12.5" fill="#111827" text-anchor="middle">VAD 通道</text><text x="115" y="374" font-size="11" fill="#475569" text-anchor="middle">Silero · 始终收帧</text>
-  <rect x="206" y="338" width="180" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="296" y="358" font-size="12.5" fill="#111827" text-anchor="middle">STT 管线 · StreamAdapter</text><text x="296" y="374" font-size="11" fill="#475569" text-anchor="middle">自带 VAD 切整段</text>
+  <rect x="206" y="338" width="180" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="296" y="358" font-size="12.5" fill="#111827" text-anchor="middle">STT 管线 · StreamAdapter</text><text x="296" y="374" font-size="11" fill="#475569" text-anchor="middle">upstream默认 · 流式则绕过</text>
   <rect x="402" y="338" width="150" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="477" y="358" font-size="12.5" fill="#111827" text-anchor="middle">判停 EOU</text><text x="477" y="374" font-size="11" fill="#475569" text-anchor="middle">MultilingualModel</text>
   <rect x="568" y="338" width="76" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="606" y="364" font-size="12.5" fill="#111827" text-anchor="middle">LLM 节点</text>
   <rect x="656" y="338" width="72" height="44" rx="6" fill="#f3f4f6" stroke="#9ca3af"/><text x="692" y="364" font-size="12.5" fill="#111827" text-anchor="middle">TTS 节点</text>
@@ -49,8 +49,8 @@
   <rect x="24" y="448" width="720" height="78" rx="8" fill="#f3fbf7" stroke="#a7f3d0"/>
   <text x="36" y="468" font-size="12" font-weight="700" fill="#059669">④ 模型后端</text>
   <rect x="40" y="476" width="150" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="115" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Qwen LLM 网关</text>
-  <rect x="206" y="476" width="180" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="296" y="501" font-size="12.5" fill="#111827" text-anchor="middle">FunASR / Qwen3 STT</text>
-  <rect x="402" y="476" width="120" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="462" y="501" font-size="12.5" fill="#111827" text-anchor="middle">百炼 TTS</text>
+  <rect x="206" y="476" width="180" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="296" y="501" font-size="12.5" fill="#111827" text-anchor="middle">FunASR/Qwen3/讯飞 STT</text>
+  <rect x="402" y="476" width="120" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="462" y="501" font-size="12.5" fill="#111827" text-anchor="middle">CosyVoice TTS</text>
   <rect x="538" y="476" width="190" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="633" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Silero VAD · KWS 模型(本地)</text>
 
   <!-- main flow arrows (down the center) -->
@@ -70,6 +70,13 @@
   <text x="784" y="392" font-size="11" fill="#475569">浏览器:</text>
   <text x="784" y="408" font-size="11" fill="#475569">localhost:8787</text>
   <path d="M772,300 C752,300 752,222 744,222" fill="none" stroke="#7c3aed" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#arrB)"/>
+
+  <!-- other app modules (free area, right of layer 4) -->
+  <rect x="772" y="448" width="164" height="78" rx="8" fill="#f5f9ff" stroke="#bfdbfe"/>
+  <text x="784" y="468" font-size="12" font-weight="700" fill="#2563eb">其他应用模块</text>
+  <text x="784" y="487" font-size="11" fill="#475569">mute_gate(真关麦)</text>
+  <text x="784" y="503" font-size="11" fill="#475569">listening_mode(聆听)</text>
+  <text x="784" y="519" font-size="10.5" fill="#475569">live_transcript · text_sanitizer</text>
 
   <!-- ============ Interruption sources (bottom) ============ -->
   <rect x="24" y="546" width="912" height="132" rx="8" fill="#fff7f7" stroke="#fecaca"/>

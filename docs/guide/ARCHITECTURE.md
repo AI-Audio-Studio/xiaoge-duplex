@@ -5,6 +5,8 @@
 > 框架底座:LiveKit Agents(`livekit-agents/`)的二次开发 fork。
 > 配套文档:源码级导读见 `examples/voice_agents/qwen_voice_agent_code_guide.md`(注:其中部分阈值是“本应用覆盖值”,不是框架默认值,见本文 §10 的对照表)。
 
+> 注:文中 `文件:行号` 为撰写时快照,代码已演进,**以符号名/当前代码为准**。
+
 ---
 
 ## 1. 项目定位与能力
@@ -16,20 +18,20 @@
 | 能力 | 实现 | 后端 |
 | --- | --- | --- |
 | LLM | `livekit.plugins.openai.LLM`(OpenAI 兼容) | Qwen3-4B 网关(自建) |
-| STT ⇄ | 自定义 `STT`,经 `StreamAdapter` + Silero VAD 切片 | FunASR(默认)/ Qwen3-ASR / Qwen3-流式 |
-| TTS ⇄ | 自定义 `TTS`(流式) | 百炼 DashScope `qwen-tts-realtime`(默认)/ HTTP-TTS |
+| STT | 随 `XIAOGE_STACK` 装配:`upstream`(默认)→ 离线 FunASR 经 `StreamAdapter` + Silero VAD 切片(可热切换 ⇄);`optimized` → `funasr-stream`(FunASR 2pass 流式,**不过 StreamAdapter**) | FunASR 离线(默认)/ FunASR 流式 / Qwen3-ASR / Qwen3-流式 / 讯飞 RTASR(`STT_BACKEND=iflytek`) |
+| TTS ⇄ | 自定义 `TTS`(流式) | CosyVoice DashScope `cosyvoice-v3-flash`(**默认**)/ 百炼 `qwen-tts-realtime` / HTTP-TTS |
 | VAD | `livekit.plugins.silero` | 本地 ONNX |
 | 判停(EOU) | `livekit.plugins.turn_detector.MultilingualModel` | 本地 ONNX(独立推理进程) |
 | 强打断 KWS | `examples/voice_agents/kws_interrupt.py` | sherpa-onnx(本地,`models/kws/`) |
 | 早打断 | `examples/voice_agents/online_interrupt.py` | FunASR 2pass 并行流 |
 | 录音 | `examples/voice_agents/audio_recorder.py` | 本地 WAV |
-| 控制面板 | 内嵌 aiohttp + WebSocket | 浏览器 `http://localhost:8787` |
+| 控制面板 | 内嵌 aiohttp + WebSocket | 浏览器 `http://localhost:8787`(`start.ps1`/`.env` 的 `WEB_UI_PORT`,被占用自动顺延;直接跑 `web_ui_agent.py` 无该 env 时代码回退 8765) |
 
 ---
 
 ## 2. 系统架构总览
 
-![系统架构图](diagrams/architecture.svg)
+![系统架构图](../diagrams/architecture.svg)
 
 分四层:**本地音频 I/O → 框架编排内核 → 应用编排层(小歌) → 远程模型/控制面**。
 
@@ -46,10 +48,11 @@
 │        (taps 链:每个包住前一个,旁路观测后原样透传)                       │   │
 │                                                                          ▼   │
 │  AgentSession ── AudioRecognition ──┬─► VAD(Silero)──► 判停(EOU)             │
-│     │                               └─► STT 管线 ─► StreamAdapter(自带VAD切片)│
-│     │                                              └─► SwitchableSTT ⇄ 远程ASR│
+│     │                               └─► STT 管线:                            │
+│     │                                  upstream(默认)→ StreamAdapter(自带VAD切片)→ SwitchableSTT ⇄ 远程ASR│
+│     │                                  optimized → funasr-stream(流式,绕过 StreamAdapter)│
 │     ├─ on_user_turn_completed:停止词/附和/数字归一化 → StopResponse           │
-│     ├─ LLM(Qwen) ─► transcription_node(广播文本)─► TTS(Bailian)─► output.audio│
+│     ├─ LLM(Qwen) ─► transcription_node(广播文本)─► tts_node(去markdown)─► TTS(默认CosyVoice)─► output.audio│
 │     └─ 事件:agent_state/user_state/transcribed/item_added → 指标&广播         │
 │                                                                              │
 │  打断信号源:  KWS.on_hit ──┐  Online.on_text ──┐  停止词(offline final)──┐   │
@@ -102,55 +105,66 @@
 
 > 行号以本次分析时为准,会随代码漂移;漂了按符号名搜索。
 
-### 4.1 `web_ui_agent.py` —— 应用心脏(约 1060 行)
+### 4.1 `web_ui_agent.py` —— 应用心脏
 职责:构建会话、接后端、装打断 tap、跑控制面板、采集指标。
 
 - **入口流程**(`@server.rtc_session()` `:841`):捕获 `_agent_loop` → `build_stt/tts/llm` → 构建 `AgentSession`(`:861`)→ 注册 6 个事件处理器 → `_warmup_llm()` 火忘任务 → `await session.start(VoiceAgent(), room)` → **start 之后**依次装 `AudioRecorder`、KWS tap、Online tap(`:976-1041`)。
-- **`AgentSession` 配置**(`:861-876`,本应用生效值):
+- **`AgentSession` 配置**(本应用生效值;判停旋钮统一来自 `turn_config.py` 的 `TurnConfig.from_env()`,`TURN_*` 环境变量可覆盖):
   | 项 | 值 | 含义 |
   | --- | --- | --- |
-  | `turn_detection` | `MultilingualModel()` | 语义判停(多语) |
+  | `turn_detection` | `MultilingualModel(unlikely_threshold=…)` | 语义判停(多语);阈值默认 None(用模型默认) |
   | `interruption` | `min_words=3, min_duration=2.0, backchannel_boundary=(1.8,3.5)` | 打断需达 3 词/2s;1.8–3.5s 视作附和 |
   | `endpointing` | `min_delay=0.3, max_delay=0.6` | 判停静默等待区间(很紧,为低延迟) |
   | `preemptive_generation` | `preemptive_tts=True` | 抢先生成 LLM+TTS,叠到判停窗里省延迟 |
-- **`VoiceAgent`**(`:777`):系统提示要求简短、不用 markdown、数字逐位读、命中停止词则沉默。唯一重写的节点是 **`transcription_node`**(`:793`):把 LLM 文本流“偷看”一份,生成一结束就 `broadcast` 给浏览器(早于 TTS 播完)。`on_user_turn_completed`(`:804`)做停止词/附和/抢说过滤 + 数字归一化(详见 §6.4)。
+- **`VoiceAgent`**:系统提示要求简短、不用 markdown、数字逐位读、命中停止词则沉默。重写了**两个**节点:**`transcription_node`** 把 LLM 文本流“偷看”一份,生成一结束就 `strip_markdown` 后 `broadcast` 给浏览器(早于 TTS 播完);**`tts_node`** 在合成前对文本流跑 `sanitize_stream`(去 markdown/符号),避免 TTS 把 `**`/`###`/`→` 读出来。`on_user_turn_completed` 做停止词/附和/抢说过滤 + 数字归一化(详见 §6.4)。另外 entrypoint 在所有 tap 装好后用 `session.say(...)` 播固定开场白。
 - **`build_llm()`**(`:742`):裸 `openai.AsyncClient`(`max_retries=0`,自调 httpx 超时 15/30/30、50 连接池),`Qwen3-4B`,`temp0.7/top_p0.9/top_k20/max_tokens512/presence_penalty1.5`,`enable_thinking=False`(关 Qwen3 思考模式降延迟)。SSL 默认不校验。
 - **`SwitchableSTT`/`SwitchableTTS`**:见 §7。
 - **控制面板**:见 §8。
 - **指标日志**:见 §10.3。
 
-### 4.2 `custom_audio_providers.py` —— 远程模型适配器(约 1190 行)
-实现 5 类 Provider,统一服从框架 `STT`/`TTS` 抽象(`_recognize_impl` / `synthesize`+`stream` / `capabilities` / `provider`)。
+### 4.2 `custom_audio_providers.py` —— 远程模型适配器
+实现多类 Provider,统一服从框架 `STT`/`TTS` 抽象(`_recognize_impl` / `synthesize`+`stream` / `capabilities` / `provider`)。
 
 - **`FunASROfflineSTT`**(`:89`,默认 STT):离线模式 WS。**持久连接复用**(省 ~190ms/turn)+ `asyncio.Lock` 串行化;握手 JSON(`mode:offline / chunk_size / audio_fs / is_speaking / hotwords / itn`),全速上传 PCM,发 `{is_speaking:false}` 触发识别,收 `text`/`is_final`;超时未拿到 final 则 `_reset_ws` 防“串台”。连接超时 `_WS_CONNECT_TIMEOUT`(5s,`asyncio.wait_for`)。失败重连重试一次。
 - **`Qwen3ASROfflineSTT` / `_Qwen3StreamSTT`**(`:277`/`:687`):growing-buffer WS,无握手,发 `{action:finalize}`,取最后的 `full_text`。**预热连接**机制(`prewarm_connection`/`_warm_ws`):用户一开口就提前建连,把握手延迟藏进说话窗;无锁(靠 asyncio 单线程原子性),且**预热未完成不阻塞识别**(直接开新连)。**每轮一条连接**(与 FunASR 的持久复用相反)。
 - **`FunASRStreamingSTT`(2pass)**(`:466`):`streaming=True, interim_results=True`,发 interim(2pass-online)+ final(2pass-offline);剥前导标点避免判停拖到 `max_delay`。
-- **`QwenStreamingTTS`(百炼,默认 TTS)**(`:823`):DashScope 同步 SDK 包进 `to_thread`;**每轮一条连接**(connect/update_session → 逐句 append_text → finish/close),打断即 `close()` 中止服务端合成。**size-1 预热连接池**(`threading.Lock`,TTL 20s)把 ~1s 握手藏到上一轮播放期;**按句边界增量合成**(首包延迟从“整段”降到“首句”)。
-- **`HttpStreamingTTS`**(`:1062`):流式 HTTP POST(`audio/L16`,24kHz),逐句 POST。
+- **`CosyVoiceStreamingTTS`(DashScope CosyVoice,**默认 TTS**)**:默认 `model=cosyvoice-v3-flash`、`voice=longxiaochun_v3`(`COSYVOICE_MODEL`/`COSYVOICE_VOICE` 可覆盖);DashScope SDK 流式合成,与 `QwenStreamingTTS` 同属 DashScope 系。
+- **`QwenStreamingTTS`(百炼,可选)**:DashScope 同步 SDK 包进 `to_thread`;**每轮一条连接**(connect/update_session → 逐句 append_text → finish/close),打断即 `close()` 中止服务端合成。**size-1 预热连接池**(`threading.Lock`,TTL 20s)把 ~1s 握手藏到上一轮播放期;**按句边界增量合成**(首包延迟从“整段”降到“首句”)。
+- **`HttpStreamingTTS`(可选)**:流式 HTTP POST(`audio/L16`,24kHz),逐句 POST。
+- TTS 后端集合 = `{cosyvoice, qwen, http}`(`TTS_BACKEND` 默认 `cosyvoice`)。
 - 通用:重采样(ASR 16kHz、TTS 24kHz 单声道 16bit;`rtc.AudioResampler`)。已抽公共 `_resample_pcm()` / `_acquire_http_session()`(A 档去重);DashScope `api_key` 是**进程级全局**(已加注释,单 key 场景 OK)。
 
-### 4.3 `kws_interrupt.py` —— 本地关键词强打断(约 330 行)
+### 4.3 `kws_interrupt.py` —— 本地关键词强打断
 - **`KwsConfig.from_env()`**:`XIAOGE_KWS_ENABLE_NATIVE` 默认 **1**(开),`XIAOGE_KWS_MODEL_DIR` 默认指向 `<repo>/models/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`(按 `__file__` 的 `parents[2]` 定位,不依赖 cwd)。
 - **`NativeKwsSpotter`**:sherpa-onnx `KeywordSpotter`。**解码跑真线程**,`push()` 只做非阻塞入队(队满丢最旧),命中经 `call_soon_threadsafe(on_hit, keyword)` 桥回循环;800ms 去抖。关键词需转**拼音音素 token**(pypinyin INITIALS+FINALS_TONE,`d ing2 ... @停下`)。
 - **`KwsTapAudioInput`**:tap,`__anext__` 取帧→喂 spotter→**原样透传**。
 - **优雅降级**:缺 sherpa/numpy/pypinyin/模型 → `_unavailable_reason` 返回原因,no-op,不阻塞启动。
 - **命中动作不在本模块**:`on_hit` 回调(在 `web_ui_agent.py` 里)执行 `session.interrupt(force=True)`。
 
-### 4.4 `online_interrupt.py` —— 在线 ASR 早打断(约 250 行)
+### 4.4 `online_interrupt.py` —— 在线 ASR 早打断
 - 第二条**并行** FunASR 2pass WS,只为“在 AI 说话时数用户说了多少字”做 barge-in 判定(转写内容不进对话)。
 - **全程 asyncio**(无线程):`asyncio.Queue` + `create_task`;`chunk_size:[5,8,4]`(480ms,比主链路更短以降首包);reconnect-only,异常全吞。
 - `on_text(text, segment_end)`:online 增量 → 上层累计;offline → 清累计避免重复计数。**判定阈值 `min_chars=3` 在 config,策略在 agent 文件**。
 - `OnlineTapAudioInput`:同 KWS 的 tap 模式。
 
-### 4.5 `audio_recorder.py` —— 会话录音(约 250 行)
+### 4.5 `audio_recorder.py` —— 会话录音
 - 同样用 tap:`RecordingTapAudioInput`(麦克风)+ `RecordingTapAudioOutput`(TTS,`next_in_chain`,**先转发再观测**,且转发 `flush`/`clear_buffer` 以不破坏打断语义)。
 - 以**麦克风帧为时间轴**,把 TTS 帧缓冲后混音写入 `recordings/<时间戳>/conversation.wav`(16kHz 单声道,int16 加和裁剪)。`close` 经 `to_thread`,缓冲有 `threading.Lock`。
+
+### 4.6 其余应用模块(按职责)
+- **`funasr_stream_stt.py`** —— **流式主 STT**(`FunASRStreamSTT`):FunASR 2pass 流式,内置独立 silero VAD + GAP 聚合,**不过 StreamAdapter**;`XIAOGE_STACK=optimized`(或 `STT_BACKEND=funasr-stream`)时启用,`_switchable_stt=None`(面板 ASR 热切换不适用,需重启切换)。
+- **`iflytek_stt.py`** —— 讯飞 RTASR(`IFlyTekRTASR`),`STT_BACKEND=iflytek` 启用的可选第三方流式 STT(同样绕过 StreamAdapter)。
+- **`listening_mode.py`** —— 聆听模式控制器(`ListeningController`,纯状态机):唤醒词进入/退出、临时内容 TTL、退出尾巴 final 处理等(host 助手在 agent 循环线程串行执行)。
+- **`mute_gate.py`** —— **真关麦**(`MuteGate`):包住 `session.input.audio`,在输入**源头**静音,对**所有** STT 后端统一生效。这是关麦的**主机制**(见 §7/§8)。
+- **`live_transcript.py`** —— Web 实时转写气泡(`LiveTranscript`/`LiveTranscriptConfig`):驱动浏览器“聆听中”live 气泡(开口出现、partial 边长、final 定稿)。
+- **`text_sanitizer.py`** —— `sanitize_stream` / `strip_markdown`:净化 `tts_node`(合成前去 markdown/符号)与 `transcription_node`(气泡显示纯口语)。
+- **`turn_config.py`** —— `TurnConfig`:判停旋钮(VAD 静音、endpointing、打断阈值、抢跑、`unlikely_threshold`)集中一处,`TURN_*` 环境变量可覆盖,默认 = 原写死值(见 §10.4)。
 
 ---
 
 ## 5. 核心流程:一轮对话的完整生命周期
 
-![一轮对话时序图](diagrams/sequence-turn.svg)
+![一轮对话时序图](../diagrams/sequence-turn.svg)
 
 ```
 麦克风帧
@@ -169,8 +183,9 @@
               等待锚定“最后一帧语音”(已过的静默被抵扣)
    └─► on_end_of_turn → Agent.on_user_turn_completed(停止词/附和→StopResponse;否则数字归一化)
         └─► _generate_reply:llm_node(Qwen 流式)→ transcription_node(广播文本)
-              → tts_node(Bailian 流式,按句合成)→ output.audio → 扬声器
+              → tts_node(去 markdown → 默认 CosyVoice 流式)→ output.audio → 扬声器
 ```
+> 上图是 `upstream`(默认)装配:离线 STT 经 `StreamAdapter` 整段识别。`optimized`(`funasr-stream`)/讯飞为流式 STT,**绕过 StreamAdapter**(自带 VAD/聚合),无“等整段”这一结构性延迟。
 
 **几个易被忽略的点**
 - **两个 VAD 实例**跑在同一份音频上:一个给 `AudioRecognition`(用户状态/打断/判停),一个在 `StreamAdapter` 内部(把音频切成整段喂离线 STT)。
@@ -204,8 +219,8 @@
 
 ## 7. STT/TTS 可切换后端架构
 
-- **`SwitchableSTT`/`SwitchableTTS`**(`web_ui_agent.py:204/282`)是代理:`AgentSession`/`StreamAdapter` 持有代理引用,`switch_backend()` 原子换内部 `_backend`(GIL 安全),**下一句生效**,无需重启会话/适配器。旧后端 `aclose()` 在 agent 循环上**火忘**执行。
-- **`muted` 静音**:`SwitchableSTT._recognize_impl` 在 muted 时**直接返回空 FINAL transcript**(不是静音、也不调后端)——这正是“面板点了麦克风按钮=静音”导致不识别的根因。
+- **`SwitchableSTT`/`SwitchableTTS`** 是代理:`AgentSession`/`StreamAdapter` 持有代理引用,`switch_backend()` 原子换内部 `_backend`(GIL 安全),**下一句生效**,无需重启会话/适配器。旧后端 `aclose()` 在 agent 循环上**火忘**执行。⚠️ **仅 `upstream`(离线 + StreamAdapter)装配下面板 ASR 热切换可用**;流式后端(`funasr-stream`/讯飞)`_switchable_stt=None`、不经 SwitchableSTT,**面板 ASR 热切换不可用**,切后端需重启。TTS 热切换不受此限。
+- **关麦 = MuteGate(主机制)**:关麦的**主**实现是 `mute_gate.MuteGate`——它包住 `session.input.audio`,在输入**源头**静音,对**所有** STT 后端(含流式/讯飞,不经 SwitchableSTT 的也包含在内)统一生效=**真关麦**。面板 `/api/mic` 翻转 `_mute_gate.muted`。`SwitchableSTT.muted`(muted 时 `_recognize_impl` 直接返回空 FINAL transcript)只是**冗余同步**保持状态一致,流式后端根本不经过它。
 - **失败不致命(本会话新增)**:`SwitchableSTT._recognize_impl` 用 `try/except` 包住后端调用,**异常→返回空**而不是抛出。原因:抛出会**杀死 `StreamAdapter` 的识别流**,导致即便切回也永久变聋。这样切到不可达后端最多“暂时没反应”,切回即恢复。✅ **`SwitchableTTS` 已有对称保护**(B 档):把后端 TTS 的 `error` 事件转发到代理,框架的“可恢复错误→记录并继续”逻辑生效;`HttpStreamingTTS` POST 加了连接超时(`TTS_CONNECT_TIMEOUT`,默认 5s),切到不可达 TTS 也是快速失败、切回即恢复,不崩。
 - **连接超时**:`_WS_CONNECT_TIMEOUT=5s` 让不可达后端快速失败(否则 Windows 上 TCP 连接卡 ~21s)。
 - **加新后端**(A 档后已简化):构造逻辑收敛到 `_make_stt_backend()` / `_make_tts_backend()` **单一来源**(`build_*` 与 `/api/{asr,tts}` 切换共用)。加后端只需:在该工厂加分支、把 key 加进 `_STT_BACKENDS`/`_TTS_BACKENDS`、再加 `_HTML` 里的 tab。
@@ -256,8 +271,8 @@ VAD 静默判定(min_silence_duration=0.35)
 - 在线打断用更短 `chunk_size`(480ms)换更早 barge-in。
 
 ### 10.3 可观测性
-- `qwen_voice_turn_metrics.log`:`TURN_USER`(transcription_delay/end_of_turn_delay…)、`TURN_ASSISTANT`(llm_ttft/tts_ttfb/playback_latency/e2e_latency/wall_clock_e2e)、`FELT_LATENCY`(用户停说→开口的体感延迟)。
-- `.run/agent.log`:每次启动覆盖的 DEBUG 全量日志(VAD/STT/KWS/dashscope),诊断利器。设 `LIVEKIT_LOG_LEVEL=DEBUG` 更详。
+- `qwen_voice_turn_metrics.log`:`TURN_USER`(transcription_delay/end_of_turn_delay…)、`TURN_ASSISTANT`(llm_ttft/tts_ttfb/playback_latency/e2e_latency/wall_clock_e2e)、`FELT_LATENCY`(用户停说→开口的体感延迟)。仍在。
+- **`.run/agent.log` 已废除**:正常运行**不再写任何文件日志处理器**(零开销)。DEBUG 全量日志(VAD/STT/KWS/dashscope)改由测试模式承载——设 `AGENT_TIMELINE=1` 时写 `runs/<时间戳>/debug.log`(见 `event_timeline.install_debug_log`);设 `LIVEKIT_LOG_LEVEL=DEBUG` 更详。
 
 ### 10.4 ⚠️ 重要:阈值的“本应用值” vs “框架默认值”
 源码导读里的若干数字其实是**本应用在 `turn_handling` 里覆盖的值**,不是框架默认值:
@@ -270,7 +285,7 @@ VAD 静默判定(min_silence_duration=0.35)
 | `preemptive_tts` | True | False |
 | Silero `min_silence_duration` | 0.35 | 插件层设定 |
 
-调优时改 `web_ui_agent.py` 的 `turn_handling` 即可,不必动框架。
+调优时改 `turn_config.py` 的 `TurnConfig`(或设对应 `TURN_*` 环境变量)即可,不必动框架,也不必改 `web_ui_agent.py`。默认值不变。
 
 ---
 
@@ -278,7 +293,7 @@ VAD 静默判定(min_silence_duration=0.35)
 
 - **唯一配置文件 = 根目录 `.env`**(`python-dotenv` + `start.ps1` 自动加载注入进程环境)。清单见 `.env.example`。无 `config/` 目录(单应用 MVP 不需要)。
 - 代码里每个 `os.getenv("X", 默认)` 都带内置默认,`.env` 缺项也能跑。
-- 关键变量:`QWEN_*`(LLM)、`STT_BACKEND`/`FUNASR_WS_URL`/`QWEN3_ASR_*`(STT)、`DASHSCOPE_API_KEY`/`BAILIAN_TTS_*`/`HTTP_TTS_URL`(TTS)、`XIAOGE_KWS_*`(强打断)、`XIAOGE_ONLINE_INTERRUPT_*`(早打断)、`WEB_UI_PORT`/`LIVEKIT_LOG_LEVEL`、`ASR_WS_CONNECT_TIMEOUT`/`BAILIAN_TTS_WARM_TTL`。
+- 关键变量:`QWEN_*`(LLM)、`XIAOGE_STACK`/`STT_BACKEND`/`FUNASR_WS_URL`/`QWEN3_ASR_*`(STT 装配与后端)、`TTS_BACKEND`/`COSYVOICE_MODEL`/`COSYVOICE_VOICE`/`DASHSCOPE_API_KEY`/`BAILIAN_TTS_*`/`HTTP_TTS_URL`(TTS)、`TURN_*`(判停旋钮,见 `turn_config.py`)、`XIAOGE_KWS_*`(强打断)、`XIAOGE_ONLINE_INTERRUPT_*`(早打断)、`WEB_UI_PORT`(代码回退 8765,`.env`/`start.ps1` 用 8787)/`LIVEKIT_LOG_LEVEL`/`AGENT_TIMELINE`、`ASR_WS_CONNECT_TIMEOUT`/`BAILIAN_TTS_WARM_TTL`。
 - `models/`(KWS 模型)是**数据资产**,与配置分开;已 gitignore。
 
 ---
@@ -286,9 +301,9 @@ VAD 静默判定(min_silence_duration=0.35)
 ## 12. 二次开发指南:扩展点、风险、技术债
 
 ### 12.1 扩展点
-- **加 STT/TTS 后端**:`_STT_BACKENDS`/`_TTS_BACKENDS` + `build_*()` + `_handle_switch_*` + HTML tab(四处同步)。
-- **调对话节奏**:`turn_handling` 一处集中(判停/打断/endpointing/抢先)。
-- **管线插桩**:`VoiceAgent` 重写 `stt_node/llm_node/tts_node/transcription_node`(已示范 `transcription_node`)。
+- **加 STT/TTS 后端**:`_STT_BACKENDS`/`_TTS_BACKENDS` + `_make_stt_backend()`/`_make_tts_backend()`(单一来源)+ HTML tab。
+- **调对话节奏**:`turn_config.py` 的 `TurnConfig`(或 `TURN_*` 环境变量)一处集中(判停/打断/endpointing/抢先/`unlikely_threshold`)。
+- **管线插桩**:`VoiceAgent` 重写 `stt_node/llm_node/tts_node/transcription_node`(已示范 `transcription_node` 与 `tts_node`)。
 - **打断策略**:KWS 的 `on_hit`、在线的 `on_text` 是注入点;停止词 `_STOP_WORDS`、热词 `_funasr_hotwords`、KWS 关键词 `XIAOGE_KWS_KEYWORDS` 均可配。
 - **新增观测/旁路**:再包一层 `session.input.audio` tap。
 
@@ -307,8 +322,8 @@ VAD 静默判定(min_silence_duration=0.35)
 12. **继承的上游 CI/示例资产**:上游 `.github/workflows` 已删除;部分 `examples/`、`tests/` 依赖的音频是丢失的 LFS 指针(已移除),跑那些上游示例会缺素材。
 
 ### 12.3 上手路径建议
-1. 先跑通:`setup.ps1` → `start_agent.cmd`,对照 `.run/agent.log` 看一轮 `TURN_USER`/`TURN_ASSISTANT`。
-2. 读 `web_ui_agent.py` 的 entrypoint + `turn_handling` + `on_user_turn_completed`(应用编排全在这)。
+1. 先跑通:`setup.ps1` → `start_agent.cmd`,对照 `qwen_voice_turn_metrics.log` 看一轮 `TURN_USER`/`TURN_ASSISTANT`(需更详的 DEBUG 全量日志时设 `AGENT_TIMELINE=1`,落 `runs/<ts>/debug.log`)。
+2. 读 `web_ui_agent.py` 的 entrypoint + `turn_config.py` 的 `TurnConfig` + `on_user_turn_completed`(应用编排全在这)。
 3. 读 `custom_audio_providers.py` 你要改的那个 Provider。
 4. 打断改动前,务必先理解 §5 生命周期 + §6.5 音频丢弃 + 框架 `agent_activity.py`/`audio_recognition.py`。
 5. 深挖框架内核时,配合 `examples/voice_agents/qwen_voice_agent_code_guide.md`(注意 §10.4 的阈值对照)。
@@ -321,10 +336,17 @@ VAD 静默判定(min_silence_duration=0.35)
 | --- | --- |
 | `examples/voice_agents/web_ui_agent.py` | 应用入口:会话编排、后端接入、打断装配、控制面板、指标 |
 | `examples/voice_agents/qwen_funasr_bailian_voice_agent.py` | 纯 console 版(无 Web UI)的同类 agent |
-| `examples/voice_agents/custom_audio_providers.py` | FunASR/Qwen3 STT、百炼/HTTP TTS 适配器 |
+| `examples/voice_agents/custom_audio_providers.py` | FunASR/Qwen3 STT、CosyVoice(默认)/百炼/HTTP TTS 适配器 |
+| `examples/voice_agents/funasr_stream_stt.py` | 流式主 STT(`FunASRStreamSTT`,内置 silero VAD + GAP 聚合,不过 StreamAdapter) |
+| `examples/voice_agents/iflytek_stt.py` | 讯飞 RTASR(`IFlyTekRTASR`,`STT_BACKEND=iflytek` 可选) |
 | `examples/voice_agents/kws_interrupt.py` | sherpa-onnx 本地关键词强打断 |
 | `examples/voice_agents/online_interrupt.py` | FunASR 2pass 在线早打断 |
 | `examples/voice_agents/audio_recorder.py` | 麦克风+TTS 混音录音 |
+| `examples/voice_agents/mute_gate.py` | `MuteGate`:输入源头静音=真关麦(关麦主机制) |
+| `examples/voice_agents/listening_mode.py` | `ListeningController`:聆听模式状态机 |
+| `examples/voice_agents/live_transcript.py` | `LiveTranscript`:Web 实时转写气泡驱动 |
+| `examples/voice_agents/text_sanitizer.py` | `sanitize_stream`/`strip_markdown`:净化 tts_node/transcription_node |
+| `examples/voice_agents/turn_config.py` | `TurnConfig`:判停旋钮集中(`TURN_*` env 覆盖) |
 | `examples/voice_agents/qwen_voice_agent_code_guide.md` | 源码级框架导读(阈值见 §10.4 对照) |
 | `livekit-agents/livekit/agents/voice/agent_session.py` | 会话容器、音频转发 |
 | `livekit-agents/livekit/agents/voice/agent_activity.py` | 活动状态机、`push_audio`/`should_discard`、打断决策 |

@@ -1,11 +1,13 @@
 # Contributing to livekit/agents
 
+> 注:本文部分流程继承自上游 livekit/agents,本仓库为其 fork;CLA/Slack 等上游专属流程在此仅供参考。
+
 The LiveKit Agents framework is an open-source project, and we welcome any contribution from anyone
 willing to work in good faith with the community. No contribution is too small!
 
 ## Code of Conduct
 
-The LiveKit Agents project has a [Code of Conduct](/CODE_OF_CONDUCT.md) to which all contributors
+The LiveKit Agents project has a [Code of Conduct](CODE_OF_CONDUCT.md) to which all contributors
 must adhere.
 
 ## Contribute code
@@ -48,7 +50,7 @@ may have questions about the framework and how to use it. Join the `#agents` cha
 
 ## Development flow
 
-Look at the `examples/` directory to get a sense of all the different features and how to use them. You can create your own examples in `examples/dev/` and use it for your development loop.
+Look at the `examples/` directory to get a sense of all the different features and how to use them. You can create your own examples in `examples/voice_agents/` and use it for your development loop.
 
 ## Typechecking, linting and formatting
 
