@@ -365,6 +365,8 @@ class SwitchableTTS(tts.TTS):
 _WEB_PORT = int(os.getenv("WEB_UI_PORT", "8765"))
 _WEB_HOST = os.getenv("WEB_UI_HOST", "localhost")
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
+_ws_primary_client: aiohttp.web.WebSocketResponse | None = None
+_connection_lock: asyncio.Lock | None = None
 _web_loop: asyncio.AbstractEventLoop | None = None
 _agent_loop: asyncio.AbstractEventLoop | None = None
 _switchable_stt: SwitchableSTT | None = None
@@ -384,8 +386,29 @@ _WEB_AUDIO: bool = _env_bool("WEB_AUDIO", False)
 _SSL_CERT: str = os.getenv("WEB_SSL_CERT", "")
 _SSL_KEY: str = os.getenv("WEB_SSL_KEY", "")
 _audio_ws_clients: set[aiohttp.web.WebSocketResponse] = set()
+_audio_ws_primary_client: aiohttp.web.WebSocketResponse | None = None
 _ws_audio_input_ref = None  # set to WebSocketAudioInput when WEB_AUDIO=1
 _ws_audio_output_ref = None  # set to WebSocketAudioOutput when WEB_AUDIO=1
+_VOICE_WELCOME = "连接成功，欢迎使用小歌，请开始说话。"
+_BUSY_MESSAGE = "服务器繁忙，请稍后再试！"
+
+_BUSY_HTML = f"""\
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_BUSY_MESSAGE}</title>
+<style>
+html,body{{height:100%;margin:0}}
+body{{display:flex;align-items:center;justify-content:center;background:#fff7f3;color:#9a3412;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+.busy{{font-size:42px;font-weight:800;line-height:1.3;text-align:center;padding:32px}}
+@media (max-width:640px){{.busy{{font-size:30px}}}}
+</style>
+</head>
+<body><main class="busy">{_BUSY_MESSAGE}</main></body>
+</html>
+"""
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
 
@@ -491,8 +514,8 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
         <span class="ico-on"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></span>
         <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
       </button>
-      <button class="rnd" id="spkBtn" onclick="toggleVoice()" aria-label="Connect browser voice" title="Connect browser voice">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>
+      <button class="rnd" id="spkBtn" onclick="toggleVoice()" aria-label="连接语音通话" title="连接语音通话">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.9.32 1.77.59 2.61a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.47-1.16a2 2 0 0 1 2.11-.45c.84.27 1.71.47 2.61.59A2 2 0 0 1 22 16.92z"/></svg>
       </button>
     </div>
     <div id="listenMask" style="display:none">
@@ -520,7 +543,8 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
   <button id="tabTtsHttp" onclick="switchTTS('http')"></button>
 </div>
 <script>
-var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
+var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null, serverBusy=false;
+var VOICE_WELCOME='连接成功，欢迎使用小歌，请开始说话。';
 var wsProto = location.protocol==='https:' ? 'wss:' : 'ws:';
 var wsAudio=null, micStream=null, audioCtx=null, playCtx=null, voiceActive=false;
 var nextPlayTime=0, AUDIO_SR=16000, scheduledSources=[];
@@ -528,6 +552,7 @@ var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live �
 var LIVE_DANGLING_MS=4000;                  // 无定稿的残留气泡兜底淡出(毫秒)
 
 function conn(){
+  if(serverBusy) return;
   if(ws && ws.readyState===WebSocket.OPEN) return;
   ws = new WebSocket(wsProto+'//'+location.host+'/ws');
   ws.onopen = function(){
@@ -537,6 +562,7 @@ function conn(){
   };
   ws.onclose = function(){
     stConn=false; updateStatus();
+    if(serverBusy) return;
     sysMsg('连接断开，5 秒后重连…');
     rt = setTimeout(conn, 5000);
   };
@@ -544,6 +570,13 @@ function conn(){
 }
 
 function handle(m){
+  if(m.type==='busy'){
+    serverBusy=true;
+    sysMsg(m.message || '服务器繁忙，请稍后再试！');
+    try{ if(ws) ws.close(); }catch(x){}
+    stopVoice();
+    return;
+  }
   if(m.type==='clear'){ clearPlayback(); return; }
   if(m.type==='listening'){ setListening(m.on, m.hint); }
   if(m.type==='user_speaking' && m.state==='start') startLive();
@@ -558,9 +591,9 @@ function handle(m){
     if(m.tts_backend !== undefined) setTts(m.tts_backend);
     if(m.agent_state !== undefined) setAgent(m.agent_state);
     if(m.audio_mode !== undefined && m.audio_mode && !voiceActive){
-      id('spkBtn').title='Connect browser voice';
+      id('spkBtn').title='连接语音通话';
       id('sbVoice').textContent='Voice: disconnected';
-      sysMsg('Click the speaker button to connect browser microphone and playback');
+      sysMsg('点击通话按钮连接浏览器麦克风和播放声音');
     }
   }
 }
@@ -577,7 +610,7 @@ async function toggleVoice(){
 
 async function startVoice(){
   try{
-    sysMsg('Connecting browser playback...');
+    sysMsg('正在连接浏览器通话...');
     playCtx = new AudioContext({sampleRate:AUDIO_SR});
     if(playCtx.state === 'suspended') await playCtx.resume();
 
@@ -586,7 +619,7 @@ async function startVoice(){
     wsAudio.onopen = async function(){
       nextPlayTime = 0;
       setVoiceActive(true);
-      sysMsg('Browser playback connected. Requesting microphone...');
+      sysMsg('通话已连接，正在请求麦克风权限...');
       try{
         micStream = await navigator.mediaDevices.getUserMedia({audio:{
           channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
@@ -601,21 +634,21 @@ async function startVoice(){
         var node = new AudioWorkletNode(audioCtx,'p');
         node.port.onmessage = function(e){ if(wsAudio && wsAudio.readyState===WebSocket.OPEN && !muted) wsAudio.send(e.data); };
         src.connect(node);
-        sysMsg('Microphone connected. You can speak now.');
+        sysMsg(VOICE_WELCOME);
       }catch(err){
-        setVoiceError('microphone failed');
-        sysMsg('Microphone failed: '+err.message+'. Playback is still connected.');
+        setVoiceError('麦克风连接失败');
+        sysMsg('麦克风连接失败：'+err.message+'。声音播放仍已连接。');
       }
     };
     wsAudio.onmessage = function(e){
       if(e.data instanceof ArrayBuffer){ playPcm(e.data); }
-      else{ try{ var m=JSON.parse(e.data); if(m.type==='clear') clearPlayback(); }catch(x){} }
+      else{ try{ var m=JSON.parse(e.data); if(m.type==='clear') clearPlayback(); else if(m.type==='busy'){ sysMsg(m.message || '服务器繁忙，请稍后再试！'); stopVoice(); } }catch(x){} }
     };
     wsAudio.onclose = function(){ wsAudio=null; cleanupVoice(); };
-    wsAudio.onerror = function(){ setVoiceError('voice websocket error'); stopVoice(); };
+    wsAudio.onerror = function(){ setVoiceError('语音连接异常'); stopVoice(); };
   }catch(err){
-    setVoiceError('voice connection failed');
-    sysMsg('Voice connection failed: '+err.message);
+    setVoiceError('语音连接失败');
+    sysMsg('语音连接失败：'+err.message);
     stopVoice();
   }
 }
@@ -651,8 +684,8 @@ function setVoiceActive(a){
   var b=id('spkBtn');
   if(!b) return;
   b.className='rnd'+(a?' on':'');
-  b.setAttribute('aria-label', a?'Disconnect browser voice':'Connect browser voice');
-  b.title=a?'Disconnect browser voice':'Connect browser voice';
+  b.setAttribute('aria-label', a?'断开语音通话':'连接语音通话');
+  b.title=a?'断开语音通话':'连接语音通话';
   id('sbVoice').textContent='Voice: '+(a?'connected':'disconnected');
 }
 function setVoiceError(t){ var b=id('spkBtn'); if(b){ b.className='rnd err'; b.title=t; } id('sbVoice').textContent='Voice: '+t; }
@@ -859,13 +892,49 @@ def _broadcast_audio_ctrl(data: dict) -> None:
     )
 
 
+async def _send_busy_and_close(ws: aiohttp.web.WebSocketResponse) -> None:
+    await ws.send_str(json.dumps({"type": "busy", "message": _BUSY_MESSAGE}, ensure_ascii=False))
+    await ws.close(code=aiohttp.WSCloseCode.TRY_AGAIN_LATER, message=b"busy")
+
+
+def _say_voice_welcome() -> None:
+    session = _session
+    if session is None:
+        logger.info("voice welcome skipped: session not ready")
+        return
+    try:
+        logger.info("voice welcome say: %s", _VOICE_WELCOME)
+        session.say(_VOICE_WELCOME, add_to_chat_ctx=False, allow_interruptions=False)
+        _append_turn_log("VOICE_WELCOME_SAY")
+    except Exception:
+        logger.exception("failed to say voice welcome")
+
+
 async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
+    global _audio_ws_primary_client
     ws = aiohttp.web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-    _audio_ws_clients.add(ws)
+    lock = _connection_lock
+    if lock is not None:
+        async with lock:
+            if _audio_ws_primary_client is not None and not _audio_ws_primary_client.closed:
+                logger.info("audio WS rejected: server busy")
+                await _send_busy_and_close(ws)
+                return ws
+            _audio_ws_primary_client = ws
+            _audio_ws_clients.add(ws)
+    else:
+        _audio_ws_primary_client = ws
+        _audio_ws_clients.add(ws)
     logger.info("audio WS client connected (%d total)", len(_audio_ws_clients))
 
     await ws.send_str(json.dumps({"type": "ready", "sample_rate": WebSocketAudioInput.SAMPLE_RATE}))
+    aloop = _agent_loop
+    if aloop is not None and aloop.is_running():
+        logger.info("voice welcome scheduled")
+        aloop.call_soon_threadsafe(_say_voice_welcome)
+    else:
+        logger.info("voice welcome skipped: agent loop not ready")
 
     frame_count = 0
     byte_count = 0
@@ -882,19 +951,44 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
         elif msg.type == aiohttp.WSMsgType.ERROR:
             break
 
+    if _audio_ws_primary_client is ws:
+        _audio_ws_primary_client = None
     _audio_ws_clients.discard(ws)
     logger.info("audio WS client disconnected (%d remaining)", len(_audio_ws_clients))
     return ws
 
 
 async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    primary = _ws_primary_client
+    audio_primary = _audio_ws_primary_client
+    if (primary is not None and not primary.closed) or (
+        audio_primary is not None and not audio_primary.closed
+    ):
+        return aiohttp.web.Response(text=_BUSY_HTML, content_type="text/html", charset="utf-8")
     return aiohttp.web.Response(text=_HTML, content_type="text/html", charset="utf-8")
 
 
 async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
+    global _ws_primary_client
     ws = aiohttp.web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
-    _ws_clients.add(ws)
+    lock = _connection_lock
+    if lock is not None:
+        async with lock:
+            if (
+                _ws_primary_client is not None
+                and not _ws_primary_client.closed
+                or _audio_ws_primary_client is not None
+                and not _audio_ws_primary_client.closed
+            ):
+                logger.info("state WS rejected: server busy")
+                await _send_busy_and_close(ws)
+                return ws
+            _ws_primary_client = ws
+            _ws_clients.add(ws)
+    else:
+        _ws_primary_client = ws
+        _ws_clients.add(ws)
 
     # Push current state immediately on connect
     stt = _switchable_stt
@@ -914,6 +1008,8 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
     async for _ in ws:
         pass  # keep-alive; messages from browser not used
 
+    if _ws_primary_client is ws:
+        _ws_primary_client = None
     _ws_clients.discard(ws)
     return ws
 
@@ -1131,8 +1227,9 @@ async def _handle_switch_tts(request: aiohttp.web.Request) -> aiohttp.web.Respon
 
 
 async def _run_web_server(port: int) -> None:
-    global _web_loop
+    global _connection_lock, _web_loop
     _web_loop = asyncio.get_running_loop()
+    _connection_lock = asyncio.Lock()
 
     app = aiohttp.web.Application()
     app.router.add_get("/", _handle_index)
