@@ -10,8 +10,9 @@
 
 | 我想… | 看这里 |
 | --- | --- |
-| 本地构建 / 启动 / 关闭 | [RUN.md](RUN.md) |
+| 本地构建 / 启动 / 关闭 | [RUN.md](docs/guide/RUN.md) |
 | 配置项（LLM/STT/TTS/KWS/端口…） | [.env.example](.env.example) |
+| 全部文档（架构 / 设计 / 报告 / 协作） | [docs/](docs/README.md) |
 
 **快速开始（Windows）：** `cp .env.example .env` → 填好 `DASHSCOPE_API_KEY` →
 `.\setup.ps1`（建虚拟环境）→ 双击 `start_agent.cmd` 开、`stop_agent.cmd` 关。

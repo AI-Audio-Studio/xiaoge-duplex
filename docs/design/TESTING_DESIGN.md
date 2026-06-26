@@ -1,9 +1,14 @@
-# 自动化测试子系统 — 设计提案(待评审,先设计后实现)
+# 自动化测试子系统 — 设计 + 落地现状(已实现 vs 规划)
 
 > 目标:给 Xiaoge Duplex Speech 增加**全自动对话测试**能力——埋点结构化、日志与录音按真实时间对齐、可无人值守跑端到端对话并自动判定。
 > 已定方向:**合成音频注入**(走完整 VAD→STT→判停→打断链,最贴近真实)。
 > 参考:`duplexMVP2`(xiaoge)成熟的 timeline + 多轨录音 + 声明式断言 + run 目录 + 报告体系。
-> 本文是**方案**,不含实现;评审通过后再分阶段落地。
+>
+> **本文已分清「已实现 vs 规划」**:P0 数据基座(结构化时间线 + 判停 KPI + 多轨录音)与
+> 阶段1 的录音回放注入(`ScriptedAudioInput`)**已落地**;声明式场景/断言/报告/headless runner
+> 等仍为**规划,未实现**,正文相应段落已标注。已实现部分以 `examples/voice_agents/` 下的实际
+> 代码为准:`event_timeline.py`、`turn_metrics.py`、`test_recorder.py`、`scripted_audio.py`,
+> 入口分支在 `web_ui_agent.py`。
 
 ---
 
@@ -21,19 +26,23 @@
 
 | 维度 | duplexMVP2(参考) | 本工程现状 | 结论 |
 |---|---|---|---|
-| 事件总线 | 自研同步 `EventBus` + `Event`(eventId/atUs/wallTimeUs/turnId/source/payload) | 无;只有文本日志 | **需新增** EventTimeline(可不引入全量 EventBus,先做“订阅+落盘”) |
-| 时间线 | `timeline.jsonl`(append+fsync) | 无结构化 | **需新增** |
-| 用户输入注入 | 文本注入 `/api/message`(模拟 ASR 输出,不过 STT) | console/麦克风 | **改造**:做**合成音频注入**(比 MVP2 更真,覆盖 STT/打断) |
-| 录音 | 多轨 user/assistant/marker/mixed,共享 at_us | `audio_recorder.py` 混音单 wav | **升级**为多轨 + 与 timeline 对齐 |
-| 断言 | 8 类声明式(exists/absent/order/latency/text/intent…) | 无 | **需新增** |
-| 运行 | HTTP API,轮询,无人值守 | console 单会话 | **新增** headless 注入运行形态 |
-| 报告 | report.json + report.md + issues(归类疑似模块) | 无 | **需新增** |
+| 事件总线 | 自研同步 `EventBus` + `Event`(eventId/atUs/wallTimeUs/turnId/source/payload) | 无;只有文本日志 | **已实现** `EventTimeline`(`event_timeline.py`,订阅 session 事件 + emit + 后台线程写盘) |
+| 时间线 | `timeline.jsonl`(append+fsync) | 无结构化 | **已实现**:`timeline.jsonl`(append + flush) |
+| 用户输入注入 | 文本注入 `/api/message`(模拟 ASR 输出,不过 STT) | console/麦克风 | **已实现(阶段1)**:**录音回放注入**(`ScriptedAudioInput`,wav 按真实节奏注入,走完整 STT/打断链)。合成 TTS 注入仍为规划 |
+| 录音 | 多轨 user/assistant/marker/mixed,共享 at_us | `audio_recorder.py` 混音单 wav | **已实现**:**新增** `test_recorder.py`(`TestRecorder`)录 user/assistant/duplex,与 timeline 同源时钟。`audio_recorder.py` 维持正常模式单文件混音不变 |
+| 断言 | 8 类声明式(exists/absent/order/latency/text/intent…) | 无 | **(规划,未实现)** |
+| 运行 | HTTP API,轮询,无人值守 | console 单会话 | **(规划,未实现)**;当前靠环境变量在 `web_ui_agent.py` 内启用 |
+| 报告 | report.json + report.md + issues(归类疑似模块) | 无 | **(规划,未实现)**;当前产物为 `turn_kpis.json`(判停 KPI) |
 
 **关键架构差异**:MVP2 是 HTTP 服务 + 自研同步事件总线;本工程是 LiveKit 单事件循环 + 框架事件。因此我们**不照搬 EventBus**,而是**订阅 LiveKit 的 `session.on(...)` 事件 + 在自定义打断/STT 处补埋点**,统一写入 timeline。注入也从“文本”升级为“音频”,因为本工程的价值正是 VAD/三层打断,必须被测到。
 
 ---
 
 ## 3. 子系统架构(5 个组件)
+
+> **落地现状**:组件 A(EventTimeline)、C(多轨录音)**已实现**;组件 B 的**录音回放注入**
+> (`ScriptedAudioInput`)**已实现**,但其「TTS 合成 + 台词库 + 缓存」部分及组件 B+(persona/
+> 拟人节奏)、D(Scenario/Assertion)、E(Runner/Report)**均为规划,未实现**。下图含未实现部分。
 
 ```
                         ┌────────────── Scenario(声明式场景) ──────────────┐
@@ -63,12 +72,21 @@
 - 事件类型(初版):`asr.final / turn.user / turn.assistant / agent_state.changed / interrupt.kws / interrupt.online / interrupt.stopword / tts.first_byte / playback.started/finished / eou.decision`。
 - 写 `timeline.jsonl`(append + flush)。这是日志与录音的**对齐主键**。
 
-### B. ScriptedAudioInput(合成音频注入)—— 最关键
-- 一个实现框架 `io.AudioInput` 的“假麦克风”:不读真实设备,而是按脚本产出帧;在测试模式下**替换** `session.input.audio`(taps 仍叠在其上,KWS/在线打断被真实驱动)。
-- **台词→音频解析(wav 优先,离线 TTS 兜底)**:`utterance` 优先用台词库里的**预录 wav**(`audioRef`,最稳/最真、按真人语速录制);无对应 wav 时用**离线 TTS** 合成(normal rate),并**缓存**到 `assets/voice_cache/<hash>.wav` 复用,保证可复现、CI 无网络可跑。台词库 + 缓存是版本化资产。
-- **实时节奏注入(关键)**:把音频切 10/20ms 帧,按**墙钟实时速率**推入(3 秒的话就占 3 秒,绝不快进)——否则 VAD/STT/判停/打断的时序全失真。语速取正常值(`speech_rate=1.0` 或录音原速)。静默期注入背景静音帧驱动 VAD 收尾。
+### B. ScriptedAudioInput(音频注入)—— 最关键
+- **已实现(录音回放注入)**:`scripted_audio.py` 的 `ScriptedAudioInput` 是实现 `io.AudioInput`
+  的“假麦克风”:不读真实设备,而是按脚本产出帧;`AGENT_SCENARIO` 设了即**替换**
+  `session.input.audio`(taps 仍叠在其上,KWS/在线打断被真实驱动)。
+- **已实现**:**实时节奏注入**——把 wav 切 `frame_ms`(默认 10ms)帧,按**绝对时刻对齐**实时推入
+  (防累计漂移,3 秒就占 3 秒,绝不快进);开头注入 `lead_silence_s`(默认 4.0s)静音让开场白先放完,
+  wav 放完后**持续吐静音**驱动 VAD 收尾(不结束迭代,以免误判输入关闭)。
+- **(规划,未实现)**:**台词→音频解析的 TTS 链路**。当前只支持直接给定 wav(`AGENT_SCENARIO` 指向
+  wav,或 json 里 `wav` 字段);**预录台词库 `assets/lines/`、TTS 缓存 `assets/voice_cache/`、
+  离线 TTS 合成兜底均未实现**,故 `utteranceId`/`audioRef`/`<hash>.wav` 等概念尚不存在。
 
-### B+. 真实对话节奏模型(按你强调:“正常人机交互节奏、正常语速;真实比这更复杂”)
+### B+. 真实对话节奏模型(**规划,未实现**)
+> 以下 persona / 触发器 / 拟人时序模型为**规划,未实现**。当前注入仅为「单段 wav 实时回放」(见 §B),
+> 尚无可组合的用户行为时间表。
+
 注入不是“发完一句等一句”,而是一套**可组合的用户行为时间表**,锚定到 agent 事件,默认实时:
 
 - **触发器(可组合)**:
@@ -80,41 +98,73 @@
 - **节奏画像(pacing profile)**:把上述参数打包成 persona(语速、间隔分布、打断倾向),一套场景可在不同画像下跑,覆盖“急性子抢话 / 慢条斯理 / 边想边说”等真实风格。
 - 说明:真实对话还有“说一半改口、对方没听清重复、长静默”等,先把上面这套**可扩展的行为/触发模型**搭好,后续按需加行为类型,不必一次穷尽。
 
-### C. 多轨录音对齐(升级 `audio_recorder.py`)
-- 轨道:`user`(注入音频)、`assistant`(TTS 输出)、`marker`(事件标记音,可选)、`mixed`。
-- 每段带 `at_us`,与 timeline 同源;输出 `*.wav` + `audio_manifest.json`(段边界 + `eventTimestamps`)。
+### C. 多轨录音对齐(**已实现**:`test_recorder.py` / `TestRecorder`,非升级 `audio_recorder.py`)
+- **实际**:多轨录音是**新增独立模块** `test_recorder.py` 的 `TestRecorder`;`audio_recorder.py`
+  保持不变,仍是正常模式的单文件混音录音(`recordings/<ts>/conversation.wav`)。
+- **实际轨道**:`user`(麦克风/注入音频)、`assistant`(TTS 输出)、`duplex`(立体声:左=user,
+  右=assistant)。`marker`(事件标记音)与独立 `mixed` 轨**未实现**——立体声 `duplex.wav` 即承担
+  混听用途;`marker` 标注为「(规划,未实现)」。
+- 每段带 `at_us`,与 timeline 同源时钟(monotonic µs);输出 `user.wav / assistant.wav /
+  duplex.wav` + `audio_manifest.json`(含 `baseAtUs / sampleRate / tracks(段数、帧数、时长)/
+  duplex`)。`eventTimestamps` 字段**未实现**,标注「(规划,未实现)」。
 - 价值:断言失败时可直接定位/回放对应音频片段。
 
-### D. Scenario + Assertion(声明式)
+### D. Scenario + Assertion(声明式)(**规划,未实现**)
+> 声明式场景与断言框架**未实现**。当前 `AGENT_SCENARIO` 的 json 仅承载注入参数
+> (`wav/expect/lead_silence_s/frame_ms`),其中 `expect` 用于 `turn_metrics.py` 的覆盖率 KPI,
+> 并非完整断言体系。下文 schema 为目标设计。
+
 - `Scenario{ id, name, goal, steps[], assertions[], artifactsRequired[] }`。
 - `Step{ stepId, trigger, utterance|action, expect[] }`(action 如“静音/切后端”用于测语音控制/面板)。
 - 断言类型(初版,对齐 MVP2):`event_exists / event_absent(窗口) / order / latency(A→B ≤ ms) / text_contains / intent_is / no_audio_after_cancel`。
 - 场景与断言是**纯数据**,可序列化、可版本化、可作为“需求即测试”。
 
-### E. Runner + Report
+### E. Runner + Report(**规划,未实现**)
+> headless runner、断言执行、`report.json`/`report.md`/`issues` 归类、pytest/CI 门禁**均未实现**。
+> 当前唯一的自动产物是 `turn_kpis.json`(判停 KPI,见 `turn_metrics.py`)。
+
 - **无人值守驱动**:headless 模式跑完场景 → 跑断言 → 出 `report.json` + `report.md` + `issues`(失败→疑似模块,如 FastInterrupt/Playback/STT)。
 - 可被 `pytest` 包一层做 CI 门禁。
 
 ---
 
-## 4. run 目录布局(借鉴 MVP2,时间戳)
+## 4. run 目录布局(**已实现**,时间戳)
+
+实际产物(由 `AGENT_TIMELINE=1` 触发,写到仓库根 `runs/<时间戳>/`):
 
 ```
-runs/auto/<scenario-id>/run-<YYYYMMDD-HHMMSS>/
-├── timeline.jsonl          # 结构化事件(对齐主键 at_us)
-├── user.wav assistant.wav marker.wav mixed.wav
-├── audio_manifest.json     # 段边界 + eventTimestamps
-├── report.json / report.md # 断言结果 + 摘要
-└── observed.json           # 末态快照
+runs/<YYYYmmdd_HHMMSS>/
+├── timeline.jsonl          # 结构化事件(对齐主键 atUs,monotonic µs)
+├── user.wav                # 用户(麦克风/注入)单声道
+├── assistant.wav           # 小歌(TTS)单声道
+├── duplex.wav              # 立体声:左=user / 右=assistant(替代 mixed)
+├── audio_manifest.json     # baseAtUs / sampleRate / tracks / duplex
+├── turn_kpis.json          # 判停 KPI 汇总(turn_metrics.py)
+└── debug.log               # 全量 DEBUG 日志(install_debug_log)
 ```
-(`runs/` 加入 .gitignore。)
+
+(`runs/` 已加入 .gitignore。)
+
+**(规划,未实现)** 以下产物尚未生成,留作 P2/P3:
+- `marker.wav`、独立 `mixed.wav`(目前用 `duplex.wav` 立体声承载混听);
+- `report.json` / `report.md`(断言结果 + 摘要,P2);
+- `observed.json`(末态快照,P3);
+- `runs/auto/<scenario-id>/run-.../` 这种按场景分层的路径(当前为扁平 `runs/<时间戳>/`)。
 
 ---
 
 ## 5. 与现有代码的集成点
-- **入口**:`web_ui_agent.py` 增加“测试模式”分支——用 `ScriptedAudioInput` 替换 `session.input.audio`(在 taps 链最内层),并挂 EventTimeline 订阅、升级录音 tap。
-- **运行形态(待决策)**:推荐**新增 headless 测试入口**(如 `python -m tools.auto_test --scenario B1-001`),**不启 PortAudio/不开真扬声器**(扬声器输出走“假 AudioOutput”仅录音),CI 友好、无需音频设备;console 注入模式作为可选。
-- **埋点**:把现有 `_append_turn_log(...)` 处同时发结构化事件(双写,过渡期兼容旧日志)。
+- **入口(已实现)**:`web_ui_agent.py` 已有“测试模式”分支,靠**环境变量**启用,默认零开销:
+  - `AGENT_TIMELINE=1`:创建并 attach `EventTimeline`(timeline.jsonl)+ `TurnMetrics`
+    (turn_kpis.json)+ `install_debug_log`(debug.log),并安装 `TestRecorder` 录多轨音频。
+  - `AGENT_SCENARIO=<wav 或 json>`:在 session 启动后用 `ScriptedAudioInput` 替换
+    `session.input.audio`(在 recorder/KWS/在线打断 tap 包裹之前),注入音频如实流经全链路。
+    json 支持字段:`wav` / `expect`(可选,喂给覆盖率 KPI)/ `lead_silence_s`(默认 4.0)/
+    `frame_ms`(默认 10)。
+- **(规划,未实现)** headless 测试入口 `python -m tools.auto_test --scenario <id>`、`tools/` 目录、
+  “假 AudioOutput 仅录音”的扬声器旁路:**均未实现**。当前注入运行在常规 agent 进程内(console/dev/
+  start 任一形态 + 上述环境变量),扬声器仍按正常输出链路播放并由 `TestRecorder` 旁路录音。
+- **埋点**:`EventTimeline` 旁路订阅 session 框架事件;过渡期与现有 `_append_turn_log(...)` 文本日志并存。
 
 ---
 
@@ -151,7 +201,12 @@ runs/auto/<scenario-id>/run-<YYYYMMDD-HHMMSS>/
 
 ## 8. 详细设计 v2(按评审意见,四块全部细化)
 
-> 下面给出具体 schema / 接口草图 / 决策分叉(标 ❓)。仍是设计稿,请直接在此红线。
+> **(本节大部分为规划,未实现)** 下面给出具体 schema / 接口草图 / 决策分叉(标 ❓),仍是设计稿。
+> 已落地的只有:§8.1 的 `EventTimeline` / `timeline.jsonl` / 多轨录音 + `audio_manifest.json`
+> (但**无 `marker` 轨、无 `eventTimestamps`**);§8.2 的 `ScriptedAudioInput`(**仅录音回放,
+> 无 `resolve(utterance)` 的台词库/TTS 缓存链路,无 `RecordingOnlyAudioOutput` 假扬声器**)。
+> §8.3(persona)、§8.4(Scenario/Assertion/Evaluator/Report/headless Runner `python -m
+> tools.auto_test`)**均未实现**。
 
 ### 8.1 数据基座(时钟 · 事件 · 时间线 · 录音)
 **单一时钟 + ID 工厂**(全子系统共用,保证日志与录音同源):

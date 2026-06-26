@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> 文档总索引见 [docs/README.md](docs/README.md);架构总览见 [docs/guide/ARCHITECTURE.md](docs/guide/ARCHITECTURE.md);运行见 [docs/guide/RUN.md](docs/guide/RUN.md)。
+
 ## Build and Development Commands
 
 This project uses **uv** as the package manager. All commands run from the repository root.

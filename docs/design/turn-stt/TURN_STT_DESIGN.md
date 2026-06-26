@@ -1,5 +1,7 @@
 # 流式主 STT + 判停优化 — 设计文档 v2(评审版)
 
+> 注:文中 `文件:行号` 为撰写时快照,代码已演进,**以符号名/当前代码为准**。
+
 | 项 | 内容 |
 |---|---|
 | 版本 | **v3.1 收尾版**(已纳入第一、二、三轮评审意见,实现就绪) |
@@ -54,7 +56,7 @@
 - G6 不改上游,可一键 A/B(原始 ④ vs 优化 ④)。
 
 > **G1 ↔ G4 固有张力(评审头号 concern)**:GAP 要够大才能合并自然停顿(G1),而 GAP 直接进 felt(必须等够 GAP 才能确认说完)→ GAP↑ 则 felt↑。这是结构性矛盾,**不能靠调参消除,只能取舍**。
-> **实测预期 optimized felt ~1.8–2.0s**:现离线 felt 中位 ~1.5s 含 ~0.65s 判停等待(vad_min_silence 0.35 + min_delay 0.3),换成 GAP=1.0 + min_delay≈0 净增 ~0.35s。**≤1.5s 多半够不着**,只能靠 §5.9 preemptive 砍 LLM_TTFT 去逼近 → 这是**产品取舍点**,LIVE 时定可接受值;`GAP` 旋钮可随时往"快"调(代价是切分回升)。验收用"感知是否被打断/迟钝"而非纯 ms。
+> **实测预期 optimized felt ~1.8–2.0s**:现离线 felt 中位 ~1.5s 含 ~0.65s 判停等待(vad_min_silence 0.35 + min_delay 0.3),换成 GAP(起点曾试 1.0,实测过切已固化 1.5)+ min_delay≈0 净增更多。**≤1.5s 多半够不着**,只能靠 §5.9 preemptive 砍 LLM_TTFT 去逼近 → 这是**产品取舍点**,LIVE 时定可接受值;`GAP` 旋钮可随时往"快"调(代价是切分回升)。验收用"感知是否被打断/迟钝"而非纯 ms。
 
 **非目标**:不改 TTS/LLM/四层打断总体架构;不追求多语种;不引入新付费外部依赖(讯飞仅作可选项)。
 
@@ -102,7 +104,7 @@
                                                                │
    ┌────────────────────────────────────────────────────────────┘
    ▼ 上游(代码不改):turn detector 读"本轮文本"判 EOU(薄兜底)
-   ├ 完整句 ─► min_delay(optimized≈0)─► 提交 ─► 附和/停止词过滤 ─► 回复一次
+   ├ 完整句 ─► min_delay(实际 0.3)─► 提交 ─► 附和/停止词过滤 ─► 回复一次
    └ 半句   ─► max_delay 窗:
         ├ 用户又开口(AgentSession-VAD START_OF_SPEECH)► 取消提交 + 与下条FINAL合并=同一轮
         └ 仍沉默到点 ─► 提交 ─► 回复一次
@@ -134,21 +136,27 @@
 
 ### 5.3 轮次聚合(GAP)
 ```
-pending = ""               # 本轮已确认文本
+prefix = ""                # 已收尾段落(offline 段尾累积)
+seg    = ""                 # 当前段在线增量(online)
+pending = prefix + seg      # 本轮已确认文本
 last_voiced_ts = None      # 最后一帧"语音概率≥阈值"的时刻(monotonic)
 voiced = False
 
 每帧:  p = VAD推理(帧)
        if p ≥ activation: voiced = True;  last_voiced_ts = now()
        else:              voiced = False
-on FunASR online(t):   if voiced 或 (now−last_voiced_ts 很小): pending=合并(pending,t); emit INTERIM(pending)
+# 门控 accepting():voiced 或 处于"最后有声后的 GAP 窗内"(尾巴容忍=整个 GAP 窗,容识别延迟)
+on FunASR online(t):   if accepting(): seg = seg + t; emit INTERIM(prefix+seg)
                        else: 丢弃(幽灵, 计数)
-on FunASR offline(seg):if 同上门控: pending=用段尾校正(pending,seg); emit INTERIM(pending)
-watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_ts ≥ GAP):
-                            emit FINAL(pending); pending=""; last_voiced_ts=None
+on FunASR offline(s):  if accepting(): prefix = (prefix + s); seg = ""   # 段尾文本追加进已收尾前缀、清空在线增量段
+                            emit INTERIM(prefix+seg)
+                       else: 丢弃(幽灵, 计数)
+watchdog(周期):        pending = (prefix + seg)
+                       if pending and last_voiced_ts and (now − last_voiced_ts ≥ GAP):
+                            emit FINAL(pending); prefix=""; seg=""; last_voiced_ts=None
 ```
 - **关键(评审 #1 细化)**:GAP **以"最后有声帧"起算**,不从 VAD 的 EOS 段事件起算 → **不与 `vad_min_silence` 叠加**;内置 VAD **不设 min_silence≈0**(那会抖动),而是直接用"逐帧语音概率"产出 `last_voiced_ts`。
-- `GAP` = 连续/新轮分界,`XIAOGE_AGG_GAP` **起点 1.0s**(评审建议,先压延迟,LIVE 往上加)。
+- `GAP` = 连续/新轮分界,`XIAOGE_AGG_GAP` 默认 **1.5s**(评审起点曾取 1.0 先压延迟;**1.0 实测过切**——带思考停顿/重复口语的半句被切成多轮,**已固化 1.5**;太碎调大、嫌慢调小)。
 - 中途短停顿(< GAP)只累加;`offline` 段尾只做本段校正,**不**当轮边界。
 - **去抖(可选,不进 MVP)**:逐帧概率会让偶发噪声帧刷新 `last_voiced_ts`、把 FINAL 后推(延迟↑,但**不误切、不丢字,方向安全**);起步靠 activation 阈值挡,若 LIVE 见噪声拖尾再加"连续 N 帧有声才更新 `last_voiced_ts`"。
 
@@ -160,14 +168,14 @@ watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_
 
 ### 5.4 两层"说完了":GAP 主裁 + 上游语义薄兜底(措辞修正)
 - **主裁(声学,我们 GAP)**:静默 ≥ GAP → 发 FINAL。**绝大多数续话由这一层处理。**
-- **薄兜底(语义,上游 turn detector)**:仅在"停顿落在 (GAP, GAP+max_delay) 窄窗"才起作用——读本轮文本判 EOU:完整→`min_delay`(optimized≈0)提交;半句→`max_delay` 窗内用户又开口则**取消提交、与下条 FINAL 合并**,仍沉默则提交。零成本(上游不改),保留以接住边角。
+- **薄兜底(语义,上游 turn detector)**:仅在"停顿落在 (GAP, GAP+max_delay) 窄窗"才起作用——读本轮文本判 EOU:完整→`min_delay`(设计目标≈0,**代码/.env 实际固化 0.3,降到 0 未落地**)提交;半句→`max_delay` 窗内用户又开口则**取消提交、与下条 FINAL 合并**,仍沉默则提交。零成本(上游不改),保留以接住边角。
 - **机制澄清(评审表述瑕疵)**:`turn_detection` 传 `MultilingualModel` 实例 → `_vad_base_turn_detection=True`,**VAD `END_OF_SPEECH` 也会触发 `_run_eou_detection`(`:1107`)**,只是 transcript 为空而早返回(`:1125`)→ 不是"只有 FINAL 才触发",而是"只有有 transcript(=收到 FINAL)才真正提交"。
 - **续话取消为何仍有效**:喂上游的是 **AgentSession 独立 VAD**(`vad=`,`web_ui_agent.py:1003`),与换不换主 STT 无关;`START_OF_SPEECH` 取消 pending EOU(`:1084-1085`),`_audio_transcript` 仅 commit 时清空(`:1291`)→ 下条 FINAL 累加合并。
 
 ### 5.5 显示同源
 - live 气泡改由**主 STT INTERIM**(`on_interim_transcript`,`:1024`)驱动 → 显示=内容=录音。
 - **把 `live_transcript` 现有"new_turn_gap 起新气泡"的逻辑迁到这条主源**(否则连续说会气泡重开/串台)。
-- 主源不可用时 fallback 到在线 2pass;**定义"主源静默多久才 fallback"**(防双源闪烁),默认例如 1.5s。
+- 显示源为**启动期静态二选一**(`_live_from_main = _stt_mode in {funasr-stream, iflytek}`):流式后端用主 STT interim 驱动气泡,否则用在线 2pass;**无运行时定时 fallback**(原设计设想的"主源静默 N 秒才切在线 2pass"未实现,故不存在双源闪烁问题)。
 
 ### 5.6 打断与防幽灵
 - VAD 声学打断:天然抗幽灵,保留。
@@ -218,10 +226,13 @@ watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_
 |---|---|---|
 | `XIAOGE_STACK` | 总开关 | **upstream**(LIVE 充分验证后再翻 optimized,评审 Q7) |
 | `STT_BACKEND` | funasr / funasr-stream / iflytek | optimized 下 funasr-stream |
-| `XIAOGE_AGG_GAP` | GAP 聚合(秒,以最后有声帧起算) | **1.0**(起点,LIVE 往上加) |
-| `XIAOGE_STREAM_VAD_ACTIVATION` | 自研 STT VAD 语音判定阈值 | silero 默认 |
-| `TURN_ENDPOINT_MIN_DELAY` | 上游确认等待 | optimized **≈0** |
-| `TURN_ENDPOINT_MAX_DELAY` | 续话窗 | ~0.8–1.0 |
+| `XIAOGE_AGG_GAP` | GAP 聚合上限(秒,以最后有声帧起算) | **1.5**(1.0 实测过切,固化 1.5) |
+| `XIAOGE_AGG_GAP_MIN` | 自适应 GAP 下限:句子"像说完"时静默达此值即提交;设 ≥GAP 则退化为恒定 GAP | **0.8** |
+| `XIAOGE_STREAM_VAD_ACTIVATION` | 自研 STT VAD 语音判定阈值(逐帧概率≥此值算有声) | **0.5** |
+| `TURN_ENDPOINT_MIN_DELAY` | 上游确认等待 | 代码/.env 实际 **0.3**(min_delay≈0 未落地) |
+| `TURN_ENDPOINT_MAX_DELAY` | 续话窗 | 代码默认 **0.6** / .env 固化 **1.2** |
+| `XIAOGE_ONLINE_VAD_GRACE` | 在线软打断的 VAD 佐证宽限(文本到达时 VAD 须确认在说话或刚停 <此值) | **0.6** |
+| `XIAOGE_ONLINE_INTERRUPT_ENABLE` | 在线2pass 文本抢先打断总开关 | **1** |
 | `TURN_UNLIKELY_THRESHOLD` | 上游 EOU 判完句阈值 | 模型默认 |
 | `TURN_PREEMPTIVE_TTS` | 预生成 | optimized **false** |
 | `XIAOGE_ONLINE_INTERRUPT_MIN_CHARS` | 在线2pass 打断字数门槛 | 3 |
@@ -237,14 +248,14 @@ watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_
 | 项 | 处理 |
 |---|---|
 | 幽灵词 | VAD 输出门控丢弃 + 幽灵率KPI;在线2pass 打断加 VAD 佐证;附和/停止词兜底 |
-| felt 与 GAP 张力 | GAP 以最后有声帧起算(不叠加 vad_min_silence)、min_delay≈0;G4 为目标,LIVE 取舍;感知验收 |
+| felt 与 GAP 张力 | GAP 以最后有声帧起算(不叠加 vad_min_silence)、min_delay 目标≈0(实际固化 0.3、未落地);G4 为目标,LIVE 取舍;感知验收 |
 | 流式静音 | §5.7 必办(muted 标志 + 恢复录音暂停耦合) |
 | 2pass WS 重连 | §5.8:风险写明 + 在线2pass 兜底 + offline 去重(加固) |
 | 长会话/长静音 | 持续推帧保活;长会话重连为已知风险点,观察 |
 | 噪声致 VAD 误判语音 | 噪声段进 FunASR 可能蹦字;靠 VAD 阈值 + 内容过滤 + 幽灵率KPI 观测 |
 | online/offline 合并 | online 增量、offline 校正同段;以 offline 为段终稿、跨段累加 |
 | 两处 VAD | 同模型同输入、职责正交(短/打断 vs 长/聚合);见 §4.3 |
-| 显示双源闪烁 | 主源失效定时 fallback(§5.5) |
+| 显示双源闪烁 | 启动期静态选源(`_live_from_main`),无运行时切换 → 无闪烁(§5.5) |
 
 ---
 
@@ -271,7 +282,7 @@ watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_
 - [ ] **重连**:2pass 重连 + `offline` 段重叠去重;或重连窗口回退在线 2pass;写明丢字风险。
 - [ ] **防幽灵**:输出门控;被丢文本打**幽灵率 KPI**。
 - [ ] **preemptive**:在 `XIAOGE_STACK` 映射与旋钮表登记;optimized 默认 false。
-- [ ] **显示同源**:`new_turn_gap` 起新气泡逻辑迁到主 STT INTERIM 源;定义 fallback 切换延时。
+- [ ] **显示同源**:`new_turn_gap` 起新气泡逻辑迁到主 STT INTERIM 源;选源为启动期静态二选一(`_live_from_main`),无运行时 fallback 切换。
 - [ ] **文档**:措辞"逐 FINAL"已修正;`vad_min_silence` 论证已补;G4 改为目标。
 
 ---
@@ -282,7 +293,7 @@ watchdog(周期):        if pending and last_voiced_ts and (now − last_voiced_
 | Q1 门控 | **输出门控** + 幽灵率KPI | 输入门控触发空闲超时、打碎 offline 校正 |
 | Q2 双VAD | **不合一** | 两者需不同静默阈值(短/打断 vs 长/聚合),见 §4.3 |
 | Q3 轮边界 | **放自研 STT(GAP)** | 上游 EOU 语义判断实测不可靠;声学更稳;零改上游(论证见 §5.3.1) |
-| Q4 默认值 | GAP=1.0 起、min_delay≈0、内置VAD用逐帧概率 | 先压延迟,LIVE 往上加 |
+| Q4 默认值 | GAP 起点 1.0(后过切固化 **1.5**)、min_delay 目标≈0(**实际固化 0.3,未落地**)、内置VAD用逐帧概率(activation **0.5**) | 先压延迟,LIVE 往上加;过切后回调 |
 | Q5 静音 | **方案 B:关麦=真关麦**——输入源头静音门覆盖 主STT/在线tap/KWS + 录音暂停(§5.7) | 兑现隐私(真人声不出本机)、语义干净(**关麦=停止打断**);静音帧保活避免重连 |
 | 关麦语义(第三轮§二) | **关麦 = 停止打断**(随 B) | 与"麦克风彻底关闭"直觉一致 |
 | Q6 重连 | **风险写明 + 兜底 + 去重加固**(§5.8) | 重连丢字会抵消本方案收益 |

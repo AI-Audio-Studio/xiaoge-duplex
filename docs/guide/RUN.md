@@ -12,12 +12,16 @@
 ```
 
 `setup.ps1` 会：
-1. 删除旧的 `.venv`，用 Python 3.13 新建虚拟环境；
-2. 以**可编辑(editable)**方式安装 MVP 真正用到的包：
-   `livekit-agents` + 插件 `openai / silero / turn-detector` + `dashscope`；
+1. 删除旧的 `.venv`，新建虚拟环境（优先用 `py -3.13`，无 py 启动器时回退当前 `python`）；
+2. 以**可编辑(editable)**方式安装 `livekit-agents[codecs,images,mcp]` + 插件
+   `openai / silero / turn-detector`；再用普通 pip 安装运行时依赖
+   `onnxruntime / transformers / jinja2`、TTS SDK `dashscope`（**非 editable**）、
+   以及强打断依赖 `sherpa-onnx / pypinyin`；
 3. 下载 turn-detector 判停模型（一次性，需联网；之后离线运行）。
 
 > 只装 MVP 需要的依赖，不会同步整个 monorepo 的 60+ 插件。
+
+也可加 `.\setup.ps1 -SkipModelDownload` 跳过 turn-detector 模型下载（离线/已下载过时用）。
 
 ## 启动 / 关闭
 
@@ -29,13 +33,18 @@
 （这两个 `.cmd` 只是壳，内部以 `-ExecutionPolicy Bypass` 调用下面的 PowerShell 脚本，
 双击即可，无需先开终端。窗口会停在 “Press any key…” 让你看到启动/关闭结果。）
 
+> 注意：`start_agent.cmd` 双击时**默认带 `-Test`**（开启测试时间线 + 录音，写入
+> `runs\<时间戳>\`）。若想纯净运行（不写时间线/录音），请用命令行 `.\start.ps1`（不带 `-Test`）。
+
 **命令行运行（可带参数）：**
 
 ```powershell
-.\start.ps1          # 语音模式（麦克风），后台运行，日志写入 .run\web_ui_agent.log
-.\start.ps1 -Text    # 文本模式，新开窗口手动输入
-.\start.ps1 -Port 8770   # 指定 Web 面板端口
-.\stop.ps1           # 关闭 Agent（连同子进程一起结束）
+.\start.ps1               # 语音模式（麦克风），默认前台开新窗口（可看麦克风电平/实时转写）
+.\start.ps1 -Text         # 文本模式，新开窗口手动输入
+.\start.ps1 -Port 8770    # 指定 Web 面板端口
+.\start.ps1 -Background   # 无窗口后台运行，日志写 .run\web_ui_agent.log 与 .run\web_ui_agent.log.err
+.\start.ps1 -Test         # 开启测试时间线 + 录音，写入 runs\<时间戳>\
+.\stop.ps1                # 关闭 Agent（连同子进程一起结束）
 ```
 
 - 启动后浏览器测试面板地址会打印在控制台，默认 `http://localhost:8787`
@@ -53,12 +62,12 @@
 - 配置都是扁平的 key=value，用 `.env` 这种 12-factor 风格最合适；单应用 MVP 再加一层
   `config/` 目录（YAML/loader）只会和 `.env` 重复、徒增间接层；
 - 每个 `os.getenv("X", 默认值)` 在代码里都带**内置默认**，所以 `.env` 缺项也能跑；
-- [.env.example](.env.example) 是**配置目录/清单**：列全了所有可用变量及说明（`.env` 本身被
+- [.env.example](../../.env.example) 是**配置目录/清单**：列全了所有可用变量及说明（`.env` 本身被
   gitignore，所以用样例文件充当“配置 schema”）。首次用 `cp .env.example .env` 再改。
 
 > `models/` 放的是**数据/模型文件**（如 KWS 模型），属于资产不是配置，单独于 `.env` 管理。
 
-关键变量见 [.env.example](.env.example)；常用：
+关键变量见 [.env.example](../../.env.example)；常用：
 
 | 变量 | 说明 |
 | --- | --- |

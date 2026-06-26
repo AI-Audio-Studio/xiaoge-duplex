@@ -1,5 +1,7 @@
 # 聆听模式设计评审意见
 
+> 注:本文为三轮评审过程快照。部分早期结论/符号(如 strip_command_echo、pending_command_echo、"纯前端遮罩"方案)已被最终实现取代——退出尾巴改为"尾巴窗 + split_after_command 切分",UI 改为 host 侧 gate。**最终以 LISTENING_MODE_DESIGN.md(§5.5/§5.3)与代码为准。**
+
 > 评审对象:`LISTENING_MODE_DESIGN.md`
 > 评审方式:逐条核对 `examples/voice_agents/web_ui_agent.py` 与框架 `livekit-agents` 源码,所有结论附 `文件:行号` 证据。
 > 评审范围:仅评审,不改任何现有文件。
