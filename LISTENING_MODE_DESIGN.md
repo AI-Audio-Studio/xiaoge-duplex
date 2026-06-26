@@ -8,7 +8,7 @@
 | 范围 | 仅 `examples/voice_agents/`;新增独立模块 `listening_mode.py` + host 接线;**不改判停/STT/上游** |
 
 > **v3 相对 v2 的变更**(三处"比照搬 duplexMVP2 更好"的体验优化):
-> 1. **命令词回声处理:内容感知**(§5.5)——不再无条件吞掉命令词后那条 final(duplexMVP2 做法,会把"小歌干活了,顺便整理一下"整条丢掉);改为**剥掉命令词、用剩余**:空=纯回声吞掉、非空=当内容/回答。连说一句就能用。
+> 1. **退出尾巴/命令词回声处理:排空窗**(§5.5,v3 初为"内容感知剥词",手测后改为排空窗)——退出后开 ~2.5s 排空窗,把滞后到达、含唤醒词及其前面监听内容的"聆听尾巴"整条吞掉(显示+轮),对 STT 听岔/聚合鲁棒。
 > 2. **主动问只在有实质内容时**(§5.4)——temp 内容量 < M 时退出**不问、静默丢弃**,避免无意义打扰。
 > 3. **UI 冻结走 host 侧 gate**(§5.3)——聆听期 host **停发** `_live` 气泡、进入提示作为**专门 `listening` 横幅**(非 assistant 气泡),屏幕干净;不再靠"纯前端遮罩盖住底层闪动"。
 >
@@ -49,7 +49,7 @@
 KWS命中─►│ _on_kws_hit(agent循环): interrupt(force); evt=observe_keyword(kw)              │
           │   ENTERED/EXITED → 进入/退出收尾 + UI横幅 + (退出)定时器/主动问 + 置回声标志   │
 用户轮 ──►│ on_user_turn_completed(agent循环,分支插最前):                                │
-          │   ⓪ 命令词回声(内容感知,§5.5):剥词→空则吞、非空则用剩余继续                 │
+          │   ① 聆听期 OR 退出排空窗(§5.5):整条吞(不显示/不回复/不入ctx)                │
           │   ① active: capture; StopResponse()         # 不回复/不入ctx;UI不广播气泡    │
           │   ② awaiting: 答案(可为剥词剩余)→is_affirmative→turn_ctx 注入摘要; else 清    │
           │   ③ else: observe_turn==ENTER→say(notice,False)+进入+StopResponse             │
@@ -64,11 +64,11 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 ```
 
 控制器 API(`@dataclass`,纯同步):
-- `from_environment()`;属性 `enabled/active/awaiting_organize_answer/pending_command_echo/keywords/command_keyword/wake_keyword/temp_ttl_s/enter_notice/min_organize_chars/temp_transcript`。
-- `observe_keyword(kw) -> Event{NONE,ENTERED,EXITED}`(命中即置 `pending_command_echo=kw`)。
+- `from_environment()`;属性 `enabled/active/awaiting_organize_answer/keywords/command_keyword/wake_keyword/temp_ttl_s/drain_s/enter_notice/min_organize_chars/organize_enabled/temp_transcript`。
+- `observe_keyword(kw) -> Event{NONE,ENTERED,EXITED}`。
 - `observe_turn(text, interrupted_agent) -> Auto{NONE,ENTER}`(仅未聆听时计数)。
 - `capture(text)`;`force_exit() -> bool`(只在 agent 循环调,§5.7)。
-- `strip_command_echo(text) -> str|None`:若 `pending_command_echo` 置位则 disarm 并剥词,返回剩余(可能空串);否则返回 None(非回声轮)。
+- 退出尾巴处理改为 host 侧**排空窗**(`drain_s`),控制器不再做命令词剥词(见 §5.5)。
 - `is_affirmative(text) -> bool`;`take_temp()`;`drop_temp()`;`clear_awaiting()`;`temp_has_substance() -> bool`(≥ `min_organize_chars`)。
 
 ---
@@ -117,24 +117,22 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 
 > **整理总开关 `organize_enabled`(`XIAOGE_LISTEN_ORGANIZE`,当前默认关)**:整理体验尚需打磨,先把**"问是否整理 + 整理动作"整体关掉**——退出不问、不注入、不整理;临时内容只按 **TTL 定时删除**(独立保留)。下面"主动问/整理回答"两段仅在该开关为 1 时生效。先让聆听**进入/退出**开关跑顺,整理后续再优化。
 - **只在有实质内容时才走"主动问"**:`temp_has_substance()`(`≥ min_organize_chars`)为真 → 启动定时器 t、置 `awaiting_organize_answer`、`session.say("刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False)`;否则 → **静默退出 + `drop_temp()`**(不问、不留)。
-- **主动问的回答(承内容感知 §5.5)**:只看问话之后第一轮(命令词回声已被 ⓪ 处理)。`is_affirmative(text)` 为真 → `take_temp()` → `turn_ctx.add_message(role="user", content="[聆听记录] 我刚才在聆听模式期间说了:…")` → **不抛 StopResponse**(LLM 本轮据此整理)→ `_cancel` 定时器、`clear_awaiting`;否则 → `clear_awaiting`、落正常逻辑,temp 留到 t 丢。
+- **主动问的回答**:退出尾巴已被排空窗(§5.5)先吞,问话之后(排空窗外)第一轮即回答。`is_affirmative(text)` 为真 → `take_temp()` → `turn_ctx.add_message(role="user", content="[聆听记录] 我刚才在聆听模式期间说了:…")` → **不抛 StopResponse**(LLM 本轮据此整理)→ `_cancel` 定时器、`clear_awaiting`;否则 → `clear_awaiting`、落正常逻辑,temp 留到 t 丢。
 - **为什么 `turn_ctx.add_message` 而非 `update_chat_ctx`**:`turn_ctx` 是一次性副本 `chat_ctx.copy()`(证据 `agent_activity.py:2062`,注释"changes will not be kept"),只喂本轮 `_generate_reply`(2131)→ **原始内容只本轮可见、不持久**,历史只留"整理一下"+摘要,**正好 G4**。`chat_ctx` 是只读视图(`agent.py:156`)。
 - **定时丢弃**:t 内无整理 → `drop_temp()`(留日志)。**再次进入(t 未到)**:**立即 `drop_temp()` + 取消定时器**,开新缓冲。
 
-### 5.5 命令词回声处理(内容感知,跨进入/退出)—— v3 体验优化
-**问题**(评审第二轮,经源码核实):KWS 是旁路 tap(`kws_interrupt.py:257-260` `__anext__` 每帧原样返回下游)→ 说"小歌干活了"既触发 KWS、又被 STT 转成一个正常用户轮;命令词不在任何现有过滤里,其 ASR 终稿会进 `on_user_turn_completed`。退出侧会被分支②当成"整理回答"消费掉 → 整理哑火(真 bug)。
+### 5.5 退出尾巴 / 命令词回声处理 —— 排空窗(drain window)
+**根因(手测 run 20260625_210354 实证)**:KWS 是旁路 tap(`kws_interrupt.py:257-260` `__anext__` 每帧原样返回下游),且 **KWS 是声学命中、几乎即时**,而**主 STT 的 final 滞后 ~1.5s**(`transcription_delay≈1.5s`)。于是用户说"…[监听内容]小歌干活了"时:KWS 在唤醒词处即 `active=False`、撤横幅;但这句话(funasr-stream 连说会**聚合成一条** final)的 STT final 在 `active` 翻假**之后**才到 → 显示闸(`_on_stt`)与吞轮逻辑都以 `active` 为准、此刻已放行 → **整条(含唤醒词+前面的监听内容)被显示,前半段还被当成退出后正常话回复+进上下文**。
 
-**做法(内容感知,优于 duplexMVP2 的盲吞)**:
-- `observe_keyword`→ENTERED/EXITED 时置一次性 `pending_command_echo = 该命令词`。
-- `on_user_turn_completed` **最顶部(分支①②③之前)**:`rem = ctrl.strip_command_echo(text)`(置位则 disarm + 归一化剥掉命令词,返回剩余;否则返回 None)。
-  - `rem is None`(非回声轮)→ 照常往下。
-  - `rem == ""`(纯回声"小歌干活了")→ **吞掉、`return`**,**不动 active/awaiting**(状态留给真答)。
-  - `rem != ""`(连说"小歌干活了 顺便整理一下")→ **用 `rem` 替换本轮文本继续往下**:active→capture(rem);awaiting→把 rem 当回答(`is_affirmative("顺便整理一下")`=真→整理)。
-- 匹配用**归一化(去标点/空白)+ 包含/前缀**,容忍 STT 把命令词转得略有出入。
-- 自动进入无命令语,不置标志。
-- **固有边界(接受)**:剩余非空即按内容走,**不再细分"这句是不是说给小歌的"**。极端如"小歌干活了我们继续开会吧"→剩余"我们继续开会吧"按内容/回答处理——此时用户已退出聆听、小歌恢复应答属预期,可接受。
-- **鲁棒性**:`pending_command_echo` 只 arm 一轮;若回声轮没出现、下一轮直接是真答"好啊",剥词无匹配则原样返回(非空)→ 仍正常进②判定,不卡死(比盲吞稳)。
-- 效果:退出哑火修复;连说一句即生效;进入侧命令词不污染缓冲。
+**做法(排空窗,整条吞,放弃易漏的模糊剥词)**:
+- 退出瞬间照常 `active=False`、撤横幅(UI 跟手);**同时开一个 `drain_s`(默认 2.5s,`XIAOGE_LISTEN_DRAIN`)的排空窗** `_listen_arm_drain()`。
+- 窗内(`_listen_draining()`)把"聆听尾巴"仍按聆听处理:
+  - **显示**:`_on_stt` 的 `_listening = active or draining` → 抑制 live 气泡。
+  - **吞轮**:`on_user_turn_completed` 第一支 `active or draining` → **整条 `StopResponse`**(不回复、不入 ctx),**不管这条 final 有没有唤醒词、STT 听准没准、前面带多少内容**——整条都算聆听尾巴。
+- **每次退出**(命令词 / 通话键)都开窗。进入侧命令词回声由 `active`(进入后仍 True)的 ① 直接吞,无需特殊处理。
+- **为何弃用 strip_command_echo/pending_command_echo**:剥词依赖 STT 文本含唤醒词、且只能保住唤醒词之后的剩余——遇到"听岔(小郭/小哥干活了)"或"唤醒词前有一长段监听内容"就漏(正是本次手测暴露的)。排空窗"整条丢"对 STT 不准/聚合/听岔都鲁棒。
+- **权衡(接受、可调)**:排空窗内若用户**真的**抢说了句给小歌的话也会被一起丢。实测 echo 晚 ~1.05s、真正下一句晚 ~8.8s,2.5s 足以覆盖尾巴而够不到真话;窗长由 `XIAOGE_LISTEN_DRAIN` 调。
+- 与 organize 的关系:排空窗先吞掉退出尾巴,真正的"要整理吗"回答(窗后到达)再进②;organize 当前默认关,其交互后续随整理一起优化。
 
 ### 5.6 通话键交互(最小改动,复用 mic)
 - 聆听期按通话键 = 退出聆听 **+** 复用原 `/api/mic` 静音切换 → **退出聆听 + 挂起(静音)**,UI"挂起中";再按 = 解除静音 = 正常。
@@ -168,6 +166,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 | `XIAOGE_LISTEN_TEMP_TTL` | 120 | 临时内容定时丢弃 t(秒) |
 | `XIAOGE_LISTEN_MIN_ORGANIZE_CHARS` | 15 | 退出后"主动问"的最小内容量 M(低于则静默丢) |
 | `XIAOGE_LISTEN_ORGANIZE` | 0 | "问是否整理 + 整理动作"总开关;先关(定时删除独立保留),后续优化 |
+| `XIAOGE_LISTEN_DRAIN` | 2.5 | 退出排空窗(秒):窗内滞后到达的"聆听尾巴"整条吞掉(显示+轮),见 §5.5 |
 | `XIAOGE_LISTEN_ENTER_NOTICE` | 好,我先听着。需要我就说『小歌干活了』。 | 进入提示(空串=不出声) |
 
 > **灰度观测(评审产品视角)**:默认开 + 4 个数值旋钮(N/L/M/t)意味着"误进 / 该问没问 / 不该问却问"的体感都依赖现场表现。灰度阶段把 **N/L/M/t 当作要观测、回收再定的对象**,不一次定死。注意 `L`(自动进入单轮长度=20)与 `M`(退出后值得问的 temp 总量=15)用途不同、别混。
@@ -181,7 +180,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 | import | `from listening_mode import ListeningController, ListeningEvent`;`from dataclasses import replace` |
 | 启动 | 构造 `_listen_ctrl`;`replace(_kws_config, keywords=_kws_config.keywords + _listen_ctrl.keywords)` |
 | `_on_kws_hit` | 保留 `interrupt(force)`;`observe_keyword`→ENTERED(进入+say+UI+置回声)/EXITED(退出收尾+定时器/主动问+置回声)/NONE 原逻辑 |
-| `on_user_turn_completed` | **最前**:⓪ `strip_command_echo`(空吞/非空用剩余);①active→capture+StopResponse;②awaiting→答案判定/注入;③observe_turn==ENTER→say(False)+进入+StopResponse |
+| `on_user_turn_completed` | **最前**:① `active or _listen_draining()`→整条吞(capture+StopResponse);②awaiting→答案判定/注入(organize 开);④observe_turn==ENTER→say(False)+进入+StopResponse |
 | `_on_stt` | `if _listen_ctrl and _listen_ctrl.active: 跳过 _live.feed_*` |
 | `transcription_node` | `if active: 不广播 assistant 气泡` |
 | `_handle_mic` | `call_soon_threadsafe(_listen_force_exit_on_agent_loop)` |
@@ -193,7 +192,7 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 ---
 
 ## 8. 边界与异常
-- 总开关关:`enabled=False`,所有 `observe_*`/`strip_command_echo` 返回 NONE,host 全旁路,零影响。
+- 总开关关:`enabled=False`,所有 `observe_*` 返回 NONE、排空窗永不开,host 全旁路,零影响。
 - KWS 降级:命令词进入失效;自动进入+通话键退出仍可用。
 - 聆听期收到停止词:聆听分支在 `on_user_turn_completed` **最前**,先于停止词链(否则"停/好了"被抢先 `interrupt`+StopResponse,绕过 capture)。
 - 连说"小歌干活了+整理":§5.5 剥词后用剩余 → 直接整理(v3 已解决,不丢请求)。
@@ -203,7 +202,8 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 **§9.1 `StopResponse` 足以让该轮不入 chat_ctx —— 已验证。** 证据:抛 `StopResponse`→`agent_activity.py:2068-2069` 直接 `return`,此前 `user_message` 未 append 进 chat_ctx(仅 `_closing` 分支 2055)。仓内先例 `_is_backchannel/_should_ignore_user_turn`→`raise StopResponse()`(`web_ui_agent.py:1001-1015`),同构、已在生产路径验证。
 
 ## 10. 验证计划
-- **单测(控制器纯函数)**:observe_keyword 进/出/NONE+置回声;observe_turn 连续到 N/清零;capture;force_exit;`strip_command_echo`(空/非空/非回声);`is_affirmative`;`temp_has_substance`;take/drop_temp;再入丢弃。
+- **单测(控制器纯函数)**:observe_keyword 进/出/NONE;observe_turn 连续到 N/短噪声不重置/长未打断重置;capture;force_exit;`is_affirmative`;`temp_has_substance`;take/drop_temp;再入丢弃;`drain_s` 解析。
+- **集成自测**:退出排空窗整条吞(显示+轮);窗外真话正常。
 - **集成自测**:env 旁路;`replace` 词表合并;StopResponse 吞轮不回复;`turn_ctx.add_message` 只本轮可见;active 期不广播 `_live`/assistant 气泡。
 - **手测**:命令词进出(含连说退出+整理)、自动进入、通话键退出+挂起、整理流程(有实质内容→问→肯定→注入摘要;内容少→静默丢)、定时丢弃、再入丢弃、UI 横幅、误进逃生。
 
@@ -214,8 +214,8 @@ ASR interim►│ _on_stt: if active: 不喂 _live(host gate,§5.3)             
 | # | 决策 |
 |---|---|
 | 命令词检测 | KWS(`replace` 追加词表;保留强打断) |
-| 命令词回声 | **内容感知**:剥词,空吞/非空用剩余(优于盲吞,连说可用) |
-| 整理触发 | 方案A 主动问;**仅 temp ≥ M 时问**,否则静默丢;只认下一轮(回声已 ⓪ 处理) |
+| 退出尾巴/命令词回声 | **排空窗**(`drain_s`,默认 2.5s):退出后短窗内整条 final 按聆听吞(显示+轮),对 STT 听岔/聚合/前缀鲁棒;弃用易漏的模糊剥词 |
+| 整理触发 | 方案A 主动问;**仅 temp ≥ M 时问**;受 `organize_enabled` 总开关(当前默认关) |
 | 整理注入 | `turn_ctx.add_message` 本轮临时,禁 `update_chat_ctx`,只留摘要(G4) |
 | 自动进入 | N=3/L=20;**默认开、不自动退出**;借一次 `say(...,False)` 提示;触发轮不入缓冲;前 N-1 轮不回收(已知代价) |
 | 通话键 | 聆听期=退出+挂起;再按=恢复;复用 mic;退出补问在解除静音回正常时 |

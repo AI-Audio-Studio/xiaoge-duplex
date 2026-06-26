@@ -371,6 +371,7 @@ _listen_ctrl: ListeningController | None = None  # 聆听模式控制器(纯状�
 _listen_ttl_handle = None  # 聆听临时内容 TTL 定时器句柄(asyncio,agent 循环)
 _listen_guard_until = 0.0  # 退出提示保护窗截止(monotonic):此前用户语音不得打断小歌
 _LISTEN_GUARD_S = 6.0  # 退出"要整理吗"播报的打断保护时长(秒)
+_listen_drain_until = 0.0  # 退出排空窗截止(monotonic):窗内滞后的"聆听尾巴"仍按聆听吞掉(显示+轮)
 _tts_backend_key: str = "cosyvoice"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -764,6 +765,18 @@ def _listen_clear_guard() -> None:
     _listen_guard_until = 0.0
 
 
+def _listen_draining() -> bool:
+    """退出排空窗内:KWS(声学,~即时)已翻 active=False,但该句 STT final 滞后 ~1.5s 才到。
+    窗内把这条"聆听尾巴"(含唤醒词及其前面的监听内容)仍按聆听处理——不显示、不回复、不入 ctx。"""
+    return time.monotonic() < _listen_drain_until
+
+
+def _listen_arm_drain() -> None:
+    global _listen_drain_until
+    if _listen_ctrl is not None:
+        _listen_drain_until = time.monotonic() + _listen_ctrl.drain_s
+
+
 def _listen_cancel_ttl() -> None:
     global _listen_ttl_handle
     if _listen_ttl_handle is not None:
@@ -815,6 +828,7 @@ def _listen_exit_aftermath(via: str, *, ask: bool) -> None:
     """退出收尾:启动 TTL、撤 UI;ask 且有实质内容则主动问。"""
     if _listen_ctrl is None:
         return
+    _listen_arm_drain()  # 排空窗:吞掉滞后到达的"聆听尾巴"(含唤醒词那条 final),免泄漏显示/上下文
     _listen_arm_ttl()  # 定时删除(TTL)独立保留,不随整理开关
     _listen_broadcast(False)
     _append_turn_log(f"LISTEN_EXIT via {via}")
@@ -1136,19 +1150,15 @@ class VoiceAgent(Agent):
         original = new_message.text_content
         ctrl = _listen_ctrl
 
-        # ⓪ 命令词回声(内容感知):剥词;空=纯回声吞掉,非空=用剩余继续(见设计 §5.5)
-        if ctrl is not None and ctrl.enabled:
-            rem = ctrl.strip_command_echo(original)
-            if rem is not None:
-                if rem == "":
-                    raise StopResponse()
-                new_message.content = [rem]
-                original = rem
-        # ① 聆听期:吞入缓冲、不回复、不入上下文(StopResponse 足够,见设计 §9)
-        if ctrl is not None and ctrl.active:
-            ctrl.capture(original)
+        # ① 聆听期 / 退出排空窗:整条算聆听内容 → 吞掉(不回复、不入上下文;显示由 _on_stt 抑制)。
+        #    排空窗覆盖"KWS 已退出(active=False)但该句 STT final 滞后到达"的尾巴——含唤醒词及其
+        #    前面的监听内容那一整条 final 都丢掉,不再做易漏的模糊剥词(见设计 §5.5)。
+        if ctrl is not None and ctrl.enabled and (ctrl.active or _listen_draining()):
+            if ctrl.active:
+                ctrl.capture(original)
+            _append_turn_log(f"LISTEN_SWALLOW active={ctrl.active} text={original!r}")
             raise StopResponse()
-        # ② 退出后等"要整理吗"的回答(命令词回声已在 ⓪ 处理)
+        # ② 退出后等"要整理吗"的回答(organize 开时;退出尾巴已被排空窗先吞)
         if ctrl is not None and ctrl.awaiting_organize_answer:
             ctrl.clear_awaiting()
             _listen_clear_guard()  # 用户已回答,后续回复(摘要/正常)恢复可打断
@@ -1352,7 +1362,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_stt(event) -> None:
-        _listening = _listen_ctrl is not None and _listen_ctrl.active  # 聆听期不弹气泡
+        # 聆听期 + 退出排空窗内都不弹气泡(排空窗挡滞后到达的聆听尾巴)
+        _listening = _listen_ctrl is not None and (_listen_ctrl.active or _listen_draining())
         if not event.is_final:
             # 显示同源:流式主STT 的 interim 驱动 live 气泡(全量置换)。
             if _live_from_main and _live is not None and not _listening:
