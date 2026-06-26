@@ -50,7 +50,7 @@
   <text x="36" y="468" font-size="12" font-weight="700" fill="#059669">④ 模型后端</text>
   <rect x="40" y="476" width="150" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="115" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Qwen LLM 网关</text>
   <rect x="206" y="476" width="180" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="296" y="501" font-size="12.5" fill="#111827" text-anchor="middle">FunASR / Qwen3 STT</text>
-  <rect x="402" y="476" width="120" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="462" y="501" font-size="12.5" fill="#111827" text-anchor="middle">百炼 TTS</text>
+  <rect x="402" y="476" width="120" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="462" y="501" font-size="12.5" fill="#111827" text-anchor="middle">CosyVoice TTS</text>
   <rect x="538" y="476" width="190" height="40" rx="6" fill="#d1fae5" stroke="#059669"/><text x="633" y="501" font-size="12.5" fill="#111827" text-anchor="middle">Silero VAD · KWS 模型(本地)</text>
 
   <!-- main flow arrows (down the center) -->
