@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import replace
 from pathlib import Path
 
 import aiohttp
@@ -40,6 +41,7 @@ from custom_audio_providers import (
 )
 from dotenv import load_dotenv
 from kws_interrupt import KwsConfig, KwsTapAudioInput, NativeKwsSpotter, _unavailable_reason
+from listening_mode import AutoDecision, ListeningController, ListeningEvent
 from live_transcript import LiveTranscript, LiveTranscriptConfig
 from mute_gate import MuteGate
 from online_interrupt import (
@@ -364,6 +366,13 @@ _switchable_stt: SwitchableSTT | None = None
 _switchable_tts: SwitchableTTS | None = None
 _test_recorder = None  # 测试模式下的多轨录音器(供 /api/mic 暂停/继续录制)
 _mute_gate = None  # 输入源头静音门(关麦=真关麦,供 /api/mic 切换)
+_session = None  # AgentSession 引用(供模块级聆听助手在 agent 循环里 say/收尾)
+_listen_ctrl: ListeningController | None = None  # 聆听模式控制器(纯状态机)
+_listen_ttl_handle = None  # 聆听临时内容 TTL 定时器句柄(asyncio,agent 循环)
+_listen_guard_until = 0.0  # 退出提示保护窗截止(monotonic):此前用户语音不得打断小歌
+_LISTEN_GUARD_S = 6.0  # 退出"要整理吗"播报的打断保护时长(秒)
+_listen_drain_until = 0.0  # 退出尾巴标记的安全时限(monotonic):此前第一条 final 视作退出尾巴
+_listen_exit_pending = False  # 一次性:退出后等"尾巴 final"(含唤醒词那条),消费一次后清
 _tts_backend_key: str = "cosyvoice"
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
@@ -392,7 +401,7 @@ h1{font-size:15px;font-weight:500;color:#1F2024}
 .statepill.susp{color:#B45309;background:#FEF3E2}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 main{flex:1;display:flex;min-height:0}
-.left{flex:1;display:flex;flex-direction:column;min-width:0}
+.left{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
 .log{flex:1;overflow-y:auto;padding:16px 22px;display:flex;flex-direction:column;gap:13px;background:#FBFBFC}
 .bubble{position:relative;max-width:min(78%,560px);padding:9px 13px;border-radius:13px;
   font-size:14px;line-height:1.6;word-break:break-word}
@@ -413,7 +422,7 @@ main{flex:1;display:flex;min-height:0}
 .bubble.appear{animation:bubbleIn .18s ease-out}
 @keyframes bubbleIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 .sys-msg{align-self:center;font-size:11px;color:#B6B8BE;padding:2px 10px}
-.dock{display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:0.5px solid #ECECEF;background:#fff;flex-shrink:0}
+.dock{display:flex;align-items:center;gap:10px;padding:11px 16px;border-top:0.5px solid #ECECEF;background:#fff;flex-shrink:0;position:relative;z-index:25}
 .manual{flex:1;min-width:0;height:44px;border:1px dashed #D6D7DB;border-radius:10px;padding:0 13px;
   color:#9CA3AF;font-size:13px;background:#fff;font-family:inherit}
 .manual::placeholder{color:#B6B8BE}
@@ -425,6 +434,13 @@ main{flex:1;display:flex;min-height:0}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
+/* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。
+   顶部横幅跟随会话区宽度(align-items:stretch 撑满),提示单行不换行。 */
+#listenMask{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;align-items:stretch;background:rgba(255,247,243,.80);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+.listen-card{margin:16px;padding:15px 22px;display:flex;flex-direction:column;align-items:center;gap:8px;background:rgba(255,255,255,.93);border:0.5px solid #F2C6B4;border-radius:14px;box-shadow:0 8px 26px rgba(31,32,36,.12)}
+.listen-title{font-size:22px;font-weight:700;color:#C2410C;display:flex;align-items:center;gap:11px}
+.listen-dot{width:13px;height:13px;border-radius:50%;background:#E86A43;animation:blink 1s infinite;flex-shrink:0}
+.listen-hint{font-size:16px;color:#9A6A52;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .right{width:280px;flex-shrink:0;border-left:0.5px solid #ECECEF;background:#FCFCFD;
   padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
 .cfg-title{font-size:13px;font-weight:500;color:#1F2024}
@@ -461,6 +477,12 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
         <span class="ico-on"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></span>
         <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
       </button>
+    </div>
+    <div id="listenMask" style="display:none">
+      <div class="listen-card">
+        <div class="listen-title"><span class="listen-dot"></span>聆听中</div>
+        <div id="listenHint" class="listen-hint"></div>
+      </div>
     </div>
   </div>
   <div class="right">
@@ -502,6 +524,7 @@ function conn(){
 }
 
 function handle(m){
+  if(m.type==='listening'){ setListening(m.on, m.hint); }
   if(m.type==='user_speaking' && m.state==='start') startLive();
   if(m.type==='user_partial') updateLive(m.text);
   if(m.type==='message'){
@@ -645,6 +668,11 @@ async function switchASR(b){
   sysMsg('ASR 已切换到 '+(d.provider||b));
 }
 
+function setListening(on, hint){
+  var mask=id('listenMask'); if(!mask) return;
+  if(on){ var h=id('listenHint'); if(h) h.textContent=hint||'聆听模式 · 说『小歌干活了』或点通话键退出'; mask.style.display='flex'; }
+  else { mask.style.display='none'; }
+}
 function id(x){ return document.getElementById(x); }
 function log(){ return id('log'); }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -708,6 +736,135 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
     return ws
 
 
+# ─── 聆听模式 host 助手(全部在 agent 循环线程执行,见 LISTENING_MODE_DESIGN §5.7)──────
+def _listen_broadcast(on: bool) -> None:
+    msg: dict = {"type": "listening", "on": bool(on)}
+    if on:
+        wake = _listen_ctrl.wake_keyword if _listen_ctrl else "小歌干活了"
+        msg["hint"] = f"聆听模式 · 说『{wake}』或点通话键退出"
+    broadcast(msg)
+
+
+def _listen_interrupt_blocked() -> bool:
+    """聆听期 OR 退出提示保护窗内:用户语音不得打断小歌(进入提示 / 要整理吗)。
+
+    聆听期间用户说的话本就不进显示/上下文,也不应能打断小歌的受控播报;退出后短暂保护
+    "要整理吗",免被刚说的退出指令/前一句的残留 STT/在线2pass 切掉。关闭或正常态恒为 False。
+    """
+    c = _listen_ctrl
+    if c is None or not c.enabled:
+        return False
+    return c.active or time.monotonic() < _listen_guard_until
+
+
+def _listen_arm_guard() -> None:
+    global _listen_guard_until
+    _listen_guard_until = time.monotonic() + _LISTEN_GUARD_S
+
+
+def _listen_clear_guard() -> None:
+    global _listen_guard_until
+    _listen_guard_until = 0.0
+
+
+def _listen_tail_pending() -> bool:
+    """退出后等"尾巴 final":KWS(声学,~即时)已翻 active=False、撤横幅,但该句 STT final
+    滞后 ~1.5s 才到。一次性标记(+安全时限),覆盖这条尾巴 final——它含唤醒词及之前的监听内容,
+    要丢;唤醒词之后接着说的真话要留(见 split_after_command)。"""
+    return _listen_exit_pending and time.monotonic() < _listen_drain_until
+
+
+def _listen_arm_tail() -> None:
+    global _listen_exit_pending, _listen_drain_until
+    if _listen_ctrl is not None:
+        _listen_exit_pending = True
+        _listen_drain_until = time.monotonic() + _listen_ctrl.drain_s
+
+
+def _listen_consume_tail() -> None:
+    global _listen_exit_pending
+    _listen_exit_pending = False
+
+
+def _listen_cancel_ttl() -> None:
+    global _listen_ttl_handle
+    if _listen_ttl_handle is not None:
+        _listen_ttl_handle.cancel()
+        _listen_ttl_handle = None
+
+
+def _listen_on_temp_ttl_expired() -> None:
+    global _listen_ttl_handle
+    _listen_ttl_handle = None
+    if _listen_ctrl is not None:
+        _listen_ctrl.drop_temp()
+        _listen_ctrl.clear_awaiting()
+        _append_turn_log("LISTEN_TEMP_DROPPED ttl")
+
+
+def _listen_arm_ttl() -> None:
+    global _listen_ttl_handle
+    _listen_cancel_ttl()
+    if _agent_loop is None or _listen_ctrl is None:
+        return
+    _listen_ttl_handle = _agent_loop.call_later(
+        _listen_ctrl.temp_ttl_s, _listen_on_temp_ttl_expired
+    )
+
+
+def _listen_ask_organize() -> None:
+    if _listen_ctrl is None or _session is None:
+        return
+    _listen_ctrl.awaiting_organize_answer = True
+    _listen_arm_guard()  # 保护这句不被刚说完的退出指令/前一句残留打断
+    _session.say(
+        "刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False, allow_interruptions=False
+    )
+    _append_turn_log("LISTEN_ORGANIZE_ASK")
+
+
+def _listen_enter_aftermath(via: str, *, notice: bool) -> None:
+    """进入收尾(控制器已置 active):取消旧 TTL、可选语音提示、UI 横幅。"""
+    if _listen_ctrl is None:
+        return
+    _listen_cancel_ttl()  # 再入:旧待整理的定时器关掉(ctrl._enter 已 drop_temp)
+    if notice and _listen_ctrl.enter_notice and _session is not None:
+        # 进入提示不可打断;聆听期(active)用户语音已被 _listen_interrupt_blocked 挡住打断路径
+        _session.say(_listen_ctrl.enter_notice, add_to_chat_ctx=False, allow_interruptions=False)
+    _listen_broadcast(True)
+    _append_turn_log(f"LISTEN_ENTER via {via}")
+
+
+def _listen_exit_aftermath(via: str, *, ask: bool) -> None:
+    """退出收尾:启动 TTL、撤 UI;ask 且有实质内容则主动问。"""
+    if _listen_ctrl is None:
+        return
+    _listen_arm_tail()  # 退出尾巴标记:切分那条滞后 final(丢唤醒词及之前,留之后),免泄漏
+    _listen_arm_ttl()  # 定时删除(TTL)独立保留,不随整理开关
+    _listen_broadcast(False)
+    _append_turn_log(f"LISTEN_EXIT via {via}")
+    if ask and _listen_ctrl.organize_enabled and _listen_ctrl.temp_has_substance():
+        _listen_ask_organize()
+
+
+def _listen_on_mic_toggle(now_muted: bool) -> None:
+    """通话键(marshal 回 agent 循环):聆听期=退出(顺带已静音,不问);解除静音回正常+有待整理=补问。"""
+    c = _listen_ctrl
+    if c is None or not c.enabled:
+        return
+    if c.active:
+        c.force_exit()
+        _listen_exit_aftermath("mic", ask=False)  # 用户挂起中,不在此问
+    elif (
+        (not now_muted)
+        and c.organize_enabled
+        and c.temp_transcript
+        and c.temp_has_substance()
+        and not c.awaiting_organize_answer
+    ):
+        _listen_ask_organize()
+
+
 async def _handle_mic(request: aiohttp.web.Request) -> aiohttp.web.Response:
     # 关麦=真关麦:主机制是输入源头的静音门(对所有 STT 后端统一,关麦时全链路收静音)。
     gate = _mute_gate
@@ -722,6 +879,10 @@ async def _handle_mic(request: aiohttp.web.Request) -> aiohttp.web.Response:
     if _test_recorder is not None:
         _test_recorder.set_paused(muted)
     broadcast({"type": "state", "muted": muted})
+    # 聆听模式:通话键退出/补问的控制器变更必须 marshal 回 agent 循环串行(见设计 §5.7)。
+    loop = _agent_loop
+    if loop is not None and loop.is_running() and _listen_ctrl is not None and _listen_ctrl.enabled:
+        loop.call_soon_threadsafe(_listen_on_mic_toggle, muted)
     logger.info("mic %s (mute-gate)", "muted" if muted else "unmuted")
     return aiohttp.web.json_response({"muted": muted})
 
@@ -984,7 +1145,8 @@ class VoiceAgent(Agent):
             collected.append(chunk)  # TimedString subclasses str, so this always works
             yield chunk
         full_text = strip_markdown("".join(collected))  # 气泡显示纯口语
-        if full_text:
+        # 聆听期 host gate:不广播 assistant 气泡(进入提示也不变气泡);只挡广播,不碰 tts_node。
+        if full_text and not (_listen_ctrl is not None and _listen_ctrl.active):
             broadcast(
                 {"type": "message", "role": "assistant", "text": full_text, "ts": time.time()}
             )
@@ -997,11 +1159,60 @@ class VoiceAgent(Agent):
     async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
         spoke_over_agent = _overlap_turn_state["user_spoke_over_agent"]
         original = new_message.text_content
+        ctrl = _listen_ctrl
+
+        # ① 聆听期:整条算聆听内容 → 吞入缓冲、不回复、不入上下文(显示由 _on_stt 抑制)。
+        if ctrl is not None and ctrl.enabled and ctrl.active:
+            ctrl.capture(original)
+            _append_turn_log(f"LISTEN_SWALLOW text={original!r}")
+            raise StopResponse()
+        # ①b 退出尾巴窗(KWS 已退出但该句 STT final 滞后到达):窗内未定位到唤醒词的 final 一律吞
+        #     (聆听尾巴/滞后的监听内容,窗保持);定位到唤醒词的那条 → 切分(丢唤醒词及之前、留之后)
+        #     并关窗。之后接着说的真话即正常处理(见设计 §5.5)。
+        if ctrl is not None and ctrl.enabled and _listen_tail_pending():
+            after = ctrl.split_after_command(original, ctrl.wake_keyword)
+            if after is None:  # 窗内未定位到唤醒词 → 整条吞,窗保持等真正的唤醒词那条
+                _append_turn_log(f"LISTEN_TAIL_SWALLOW text={original!r}")
+                raise StopResponse()
+            _listen_consume_tail()  # 定位到唤醒词 → 关窗
+            if after == "":  # 纯退出指令,无后话
+                _append_turn_log(f"LISTEN_TAIL_END text={original!r}")
+                raise StopResponse()
+            new_message.content = [after]  # 留唤醒词之后的真话:正常显示 + 回复 + 进上下文
+            original = after
+            _append_turn_log(f"LISTEN_TAIL_KEEP after={after!r}")
+        # ② 退出后等"要整理吗"的回答(organize 开时;退出尾巴已被 ①b 先处理)
+        if ctrl is not None and ctrl.awaiting_organize_answer:
+            ctrl.clear_awaiting()
+            _listen_clear_guard()  # 用户已回答,后续回复(摘要/正常)恢复可打断
+            if ctrl.is_affirmative(original):
+                _listen_cancel_ttl()
+                turn_ctx.add_message(
+                    role="user",
+                    content="[聆听记录] 我刚才在聆听模式期间说了:" + " ".join(ctrl.take_temp()),
+                )
+                _append_turn_log("LISTEN_ORGANIZE_DO")
+                return  # 不抛 StopResponse → 正常生成整理回复(摘要);原始内容只本轮可见
+
+        # ④ 自动进入(放在停止词/backchannel 过滤之前:短噪声在 observe_turn 内被忽略、不重置连击;
+        #    长且打断小歌的轮才计数)。连续 N 轮 → 进入。
+        if ctrl is not None:
+            _len = len(original.strip())
+            dec = ctrl.observe_turn(original, spoke_over_agent)
+            if _len >= ctrl.auto_min_chars or ctrl.auto_count or dec != AutoDecision.NONE:
+                _append_turn_log(
+                    f"LISTEN_AUTO over={spoke_over_agent} len={_len} "
+                    f"count={ctrl.auto_count}/{ctrl.auto_turns} dec={dec.value}"
+                )
+            if dec == AutoDecision.ENTER:
+                _listen_enter_aftermath("auto", notice=True)
+                raise StopResponse()  # 触发轮不回复、不 capture(见设计 §5.2)
 
         if _should_ignore_user_turn(original):
             logger.info("stop phrase -> force interrupt + skip reply: %r", original)
             _append_turn_log(f"STOP_PHRASE text={original!r} -> force_interrupt + skip_reply")
-            self.session.interrupt(force=True)
+            if not _listen_interrupt_blocked():  # 聆听期/保护窗内不打断小歌(仍跳过回复)
+                self.session.interrupt(force=True)
             raise StopResponse()
 
         if _is_backchannel(original):
@@ -1036,6 +1247,7 @@ server.setup_fnc = prewarm
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder, _mute_gate
+    global _session, _listen_ctrl
     _agent_loop = asyncio.get_running_loop()
 
     # 主STT 选择(XIAOGE_STACK=optimized 默认走 funasr-stream;STT_BACKEND 显式覆盖):
@@ -1173,20 +1385,28 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_stt(event) -> None:
+        # 聆听期 + 退出尾巴待处理期都不弹气泡(挡滞后到达、含唤醒词及之前内容的尾巴)
+        _listening = _listen_ctrl is not None and (_listen_ctrl.active or _listen_tail_pending())
         if not event.is_final:
             # 显示同源:流式主STT 的 interim 驱动 live 气泡(全量置换)。
-            if _live_from_main and _live is not None:
+            if _live_from_main and _live is not None and not _listening:
                 _live.feed_full(event.transcript)
             return
         # 中途 FINAL:并入 live 气泡累计,防超长轮内 interim 清零导致气泡缩水(消失再重来)。
-        if _live_from_main and _live is not None:
+        if _live_from_main and _live is not None and not _listening:
             _live.feed_commit(event.transcript)
         _append_turn_log(f"STT_FINAL text={event.transcript!r}")
         if _should_ignore_user_turn(event.transcript):
-            session.interrupt(force=True)
-            _append_turn_log(f"STOP_PHRASE_EARLY text={event.transcript!r} -> force_interrupt")
+            if not _listen_interrupt_blocked():  # 聆听期/保护窗内的"停"等不打断小歌
+                session.interrupt(force=True)
+                _append_turn_log(f"STOP_PHRASE_EARLY text={event.transcript!r} -> force_interrupt")
             return
-        if _overlap_turn_state["user_spoke_over_agent"] and _is_overlap_ack(event.transcript):
+        # 聆听期不做 overlap-ack 早清(让该轮流到 on_user_turn_completed 由 ① capture)
+        if (
+            not _listening
+            and _overlap_turn_state["user_spoke_over_agent"]
+            and _is_overlap_ack(event.transcript)
+        ):
             session.clear_user_turn()
             _append_turn_log(
                 f"BACKCHANNEL_OVERLAP_EARLY text={event.transcript!r} -> clear_user_turn"
@@ -1238,6 +1458,7 @@ async def entrypoint(ctx: JobContext) -> None:
             _timeline = None
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
+    _session = session  # 供模块级聆听助手在 agent 循环里 say/收尾
 
     # 录音回放注入(自动化测试 阶段1):仅设了 AGENT_SCENARIO 才启用,默认正常麦克风。
     # 必须在 recorder/KWS/online tap 包裹之前替换,使注入音频被如实录音并经各 tap。
@@ -1296,13 +1517,31 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # KWS strong interrupt (optional, degrades gracefully if model missing)
     def _on_kws_hit(keyword: str) -> None:
-        session.interrupt(force=True)
+        # 进入聆听(尚未 active)需立即停小歌→强打断;聆听期/退出保护窗内不打断(用户聆听语句不应能打断)
+        if not _listen_interrupt_blocked():
+            session.interrupt(force=True)
+        # 聆听命令词优先(本回调已在 agent 循环):进入/退出后 return,不走停止词逻辑
+        if _listen_ctrl is not None and _listen_ctrl.enabled:
+            evt = _listen_ctrl.observe_keyword(keyword)
+            if evt == ListeningEvent.ENTERED:
+                _listen_enter_aftermath("kws", notice=True)
+                return
+            if evt == ListeningEvent.EXITED:
+                _listen_exit_aftermath("kws", ask=True)
+                return
         logger.info("KWS strong interrupt: %r", keyword)
         _append_turn_log(f"STOP_KWS_EARLY keyword={keyword!r} -> force_interrupt")
         if _timeline is not None:
             _timeline.emit("interrupt.kws", {"keyword": keyword}, source="kws")
 
+    # 聆听模式控制器(纯状态机,默认关);命令词追加到 KWS 词表(from_env 会整体覆盖,故用 replace)
+    _listen_ctrl = ListeningController.from_environment()
     _kws_config = KwsConfig.from_env()
+    if _listen_ctrl.enabled and _listen_ctrl.keywords:
+        _kws_config = replace(
+            _kws_config, keywords=tuple(_kws_config.keywords) + _listen_ctrl.keywords
+        )
+        _append_turn_log(f"LISTEN_ENABLED keywords={_listen_ctrl.keywords}")
     kws_spotter = NativeKwsSpotter.try_create(
         _kws_config,
         loop=asyncio.get_running_loop(),
@@ -1319,6 +1558,9 @@ async def entrypoint(ctx: JobContext) -> None:
     _online_cfg = OnlineInterruptConfig.from_env()
 
     def _on_online_text(piece: str, segment_end: bool) -> None:
+        if _listen_interrupt_blocked():  # 聆听期/退出保护窗:用户语音不得打断小歌
+            _online_state["accum"] = ""
+            return
         if segment_end:
             _online_state["accum"] = ""
             return
