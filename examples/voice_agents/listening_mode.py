@@ -204,7 +204,6 @@ class ListeningController:
             return raw[best_end:].strip(_SPLIT_STRIP)
         return None
 
-
     # ── 整理回答判定 / 临时内容 ──────────────────────────────────────────────
     def is_affirmative(self, text: str) -> bool:
         n = _norm(text)

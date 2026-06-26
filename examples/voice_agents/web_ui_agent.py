@@ -817,7 +817,9 @@ def _listen_ask_organize() -> None:
         return
     _listen_ctrl.awaiting_organize_answer = True
     _listen_arm_guard()  # 保护这句不被刚说完的退出指令/前一句残留打断
-    _session.say("刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False, allow_interruptions=False)
+    _session.say(
+        "刚才听的我先存着了,要整理一下吗?", add_to_chat_ctx=False, allow_interruptions=False
+    )
     _append_turn_log("LISTEN_ORGANIZE_ASK")
 
 
