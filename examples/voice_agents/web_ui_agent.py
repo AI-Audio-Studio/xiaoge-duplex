@@ -119,6 +119,8 @@ _BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
 _BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
 _OVERLAP_ACK_CHARS = _BACKCHANNEL_CHARS + "对好是行的呀嘛"
 _ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
+# 句首游离标点:FunASR 常把上句尾标点带到下句句首。仅用于显示净化,不动进上下文的原文。
+_LEADING_PUNCT_RE = re.compile(r"^[\s，,。.、！!？?～~；;：:…—·、\-]+")
 # 在线软打断的 VAD 佐证宽限(秒):VAD 刚停说话后这段时间内仍接受打断(容忍识别滞后)。
 _ONLINE_VAD_GRACE = float(os.getenv("XIAOGE_ONLINE_VAD_GRACE", "0.6"))
 _SEGMENT_SPLIT_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
@@ -1333,7 +1335,8 @@ async def entrypoint(ctx: JobContext) -> None:
                 {
                     "type": "message",
                     "role": "user",
-                    "text": item.text_content or "",
+                    # 仅显示净化:去掉句首游离标点(FunASR 把上句尾标点带到句首);上下文用原文不变
+                    "text": _LEADING_PUNCT_RE.sub("", item.text_content or ""),
                     "ts": time.time(),
                 }
             )
