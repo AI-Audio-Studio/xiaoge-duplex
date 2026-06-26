@@ -53,6 +53,7 @@ from online_interrupt import (
 from text_sanitizer import sanitize_stream, strip_markdown
 from turn_config import TurnConfig
 
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -70,6 +71,7 @@ from livekit.agents import (
 from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.agents.stt.stream_adapter import StreamAdapter
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS, NOT_GIVEN, NotGivenOr
+from livekit.agents.voice import io
 from livekit.plugins import openai as lk_openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -361,6 +363,7 @@ class SwitchableTTS(tts.TTS):
 # ─── Web server globals ───────────────────────────────────────────────────────
 
 _WEB_PORT = int(os.getenv("WEB_UI_PORT", "8765"))
+_WEB_HOST = os.getenv("WEB_UI_HOST", "localhost")
 _ws_clients: set[aiohttp.web.WebSocketResponse] = set()
 _web_loop: asyncio.AbstractEventLoop | None = None
 _agent_loop: asyncio.AbstractEventLoop | None = None
@@ -376,6 +379,13 @@ _LISTEN_GUARD_S = 6.0  # 退出"要整理吗"播报的打断保护时长(秒)
 _listen_drain_until = 0.0  # 退出尾巴标记的安全时限(monotonic):此前第一条 final 视作退出尾巴
 _listen_exit_pending = False  # 一次性:退出后等"尾巴 final"(含唤醒词那条),消费一次后清
 _tts_backend_key: str = "cosyvoice"
+
+_WEB_AUDIO: bool = _env_bool("WEB_AUDIO", False)
+_SSL_CERT: str = os.getenv("WEB_SSL_CERT", "")
+_SSL_KEY: str = os.getenv("WEB_SSL_KEY", "")
+_audio_ws_clients: set[aiohttp.web.WebSocketResponse] = set()
+_ws_audio_input_ref = None  # set to WebSocketAudioInput when WEB_AUDIO=1
+_ws_audio_output_ref = None  # set to WebSocketAudioOutput when WEB_AUDIO=1
 
 # ─── HTML page (embedded) ────────────────────────────────────────────────────
 
@@ -434,7 +444,9 @@ main{flex:1;display:flex;min-height:0}
 #micBtn.off{background:#FDECEC;color:#DC2626;border:1px solid #F4C9C9}
 .ico-on,.ico-off{display:inline-flex;align-items:center;justify-content:center}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
-#spkBtn{background:#fff;color:#B6B8BE;border:1px dashed #D6D7DB;cursor:not-allowed}
+#spkBtn{background:#fff;color:#6B7280;border:1px solid #D6D7DB}
+#spkBtn.on{background:#E86A43;color:#fff;border-color:#E86A43}
+#spkBtn.err{background:#FEF2F2;color:#B91C1C;border-color:#FECACA}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
 /* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。
    顶部横幅跟随会话区宽度(align-items:stretch 撑满),提示单行不换行。 */
@@ -479,6 +491,9 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
         <span class="ico-on"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/></svg></span>
         <span class="ico-off"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/><path d="M8 21h8"/><path d="M4 4l16 16"/></svg></span>
       </button>
+      <button class="rnd" id="spkBtn" onclick="toggleVoice()" aria-label="Connect browser voice" title="Connect browser voice">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a9 9 0 0 1 0 12"/></svg>
+      </button>
     </div>
     <div id="listenMask" style="display:none">
       <div class="listen-card">
@@ -496,7 +511,7 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
 <footer>© 2026 小歌 Duplex · ATC- AI音频研发部 · 内部测试面板</footer>
 <!-- 隐藏状态镜像 + 配置控件(暂从界面移除,保留以维持 JS 现状,后续可放回面板) -->
 <div class="sbar">
-  <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbMsgs"></span>
+  <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbVoice"></span><span id="sbMsgs"></span>
   <button id="tabFunasr" onclick="switchASR('funasr')"></button>
   <button id="tabQwen3" onclick="switchASR('qwen3')"></button>
   <button id="tabQwen3Stream" onclick="switchASR('qwen3-stream')"></button>
@@ -506,12 +521,15 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
 </div>
 <script>
 var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null;
+var wsProto = location.protocol==='https:' ? 'wss:' : 'ws:';
+var wsAudio=null, micStream=null, audioCtx=null, playCtx=null, voiceActive=false;
+var nextPlayTime=0, AUDIO_SR=16000, scheduledSources=[];
 var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live 气泡
 var LIVE_DANGLING_MS=4000;                  // 无定稿的残留气泡兜底淡出(毫秒)
 
 function conn(){
   if(ws && ws.readyState===WebSocket.OPEN) return;
-  ws = new WebSocket('ws://localhost:'+location.port+'/ws');
+  ws = new WebSocket(wsProto+'//'+location.host+'/ws');
   ws.onopen = function(){
     stConn=true; updateStatus();
     sysMsg('已连接到语音助手');
@@ -526,6 +544,7 @@ function conn(){
 }
 
 function handle(m){
+  if(m.type==='clear'){ clearPlayback(); return; }
   if(m.type==='listening'){ setListening(m.on, m.hint); }
   if(m.type==='user_speaking' && m.state==='start') startLive();
   if(m.type==='user_partial') updateLive(m.text);
@@ -538,12 +557,106 @@ function handle(m){
     if(m.stt_backend !== undefined) setAsr(m.stt_backend);
     if(m.tts_backend !== undefined) setTts(m.tts_backend);
     if(m.agent_state !== undefined) setAgent(m.agent_state);
+    if(m.audio_mode !== undefined && m.audio_mode && !voiceActive){
+      id('spkBtn').title='Connect browser voice';
+      id('sbVoice').textContent='Voice: disconnected';
+      sysMsg('Click the speaker button to connect browser microphone and playback');
+    }
   }
 }
 
 // ── 用户实时转写:单一 live 气泡(开口出现、partial 边长、final 定稿)──────────
 // 一次连续说话 = 一个气泡:startLive 只在"新一轮"被后端调用(见 live_transcript.py);
 // 连续说话的小停顿不会重开。无定稿的残留气泡由超时兜底丢弃。
+
+// Browser voice bridge: microphone PCM -> /ws/audio, TTS PCM <- /ws/audio.
+async function toggleVoice(){
+  if(voiceActive){ stopVoice(); return; }
+  await startVoice();
+}
+
+async function startVoice(){
+  try{
+    sysMsg('Connecting browser playback...');
+    playCtx = new AudioContext({sampleRate:AUDIO_SR});
+    if(playCtx.state === 'suspended') await playCtx.resume();
+
+    wsAudio = new WebSocket(wsProto+'//'+location.host+'/ws/audio');
+    wsAudio.binaryType = 'arraybuffer';
+    wsAudio.onopen = async function(){
+      nextPlayTime = 0;
+      setVoiceActive(true);
+      sysMsg('Browser playback connected. Requesting microphone...');
+      try{
+        micStream = await navigator.mediaDevices.getUserMedia({audio:{
+          channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
+        }});
+        audioCtx = new AudioContext({sampleRate:AUDIO_SR});
+        if(audioCtx.state === 'suspended') await audioCtx.resume();
+        var src = audioCtx.createMediaStreamSource(micStream);
+        var workletSrc = `class P extends AudioWorkletProcessor{process(i){var c=i[0]&&i[0][0];if(c){var b=new Int16Array(c.length);for(var j=0;j<c.length;j++)b[j]=Math.max(-32768,Math.min(32767,c[j]*32767));this.port.postMessage(b.buffer,[b.buffer])}return true}}registerProcessor('p',P);`;
+        var blobUrl = URL.createObjectURL(new Blob([workletSrc],{type:'application/javascript'}));
+        await audioCtx.audioWorklet.addModule(blobUrl);
+        URL.revokeObjectURL(blobUrl);
+        var node = new AudioWorkletNode(audioCtx,'p');
+        node.port.onmessage = function(e){ if(wsAudio && wsAudio.readyState===WebSocket.OPEN && !muted) wsAudio.send(e.data); };
+        src.connect(node);
+        sysMsg('Microphone connected. You can speak now.');
+      }catch(err){
+        setVoiceError('microphone failed');
+        sysMsg('Microphone failed: '+err.message+'. Playback is still connected.');
+      }
+    };
+    wsAudio.onmessage = function(e){
+      if(e.data instanceof ArrayBuffer){ playPcm(e.data); }
+      else{ try{ var m=JSON.parse(e.data); if(m.type==='clear') clearPlayback(); }catch(x){} }
+    };
+    wsAudio.onclose = function(){ wsAudio=null; cleanupVoice(); };
+    wsAudio.onerror = function(){ setVoiceError('voice websocket error'); stopVoice(); };
+  }catch(err){
+    setVoiceError('voice connection failed');
+    sysMsg('Voice connection failed: '+err.message);
+    stopVoice();
+  }
+}
+
+function playPcm(buf){
+  if(!playCtx) return;
+  var i16=new Int16Array(buf), f32=new Float32Array(i16.length);
+  for(var i=0;i<i16.length;i++) f32[i]=i16[i]/32767;
+  var ab=playCtx.createBuffer(1,f32.length,AUDIO_SR);
+  ab.copyToChannel(f32,0);
+  var s=playCtx.createBufferSource(); s.buffer=ab; s.connect(playCtx.destination);
+  var now=playCtx.currentTime;
+  if(nextPlayTime < now) nextPlayTime = now + 0.05;
+  s.start(nextPlayTime);
+  nextPlayTime += ab.duration;
+  scheduledSources.push(s);
+  s.onended = function(){ var i=scheduledSources.indexOf(s); if(i>=0) scheduledSources.splice(i,1); };
+}
+function clearPlayback(){ scheduledSources.forEach(function(s){ try{s.stop(0);}catch(x){} }); scheduledSources=[]; nextPlayTime=0; }
+function cleanupVoice(){
+  clearPlayback();
+  if(micStream){ micStream.getTracks().forEach(function(t){t.stop();}); micStream=null; }
+  if(audioCtx){ try{audioCtx.close();}catch(x){} audioCtx=null; }
+  if(playCtx){ try{playCtx.close();}catch(x){} playCtx=null; }
+  setVoiceActive(false);
+}
+function stopVoice(){
+  if(wsAudio){ var w=wsAudio; wsAudio=null; try{w.close();}catch(x){} }
+  cleanupVoice();
+}
+function setVoiceActive(a){
+  voiceActive=a;
+  var b=id('spkBtn');
+  if(!b) return;
+  b.className='rnd'+(a?' on':'');
+  b.setAttribute('aria-label', a?'Disconnect browser voice':'Connect browser voice');
+  b.title=a?'Disconnect browser voice':'Connect browser voice';
+  id('sbVoice').textContent='Voice: '+(a?'connected':'disconnected');
+}
+function setVoiceError(t){ var b=id('spkBtn'); if(b){ b.className='rnd err'; b.title=t; } id('sbVoice').textContent='Voice: '+t; }
+
 function startLive(){
   if(liveBubble){ armLive(); return; }   // Bug2 修复:已有正在涨的气泡→续用,不清空重建(防中途消失)
   liveBubble=document.createElement('div');
@@ -708,6 +821,72 @@ def broadcast(msg: dict) -> None:
     asyncio.run_coroutine_threadsafe(_ws_broadcast(json.dumps(msg, ensure_ascii=False)), loop)
 
 
+async def _ws_audio_broadcast(data: bytes) -> None:
+    dead: list[aiohttp.web.WebSocketResponse] = []
+    for ws in list(_audio_ws_clients):
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _audio_ws_clients.discard(ws)
+
+
+def _broadcast_audio(data: bytes) -> None:
+    loop = _web_loop
+    if loop is None or not loop.is_running() or not _audio_ws_clients:
+        return
+    asyncio.run_coroutine_threadsafe(_ws_audio_broadcast(data), loop)
+
+
+async def _ws_audio_ctrl_broadcast(msg: str) -> None:
+    dead: list[aiohttp.web.WebSocketResponse] = []
+    for ws in list(_audio_ws_clients):
+        try:
+            await ws.send_str(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _audio_ws_clients.discard(ws)
+
+
+def _broadcast_audio_ctrl(data: dict) -> None:
+    loop = _web_loop
+    if loop is None or not loop.is_running():
+        return
+    asyncio.run_coroutine_threadsafe(
+        _ws_audio_ctrl_broadcast(json.dumps(data, ensure_ascii=False)), loop
+    )
+
+
+async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
+    ws = aiohttp.web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    _audio_ws_clients.add(ws)
+    logger.info("audio WS client connected (%d total)", len(_audio_ws_clients))
+
+    await ws.send_str(json.dumps({"type": "ready", "sample_rate": WebSocketAudioInput.SAMPLE_RATE}))
+
+    frame_count = 0
+    byte_count = 0
+    async for msg in ws:
+        if msg.type == aiohttp.WSMsgType.BINARY:
+            frame_count += 1
+            byte_count += len(msg.data)
+            if frame_count in (1, 50, 200):
+                logger.info("audio WS received frames=%d bytes=%d", frame_count, byte_count)
+            inp = _ws_audio_input_ref
+            aloop = _agent_loop
+            if inp is not None and aloop is not None and aloop.is_running():
+                aloop.call_soon_threadsafe(inp._sync_push, msg.data)
+        elif msg.type == aiohttp.WSMsgType.ERROR:
+            break
+
+    _audio_ws_clients.discard(ws)
+    logger.info("audio WS client disconnected (%d remaining)", len(_audio_ws_clients))
+    return ws
+
+
 async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
     return aiohttp.web.Response(text=_HTML, content_type="text/html", charset="utf-8")
 
@@ -726,6 +905,7 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
                 "muted": _mute_gate.muted if _mute_gate else False,
                 "stt_backend": stt.provider if stt else "FunASR",
                 "tts_backend": _tts_backend_key,
+                "audio_mode": _WEB_AUDIO,
             },
             ensure_ascii=False,
         )
@@ -960,12 +1140,23 @@ async def _run_web_server(port: int) -> None:
     app.router.add_post("/api/mic", _handle_mic)
     app.router.add_post("/api/asr", _handle_switch_asr)
     app.router.add_post("/api/tts", _handle_switch_tts)
+    if _WEB_AUDIO:
+        app.router.add_get("/ws/audio", _handle_ws_audio)
+
+    ssl_ctx = None
+    if _SSL_CERT and _SSL_KEY:
+        import ssl as _ssl
+
+        ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(_SSL_CERT, _SSL_KEY)
+        logger.info("TLS enabled: cert=%s", _SSL_CERT)
 
     runner = aiohttp.web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = aiohttp.web.TCPSite(runner, "localhost", port)
+    site = aiohttp.web.TCPSite(runner, _WEB_HOST, port, ssl_context=ssl_ctx)
     await site.start()
-    logger.info("Web UI available at http://localhost:%d", port)
+    scheme = "https" if ssl_ctx else "http"
+    logger.info("Web UI available at %s://%s:%d", scheme, _WEB_HOST, port)
 
     await asyncio.Event().wait()  # run forever
 
@@ -1234,6 +1425,136 @@ class VoiceAgent(Agent):
         logger.info("normalized digit sequence: %r -> %r", original, normalized)
 
 
+class WebSocketAudioInput(io.AudioInput):
+    """Audio source fed by binary PCM frames arriving over /ws/audio WebSocket."""
+
+    SAMPLE_RATE = 16_000
+    SAMPLES_PER_FRAME = 160
+
+    def __init__(self) -> None:
+        super().__init__(label="ws-audio-input")
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=400)
+        self._silence = bytes(self.SAMPLES_PER_FRAME * 2)
+        self._buf = bytearray()
+
+    def _sync_push(self, data: bytes) -> None:
+        self._buf.extend(data)
+        frame_bytes = self.SAMPLES_PER_FRAME * 2
+        while len(self._buf) >= frame_bytes:
+            chunk = bytes(self._buf[:frame_bytes])
+            del self._buf[:frame_bytes]
+            try:
+                self._queue.put_nowait(chunk)
+            except asyncio.QueueFull:
+                try:
+                    self._queue.get_nowait()
+                    self._queue.put_nowait(chunk)
+                except Exception:
+                    pass
+
+    async def __anext__(self) -> rtc.AudioFrame:
+        try:
+            data = await asyncio.wait_for(self._queue.get(), timeout=0.05)
+        except asyncio.TimeoutError:
+            data = self._silence
+        return rtc.AudioFrame(
+            data=data,
+            sample_rate=self.SAMPLE_RATE,
+            num_channels=1,
+            samples_per_channel=self.SAMPLES_PER_FRAME,
+        )
+
+
+class WebSocketAudioOutput(io.AudioOutput):
+    """Forward TTS audio to /ws/audio clients, optionally wrapping local output."""
+
+    TARGET_RATE = 16_000
+
+    def __init__(self, next_output: io.AudioOutput | None = None) -> None:
+        sample_rate = next_output.sample_rate if next_output is not None else self.TARGET_RATE
+        can_pause = next_output.can_pause if next_output is not None else False
+        super().__init__(
+            label="ws-audio-output",
+            next_in_chain=next_output,
+            sample_rate=sample_rate,
+            capabilities=io.AudioOutputCapabilities(pause=can_pause),
+        )
+        self._rs: rtc.AudioResampler | None = None
+        self._rs_rate: int = 0
+        self._pushed_duration: float = 0.0
+        self._capture_start: float = 0.0
+        self._flush_task: asyncio.Task[None] | None = None
+        self._interrupted_ev: asyncio.Event = asyncio.Event()
+
+    def _to_pcm16(self, frame: rtc.AudioFrame) -> bytes:
+        if frame.sample_rate == self.TARGET_RATE and frame.num_channels == 1:
+            return bytes(frame.data)
+        if self._rs is None or self._rs_rate != frame.sample_rate:
+            self._rs = rtc.AudioResampler(
+                input_rate=frame.sample_rate,
+                output_rate=self.TARGET_RATE,
+                num_channels=1,
+                quality=rtc.AudioResamplerQuality.MEDIUM,
+            )
+            self._rs_rate = frame.sample_rate
+        return b"".join(bytes(f.data) for f in self._rs.push(frame))
+
+    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+        if self.next_in_chain is None and not self._pushed_duration:
+            self._capture_start = time.monotonic()
+        if self.next_in_chain is not None:
+            try:
+                await self.next_in_chain.capture_frame(frame)
+            except Exception as exc:
+                logger.debug("local audio output skipped: %s", exc)
+        await super().capture_frame(frame)
+        pcm = self._to_pcm16(frame)
+        if pcm:
+            _broadcast_audio(pcm)
+            if self.next_in_chain is None:
+                self._pushed_duration += frame.duration
+
+    def flush(self) -> None:
+        super().flush()
+        if self.next_in_chain is not None:
+            self.next_in_chain.flush()
+        elif self._pushed_duration > 0:
+            if self._flush_task and not self._flush_task.done():
+                self._flush_task.cancel()
+            self._flush_task = asyncio.create_task(self._headless_wait_for_playout())
+
+    def clear_buffer(self) -> None:
+        if self.next_in_chain is not None:
+            self.next_in_chain.clear_buffer()
+        elif self._pushed_duration > 0:
+            self._interrupted_ev.set()
+        _broadcast_audio_ctrl({"type": "clear"})
+
+    async def _headless_wait_for_playout(self) -> None:
+        total_duration = self._pushed_duration
+        capture_start = self._capture_start
+        interrupted_task = asyncio.create_task(self._interrupted_ev.wait())
+        playout_task = asyncio.create_task(asyncio.sleep(total_duration))
+        try:
+            done, _ = await asyncio.wait(
+                [interrupted_task, playout_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            interrupted = interrupted_task in done
+        finally:
+            interrupted_task.cancel()
+            playout_task.cancel()
+        if interrupted:
+            elapsed = time.monotonic() - capture_start
+            position = min(max(0.0, elapsed), total_duration)
+        else:
+            position = total_duration
+        self.on_playback_finished(playback_position=position, interrupted=interrupted)
+        self._pushed_duration = 0.0
+        self._capture_start = 0.0
+        self._interrupted_ev.clear()
+
+
 server = AgentServer()
 
 
@@ -1249,7 +1570,7 @@ server.setup_fnc = prewarm
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder, _mute_gate
-    global _session, _listen_ctrl
+    global _session, _listen_ctrl, _ws_audio_input_ref, _ws_audio_output_ref
     _agent_loop = asyncio.get_running_loop()
 
     # 主STT 选择(XIAOGE_STACK=optimized 默认走 funasr-stream;STT_BACKEND 显式覆盖):
@@ -1483,6 +1804,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # 静音门(关麦=真关麦):最内层包裹(在 recorder/KWS/在线2pass 之前),关麦时下游
     # 所有消费者收静音 → 不转写/不打断/真人声不出本机。默认直通,零影响。
+    if _WEB_AUDIO:
+        _ws_audio_input_ref = WebSocketAudioInput()
+        session.input.audio = _ws_audio_input_ref
+        if not sys.stdin.isatty():
+            _ws_audio_output_ref = WebSocketAudioOutput(None)
+        elif session.output.audio is not None:
+            _ws_audio_output_ref = WebSocketAudioOutput(session.output.audio)
+        if _ws_audio_output_ref is not None:
+            session.output.audio = _ws_audio_output_ref
+        _append_turn_log("WS_AUDIO_ACTIVE sample_rate=16000")
+        logger.info("WebSocket audio mode active - clients connect to /ws/audio")
+
     if session.input.audio is not None:
         _mute_gate = MuteGate(session.input.audio)
         session.input.audio = _mute_gate
@@ -1567,7 +1900,10 @@ async def entrypoint(ctx: JobContext) -> None:
         if segment_end:
             _online_state["accum"] = ""
             return
-        if session.agent_state != "speaking":
+        browser_playing = (
+            _ws_audio_output_ref is not None and _ws_audio_output_ref._pushed_duration > 0
+        )
+        if session.agent_state != "speaking" and not browser_playing:
             _online_state["accum"] = ""
             return
         accum = str(_online_state["accum"]) + piece
@@ -1579,6 +1915,8 @@ async def entrypoint(ctx: JobContext) -> None:
             _online_state["fired_at"] = now
             _online_state["accum"] = ""
             session.interrupt(force=True)
+            broadcast({"type": "clear"})
+            _broadcast_audio_ctrl({"type": "clear"})
             _append_turn_log(f"STOP_ONLINE_EARLY text={accum!r} -> force_interrupt")
             if _timeline is not None:
                 _timeline.emit("interrupt.online", {"text": accum, "kind": "stop"}, source="online")
@@ -1599,6 +1937,8 @@ async def entrypoint(ctx: JobContext) -> None:
             _online_state["fired_at"] = now
             _online_state["accum"] = ""
             session.interrupt()
+            broadcast({"type": "clear"})
+            _broadcast_audio_ctrl({"type": "clear"})
             _append_turn_log(
                 f"OVERLAP_ONLINE_INTERRUPT text={accum!r} chars={meaningful} -> interrupt"
             )
@@ -1638,11 +1978,18 @@ if __name__ == "__main__":
     )
     t.start()
 
-    # Give the server a moment to bind, then open the browser
+    # Give the server a moment to bind; open browser only in local mode.
     import time as _time
 
     _time.sleep(0.8)
-    webbrowser.open(f"http://localhost:{_WEB_PORT}")
-    logger.info("Opening browser at http://localhost:%d", _WEB_PORT)
+    if _WEB_HOST in ("localhost", "127.0.0.1"):
+        webbrowser.open(f"http://localhost:{_WEB_PORT}")
+        logger.info("Opening browser at http://localhost:%d", _WEB_PORT)
+    else:
+        logger.info(
+            "Web UI listening on http://0.0.0.0:%d - open from browser at http://<server-ip>:%d",
+            _WEB_PORT,
+            _WEB_PORT,
+        )
 
     cli.run_app(server)
