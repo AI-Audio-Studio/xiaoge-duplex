@@ -1,4 +1,4 @@
-.PHONY: help install format format-check lint lint-fix check type-check test test-unit test-docker clean build \
+.PHONY: help install format format-check lint lint-fix lint-ours check type-check test test-unit test-docker clean build \
         link-rtc link-rtc-local link-rtc-version unlink-rtc status doctor
 
 # Colors for output
@@ -30,7 +30,7 @@ help: ## Show this help message
 	@grep -E '^(link-rtc|link-rtc-local|link-rtc-version|unlink-rtc|status|doctor):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Code Quality:$(RESET)"
-	@grep -E '^(format|format-check|lint|lint-fix|type-check|check):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
+	@grep -E '^(format|format-check|lint|lint-fix|lint-ours|type-check|check):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
 	@echo ""
 	@echo "$(BOLD)Other:$(RESET)"
 	@grep -E '^(install|clean|build):.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  $(CYAN)%-20s$(RESET) %s\n", $$1, $$2}'
@@ -67,6 +67,28 @@ lint-fix: ## Run ruff linter and fix issues automatically
 	@echo "$(BOLD)$(CYAN)Running linter with auto-fix...$(RESET)"
 	@uv run ruff check --fix .
 	@echo "$(BOLD)$(GREEN)✓ Linting complete$(RESET)"
+
+# 仅约束"本项目自己写的代码"(不含 livekit-* 母体与上游示例)。规范见 docs/project/CODE_GUIDELINES.md;
+# 额外规则与历史挂账在 ruff-ours.toml;下面是受约束的文件清单(权威"约束索引")。
+OUR_CODE := \
+	examples/voice_agents/web_ui_agent.py examples/voice_agents/listening_mode.py \
+	examples/voice_agents/mute_gate.py examples/voice_agents/text_sanitizer.py \
+	examples/voice_agents/live_transcript.py examples/voice_agents/turn_config.py \
+	examples/voice_agents/kws_interrupt.py examples/voice_agents/online_interrupt.py \
+	examples/voice_agents/funasr_stream_stt.py examples/voice_agents/iflytek_stt.py \
+	examples/voice_agents/custom_audio_providers.py examples/voice_agents/audio_recorder.py \
+	examples/voice_agents/test_recorder.py examples/voice_agents/event_timeline.py \
+	examples/voice_agents/turn_metrics.py examples/voice_agents/scripted_audio.py \
+	examples/voice_agents/probe_funasr_2pass.py
+
+lint-ours: ## Lint OUR code against project guidelines (docs/project/CODE_GUIDELINES.md)
+	@echo "$(BOLD)$(CYAN)Linting project-owned code against guidelines...$(RESET)"
+	@if uv run ruff check --config ruff-ours.toml $(OUR_CODE); then \
+		echo "$(BOLD)$(GREEN)✓ 自有代码符合规范(CODE_GUIDELINES.md)$(RESET)"; \
+	else \
+		echo "$(BOLD)$(RED)✗ 违反 docs/project/CODE_GUIDELINES.md;请重构,或在 ruff-ours.toml 临时挂账并登记待办$(RESET)"; \
+		exit 1; \
+	fi
 
 type-check: ## Run mypy type checker
 	@echo "$(BOLD)$(CYAN)Running type checker...$(RESET)"

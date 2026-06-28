@@ -26,6 +26,7 @@
 ## 协作规范 · [project/](project/)
 | 文档 | 说明 |
 | --- | --- |
+| [project/CODE_GUIDELINES.md](project/CODE_GUIDELINES.md) | 自有代码规范(文件/函数大小、解耦);`make lint-ours` 强制 |
 | [project/CONTRIBUTING.md](project/CONTRIBUTING.md) | 贡献指南 |
 | [project/CODE_OF_CONDUCT.md](project/CODE_OF_CONDUCT.md) | 行为准则 |
 
