@@ -14,6 +14,7 @@ extend-select = ["C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
 "examples/voice_agents/probe_funasr_2pass.py" = ["C901", "PLR0912", "PLR0915"]
 "examples/voice_agents/kws_interrupt.py" = ["PLR0911"]
 "examples/voice_agents/turn_metrics.py" = ["C901"]
+"examples/voice_agents/qwen_funasr_bailian_voice_agent.py" = ["C901", "PLR0915"]
 
 [lint.mccabe]
 max-complexity = 10

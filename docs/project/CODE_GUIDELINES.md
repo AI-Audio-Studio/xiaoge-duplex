@@ -31,6 +31,8 @@ examples/voice_agents/
   turn_metrics.py            判停 KPI
   scripted_audio.py          录音回放注入
   probe_funasr_2pass.py      FunASR 探针
+  qwen_funasr_bailian_voice_agent.py / qwen_gateway_console_agent.py
+  kimi_console_agent.py / nvidia_test.py    控制台 Agent(本项目)
 ```
 
 **新增自有文件时**:把它加进 `makefile` 的 `OUR_CODE`,即自动纳入约束。
@@ -71,6 +73,7 @@ examples/voice_agents/
 | `probe_funasr_2pass.py` | C901, PLR0912, PLR0915 | 低(探针工具) |
 | `kws_interrupt.py` | PLR0911 | 低(单函数 return 偏多) |
 | `turn_metrics.py` | C901 | 低 |
+| `qwen_funasr_bailian_voice_agent.py` | C901, PLR0915 | 低(控制台 Agent) |
 
 **收紧流程(ratchet)**:重构某文件达标后,从 `ruff-ours.toml` 删掉对应挂账行 → `make lint-ours` 继续绿,且该文件此后不允许回退。
 

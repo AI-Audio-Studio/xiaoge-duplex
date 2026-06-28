@@ -79,7 +79,10 @@ OUR_CODE := \
 	examples/voice_agents/custom_audio_providers.py examples/voice_agents/audio_recorder.py \
 	examples/voice_agents/test_recorder.py examples/voice_agents/event_timeline.py \
 	examples/voice_agents/turn_metrics.py examples/voice_agents/scripted_audio.py \
-	examples/voice_agents/probe_funasr_2pass.py
+	examples/voice_agents/probe_funasr_2pass.py \
+	examples/voice_agents/qwen_funasr_bailian_voice_agent.py \
+	examples/voice_agents/qwen_gateway_console_agent.py \
+	examples/voice_agents/kimi_console_agent.py examples/voice_agents/nvidia_test.py
 
 lint-ours: ## Lint OUR code against project guidelines (docs/project/CODE_GUIDELINES.md)
 	@echo "$(BOLD)$(CYAN)Linting project-owned code against guidelines...$(RESET)"
