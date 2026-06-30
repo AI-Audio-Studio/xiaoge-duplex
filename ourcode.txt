@@ -19,3 +19,8 @@ examples/voice_agents/qwen_funasr_bailian_voice_agent.py
 examples/voice_agents/qwen_gateway_console_agent.py
 examples/voice_agents/kimi_console_agent.py
 examples/voice_agents/nvidia_test.py
+clients/python/xiaoge_client.py
+clients/python/demo_file.py
+clients/python/demo_mic.py
+clients/python/selftest.py
+clients/matlab/bridge/xiaoge_bridge.py
