@@ -59,7 +59,8 @@ The CI validates this but to do checks locally see the following example command
 ### Typechecking & linting
 
 ```bash
-make check
+make check       # 全仓:format-check + lint + type-check(母体 livekit-* 沿用宽松规则)
+make lint-ours   # 仅本项目自有代码:文件/函数大小、复杂度、解耦(见 docs/project/CODE_GUIDELINES.md)
 ```
 
 ### Formatting

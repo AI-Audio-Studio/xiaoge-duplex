@@ -100,3 +100,4 @@ STT, TTS, LLM, Realtime models have provider-agnostic interfaces with:
 - Google-style docstrings
 - Strict mypy type checking enabled
 - Use `make check` and `make fix` before committing
+- **自有代码规范**(文件/函数大小、复杂度、解耦):见 [docs/project/CODE_GUIDELINES.md](docs/project/CODE_GUIDELINES.md);用 `make lint-ours` 检查(仅约束我们写的代码,不含 livekit 母体)

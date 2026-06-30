@@ -1,0 +1,26 @@
+# 仅约束"本项目自己写的代码"的额外规范(见 docs/project/CODE_GUIDELINES.md)。
+# 继承根 pyproject.toml 的基础设置(line-length=100 等),再叠加复杂度/规模规则。
+# 不影响 `make check`(那条对全仓用 pyproject 的宽松规则,母体 livekit-* 照常通过)。
+extend = "pyproject.toml"
+
+[lint]
+extend-select = ["C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
+
+# 历史挂账(grandfather):这些既有文件暂豁免其当前违规的规则,
+# 门禁因此现在为绿、只拦"新增违规";重构后逐条删除。详见 CODE_GUIDELINES.md「重构待办」。
+[lint.per-file-ignores]
+"examples/voice_agents/web_ui_agent.py" = ["C901", "PLR0915", "PLR0912"]
+"examples/voice_agents/custom_audio_providers.py" = ["C901", "PLR0913"]
+"examples/voice_agents/probe_funasr_2pass.py" = ["C901", "PLR0912", "PLR0915"]
+"examples/voice_agents/kws_interrupt.py" = ["PLR0911"]
+"examples/voice_agents/turn_metrics.py" = ["C901"]
+"examples/voice_agents/qwen_funasr_bailian_voice_agent.py" = ["C901", "PLR0915"]
+
+[lint.mccabe]
+max-complexity = 10
+
+[lint.pylint]
+max-args = 5
+max-statements = 50
+max-branches = 12
+max-returns = 6
