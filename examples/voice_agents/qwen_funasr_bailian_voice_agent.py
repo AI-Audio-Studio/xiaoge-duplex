@@ -370,7 +370,7 @@ def _is_backchannel(text: str | None) -> bool:
 
 
 @server.rtc_session()
-async def entrypoint(ctx: JobContext) -> None:
+async def entrypoint(ctx: JobContext) -> None:  # noqa: C901, PLR0915
     stt_engine = build_stt()
     tts_engine = build_tts()
     ctx.log_context_fields = {

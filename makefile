@@ -69,20 +69,8 @@ lint-fix: ## Run ruff linter and fix issues automatically
 	@echo "$(BOLD)$(GREEN)✓ Linting complete$(RESET)"
 
 # 仅约束"本项目自己写的代码"(不含 livekit-* 母体与上游示例)。规范见 docs/project/CODE_GUIDELINES.md;
-# 额外规则与历史挂账在 ruff-ours.toml;下面是受约束的文件清单(权威"约束索引")。
-OUR_CODE := \
-	examples/voice_agents/web_ui_agent.py examples/voice_agents/listening_mode.py \
-	examples/voice_agents/mute_gate.py examples/voice_agents/text_sanitizer.py \
-	examples/voice_agents/live_transcript.py examples/voice_agents/turn_config.py \
-	examples/voice_agents/kws_interrupt.py examples/voice_agents/online_interrupt.py \
-	examples/voice_agents/funasr_stream_stt.py examples/voice_agents/iflytek_stt.py \
-	examples/voice_agents/custom_audio_providers.py examples/voice_agents/audio_recorder.py \
-	examples/voice_agents/test_recorder.py examples/voice_agents/event_timeline.py \
-	examples/voice_agents/turn_metrics.py examples/voice_agents/scripted_audio.py \
-	examples/voice_agents/probe_funasr_2pass.py \
-	examples/voice_agents/qwen_funasr_bailian_voice_agent.py \
-	examples/voice_agents/qwen_gateway_console_agent.py \
-	examples/voice_agents/kimi_console_agent.py examples/voice_agents/nvidia_test.py
+# 额外规则在 ruff-ours.toml;权威"约束索引" = ourcode.txt(单一来源,makefile 与 ci.yml 都读它)。
+OUR_CODE := $(shell cat ourcode.txt)
 
 lint-ours: ## Lint OUR code against project guidelines (docs/project/CODE_GUIDELINES.md)
 	@echo "$(BOLD)$(CYAN)Linting project-owned code against guidelines...$(RESET)"
@@ -102,7 +90,7 @@ type-check: ## Run mypy type checker
 		exit 1; \
 	fi
 
-check: format-check lint type-check ## Run all checks (format, lint, type-check)
+check: format-check lint type-check lint-ours ## Run all checks (format, lint, type-check, lint-ours)
 	@echo "$(BOLD)$(GREEN)✓ All checks passed!$(RESET)"
 
 fix: format lint-fix ## Run format and lint checks and fix issues automatically (format, lint)

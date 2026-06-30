@@ -260,7 +260,7 @@ class KwsTapAudioInput(io.AudioInput):
         return frame
 
 
-def _unavailable_reason(config: KwsConfig) -> str | None:
+def _unavailable_reason(config: KwsConfig) -> str | None:  # noqa: PLR0911
     if not config.enable:
         return "not requested (XIAOGE_KWS_ENABLE_NATIVE)"
     if not config.model_dir:

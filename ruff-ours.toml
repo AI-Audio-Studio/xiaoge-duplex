@@ -6,15 +6,9 @@ extend = "pyproject.toml"
 [lint]
 extend-select = ["C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915"]
 
-# 历史挂账(grandfather):这些既有文件暂豁免其当前违规的规则,
-# 门禁因此现在为绿、只拦"新增违规";重构后逐条删除。详见 CODE_GUIDELINES.md「重构待办」。
-[lint.per-file-ignores]
-"examples/voice_agents/web_ui_agent.py" = ["C901", "PLR0915", "PLR0912"]
-"examples/voice_agents/custom_audio_providers.py" = ["C901", "PLR0913"]
-"examples/voice_agents/probe_funasr_2pass.py" = ["C901", "PLR0912", "PLR0915"]
-"examples/voice_agents/kws_interrupt.py" = ["PLR0911"]
-"examples/voice_agents/turn_metrics.py" = ["C901"]
-"examples/voice_agents/qwen_funasr_bailian_voice_agent.py" = ["C901", "PLR0915"]
+# 历史挂账改为**函数级 `# noqa`**(打在具体超标函数的 def 行),不在此做整文件豁免——
+# 否则同文件新写的超标函数也会漏放("只拦新增"失效)。集中台账见 CODE_GUIDELINES.md §5,
+# 审计:grep -rn noqa $(cat ourcode.txt)。
 
 [lint.mccabe]
 max-complexity = 10

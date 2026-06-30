@@ -264,7 +264,7 @@ class TurnMetrics:
         self._last_user_stop_at: float | None = None
 
     # ── 安装:自注册 session 监听(只读旁路)──────────────────────────────────
-    def attach(self, session: Any) -> None:
+    def attach(self, session: Any) -> None:  # noqa: C901
         try:
 
             @session.on("conversation_item_added")

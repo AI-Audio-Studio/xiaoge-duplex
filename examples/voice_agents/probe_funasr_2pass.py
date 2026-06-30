@@ -61,7 +61,7 @@ def load_pcm_16k(path: str) -> bytes:
     return bytes(combined.data)
 
 
-async def main() -> int:
+async def main() -> int:  # noqa: C901, PLR0912, PLR0915
     pcm = load_pcm_16k(WAV_PATH)
     print(f"[pcm] resampled 16k mono bytes={len(pcm)} (~{len(pcm) / 2 / TARGET_SR:.2f}s)")
 
