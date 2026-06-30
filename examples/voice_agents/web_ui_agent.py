@@ -1459,7 +1459,7 @@ class VoiceAgent(Agent):
         async for frame in Agent.default.tts_node(self, sanitize_stream(text), model_settings):
             yield frame
 
-    async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
+    async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:  # noqa: C901, PLR0912, PLR0915
         spoke_over_agent = _overlap_turn_state["user_spoke_over_agent"]
         original = new_message.text_content
         ctrl = _listen_ctrl
@@ -1678,7 +1678,7 @@ server.setup_fnc = prewarm
 
 
 @server.rtc_session()
-async def entrypoint(ctx: JobContext) -> None:
+async def entrypoint(ctx: JobContext) -> None:  # noqa: C901, PLR0912, PLR0915
     global _switchable_stt, _switchable_tts, _agent_loop, _test_recorder, _mute_gate
     global _session, _listen_ctrl, _ws_audio_input_ref, _ws_audio_output_ref
     _agent_loop = asyncio.get_running_loop()

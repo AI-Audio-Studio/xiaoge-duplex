@@ -219,7 +219,7 @@ class FunASROfflineSTT(stt.STT):
             with contextlib.suppress(Exception):
                 await ws.close()
 
-    async def _recognize_once(self, pcm: bytes, conn_options: APIConnectOptions) -> tuple[str, str]:
+    async def _recognize_once(self, pcm: bytes, conn_options: APIConnectOptions) -> tuple[str, str]:  # noqa: C901
         """单段 offline 识别，复用持久 ws。返回 (transcript, request_id)。
         失败（服务端关闭/出错）抛异常，由调用方重连重试。"""
         ws = await self._ensure_ws()
@@ -588,7 +588,7 @@ class _FunASRStream(stt.RecognizeStream):
         self._opts = opts
         self._session = session
 
-    async def _run(self) -> None:
+    async def _run(self) -> None:  # noqa: C901
         ssl_ctx = None
         if self._opts.websocket_url.startswith("wss://") and not self._opts.verify_ssl:
             ssl_ctx = ssl._create_unverified_context()
@@ -630,7 +630,7 @@ class _FunASRStream(stt.RecognizeStream):
             # 当成"句子没说完"而干等到 max_delay。剥掉前导标点让 EOU 判断更准。
             lead_punct = "，,。.、！!？?；;：:～~ \t\n"
 
-            async def recv_task() -> None:
+            async def recv_task() -> None:  # noqa: C901
                 language = LanguageCode(self._opts.language)
                 speaking = False
                 async for msg in ws:
@@ -1014,7 +1014,7 @@ class _QwenSynthesizeStream(tts.SynthesizeStream):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts = tts
 
-    async def _run(self, output_emitter: tts.AudioEmitter) -> None:
+    async def _run(self, output_emitter: tts.AudioEmitter) -> None:  # noqa: C901
         opts = self._tts._opts
 
         # 当轮专属连接 + 专属 callback：取一条就绪连接（命中预热则零握手）后把当轮
@@ -1170,7 +1170,7 @@ class CosyVoiceStreamingTTS(tts.TTS):
     打断时 streaming_cancel() 确定性中止后归还(池会自动 renew 这条失效连接)。
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         model: str | None = None,
@@ -1318,7 +1318,7 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts = tts
 
-    async def _run(self, output_emitter: tts.AudioEmitter) -> None:
+    async def _run(self, output_emitter: tts.AudioEmitter) -> None:  # noqa: C901
         callback = _CosyVoiceCallback()
         synth, pooled = await asyncio.to_thread(self._tts.take_synth, callback)
 

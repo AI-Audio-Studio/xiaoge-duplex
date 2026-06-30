@@ -3,7 +3,7 @@
 > 目标:文件不过大、函数不过长、模块解耦。**仅约束我们自己写的代码**,**不适用于 livekit 母体工程**(`livekit-agents/`、`livekit-plugins/`)与上游示例文件。
 > 数字是"闻味器"不是 KPI——**内聚 > 行数**;超标先问"是不是职责多了",而不是"怎么把行数压下去"。
 >
-> **状态(2026-06-30,经三轮评审批准定稿)**:量化阈值与解耦原则**即刻生效**;其**自动强制机制**(单一清单 `ourcode.txt`、函数级 `# noqa` 棘轮、CI 严格步、ruff 版本锁定)在配套**实现 PR** 中落地——见 §7。本文末附三轮"评审—回应"往返存档。
+> **状态(2026-06-30,经三轮评审批准定稿;强制机制已由实现 PR 落地)**:量化阈值与解耦原则**即刻生效**;其**自动强制机制**(单一清单 `ourcode.txt`、函数级 `# noqa` 棘轮、CI 严格步、ruff 版本锁定)**已落地**——见 §7。本文末附三轮"评审—回应"往返存档。
 
 ## 1. 适用范围 / 约束索引
 
@@ -12,7 +12,7 @@
 
 > 母体与我们的代码在 `examples/voice_agents/` 下**交织**,且整库由同一账号导入(git 作者无法区分),所以范围只能用**显式清单**界定。
 
-**权威清单 = `ourcode.txt`**(单一来源,纯路径一行一个;`makefile` 与 `ci.yml` 都读它——实现 PR 落地,落地前暂存于 `makefile` 的 `OUR_CODE`)。下面镜像一份便于阅读(含职责标注;改动以 `ourcode.txt` 为准):
+**权威清单 = `ourcode.txt`**(单一来源,纯路径一行一个;`makefile` 与 `ci.yml` 都读它)。下面镜像一份便于阅读(含职责标注;改动以 `ourcode.txt` 为准):
 
 ```
 examples/voice_agents/
@@ -92,15 +92,15 @@ examples/voice_agents/
 
 ## 7. 实施状态与计划
 
-本规范的**阈值/原则/范围已定稿生效**。下列**自动强制机制**经三轮评审批准,在**独立实现 PR** 中落地;落地前以现状运行(`makefile:OUR_CODE` + `ruff-ours.toml` 整文件挂账 + 手动 `make lint-ours`):
+本规范的**阈值/原则/范围已定稿生效**。下列**自动强制机制**经三轮评审批准,**已由实现 PR 落地**:
 
-1. **单一来源 `ourcode.txt`**(纯路径;`makefile`/`ci.yml` 都读;并加进 `ci.yml` 的 `paths:` 过滤)。
-2. **B2 真门禁**:`ci.yml` 增严格 ruff 步 `ruff check --config ruff-ours.toml $(cat ourcode.txt)`。
-3. **A1 棘轮**:整文件 `per-file-ignores` → 函数级 `# noqa`(保留 §5 台账 + `grep` 兜底)。
-4. **ruff 版本锁定**:`pyproject.toml` 钉 `ruff==0.15.18` + `uv lock` 固化。
-5. **C/D/小问题文字**(§2 强制方式列、`C901` 术语与 `PLR0912` 行、`mute_gate.py` 32 行)——**本次已落正文**。
+1. ✅ **单一来源 `ourcode.txt`**(纯路径;`makefile`/`ci.yml` 都读;已加进 `ci.yml` 的 `paths:` 过滤)。
+2. ✅ **B2 真门禁**:`ci.yml` 已增严格步 `ruff check --config ruff-ours.toml $(cat ourcode.txt)`。
+3. ✅ **A1 棘轮**:整文件 `per-file-ignores` → 函数级 `# noqa`(6 文件 12 处;保留 §5 台账 + `grep` 兜底)。
+4. ✅ **ruff 版本锁定**:`pyproject.toml` 已钉 `ruff==0.15.18`;**`uv lock` 待在有 uv 的机器执行**以固化 `uv.lock`(本仓提交环境无 uv)。
+5. ✅ **C/D/小问题文字**(§2 强制方式列、`C901` 术语与 `PLR0912` 行、`mute_gate.py` 32 行)。
 
-**验收**:`make lint-ours` 绿 + 触发一次 CI 通过。
+**验收**:`make lint-ours` / `ruff check --config ruff-ours.toml $(cat ourcode.txt)` 绿、`ruff format --check`/compile 通过(已本地等价验证);合入后由 CI 实跑确认。
 
 > 以下为定稿前的"评审—回应"往返存档(三轮),保留作决策依据,不属规范正文。
 
