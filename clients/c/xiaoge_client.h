@@ -30,8 +30,10 @@ typedef struct {
     void *user;
 } xiaoge_callbacks;
 
-/* 创建并发起连接。host 如 "60.205.197.165"(当前部署);tls!=0 用 wss。失败返回 NULL。 */
-xiaoge_client *xiaoge_create(const char *host, int port, int tls,
+/* 创建并发起连接。host 如 "60.205.197.165"(当前部署)。
+ * tls!=0 用 wss;insecure!=0 允许自签证书、跳过主机名校验(仅测试/内网,勿用于公网)。
+ * 失败返回 NULL。 */
+xiaoge_client *xiaoge_create(const char *host, int port, int tls, int insecure,
                              const xiaoge_callbacks *cb);
 
 /* 入队一段上行 PCM(16k/单声道/int16 小端)。线程安全。成功返回 0。 */

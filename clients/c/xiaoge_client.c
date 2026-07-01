@@ -126,7 +126,7 @@ static const struct lws_protocols protocols[] = {
     LWS_PROTOCOL_LIST_TERM,
 };
 
-xiaoge_client *xiaoge_create(const char *host, int port, int tls,
+xiaoge_client *xiaoge_create(const char *host, int port, int tls, int insecure,
                              const xiaoge_callbacks *cb) {
     struct xiaoge_client *c = (struct xiaoge_client *)calloc(1, sizeof(*c));
     if (!c) return NULL;
@@ -155,7 +155,15 @@ xiaoge_client *xiaoge_create(const char *host, int port, int tls,
     ci.origin = host;
     ci.protocol = protocols[0].name;
     ci.pwsi = &c->wsi;
-    if (tls) ci.ssl_connection = LCCSCF_USE_SSL;
+    if (tls) {
+        ci.ssl_connection = LCCSCF_USE_SSL;
+        if (insecure) {
+            /* 自签/内网测试:接受自签证书、跳过主机名与证书链校验 */
+            ci.ssl_connection |= LCCSCF_ALLOW_SELFSIGNED
+                               | LCCSCF_SKIP_SERVER_CERT_HOSTNAME_CHECK
+                               | LCCSCF_ALLOW_INSECURE;
+        }
+    }
     if (!lws_client_connect_via_info(&ci)) {
         lws_context_destroy(c->ctx);
         free(c);

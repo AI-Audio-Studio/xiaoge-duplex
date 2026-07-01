@@ -75,21 +75,44 @@ static void write_wav(const char *path, const unsigned char *pcm, uint32_t n) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 4) {
-        fprintf(stderr, "用法: %s <host> <port> <in.wav> [out.wav]\n", argv[0]);
+    const char *host = NULL, *port_s = NULL, *in_path = NULL;
+    const char *out_path = "xiaoge_reply.wav";
+    int tls = 0, insecure = 0, pos = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--tls") == 0) {
+            tls = 1;
+        } else if (strcmp(argv[i], "--insecure") == 0) {
+            tls = 1;
+            insecure = 1; /* 自签测试 */
+        } else if (pos == 0) {
+            host = argv[i];
+            pos++;
+        } else if (pos == 1) {
+            port_s = argv[i];
+            pos++;
+        } else if (pos == 2) {
+            in_path = argv[i];
+            pos++;
+        } else {
+            out_path = argv[i];
+            pos++;
+        }
+    }
+    if (pos < 3) {
+        fprintf(stderr, "用法: %s <host> <port> <in.wav> [out.wav] [--tls] [--insecure]\n", argv[0]);
         return 2;
     }
-    const char *out_path = argc > 4 ? argv[4] : "xiaoge_reply.wav";
+
     unsigned char *pcm = NULL;
-    size_t pcm_len = read_wav(argv[3], &pcm);
+    size_t pcm_len = read_wav(in_path, &pcm);
     if (!pcm_len) {
-        fprintf(stderr, "读取 wav 失败(须 16k/单声道/16-bit): %s\n", argv[3]);
+        fprintf(stderr, "读取 wav 失败(须 16k/单声道/16-bit): %s\n", in_path);
         return 1;
     }
 
     struct sink sink = {0};
     xiaoge_callbacks cb = {on_ready, on_audio, on_clear, NULL, &sink};
-    xiaoge_client *c = xiaoge_create(argv[1], atoi(argv[2]), 0, &cb);
+    xiaoge_client *c = xiaoge_create(host, atoi(port_s), tls, insecure, &cb);
     if (!c) {
         fprintf(stderr, "连接失败\n");
         free(pcm);
