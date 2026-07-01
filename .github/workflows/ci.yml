@@ -54,3 +54,23 @@ jobs:
         run: |
           cmake -S clients/c -B clients/c/build
           cmake --build clients/c/build
+      # 端到端冒烟:用编译好的 C 二进制连真机(wss 自签),发 1s 静音,收欢迎语 TTS。
+      # 非阻塞(continue-on-error):依赖外部服务器,不作为门禁——符合"测试不影响正常流程"。
+      - name: E2E smoke vs live server (non-gating)
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import wave
+          with wave.open('/tmp/probe.wav', 'wb') as w:
+              w.setframerate(16000); w.setnchannels(1); w.setsampwidth(2)
+              w.writeframes(b'\x00\x00' * 16000)  # 1s 静音
+          PY
+          ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure | tee /tmp/out.txt
+          grep -q "ready" /tmp/out.txt && echo "handshake(ready) OK"
+          python3 - <<'PY'
+          import wave, sys
+          with wave.open('/tmp/reply.wav') as w:
+              n = w.getnframes()
+          print("received frames:", n)
+          sys.exit(0 if n > 0 else 1)  # 收到欢迎语 TTS 即通过
+          PY
