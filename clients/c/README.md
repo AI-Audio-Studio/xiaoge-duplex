@@ -3,8 +3,9 @@
 对接小歌 `/ws/audio`(服务端需 `WEB_AUDIO=1`)。协议见 [../PROTOCOL.md](../PROTOCOL.md)。
 回调式、可移植,只做协议与收发;音频采集/播放由你在回调里处理。
 
-> ⚠️ **状态**:含 `ws`/`wss`(自签)完整支持,但在交付环境(无 C 工具链)**未编译**,
-> 需你在自己的工具链上 build + 跑 `xiaoge_demo_file` 验证。若有编译/运行问题反馈给我即修。
+> ✅ **编译状态**:CI(GitHub Actions,ubuntu + `libwebsockets-dev`)已验证**可编译通过**
+> (job `C SDK build`)。含 `ws`/`wss`(自签)完整支持。
+> ⏳ **运行验证**:端到端(连真机收 TTS)仍需你在有工具链的机器上跑 `xiaoge_demo_file`——有问题反馈即修。
 > 备注:C 连接会带 `Sec-WebSocket-Protocol: xiaoge-audio` 子协议头(服务端不选择也应放行,
 > 与 Python 客户端一致);若个别服务端因此拒握手,把 `xiaoge_client.c` 里 `ci.protocol` 设为 `NULL` 即可。
 
