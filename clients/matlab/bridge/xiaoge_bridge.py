@@ -5,7 +5,8 @@ Simulink 用原生 TCP 块即可对接(无需 Java):
   - 下行:小歌 TTS → 本桥 `--down` 端口 → Simulink 收(同格式)。
   - 打断:小歌发 clear 时,桥仅记录(下行为直通流,无需清缓冲)。
 
-用法::  python xiaoge_bridge.py <xiaoge_host> <xiaoge_port> [--up 5001] [--down 5002]
+用法::  python xiaoge_bridge.py <xiaoge_host> <xiaoge_port> [--up 5001] [--down 5002] [--tls] [--insecure]
+  --tls / --insecure:小歌为 wss(HTTPS)时用;自签证书加 --insecure。
 依赖:websockets(+ 同级 ../../python/xiaoge_client.py)。
 """
 
@@ -27,8 +28,10 @@ log = logging.getLogger("xiaoge.bridge")
 class Bridge:
     """把一条 TCP 上行 + 一条 TCP 下行 桥到一个 XiaogeClient。"""
 
-    def __init__(self, host: str, port: int) -> None:
-        self.client = XiaogeClient(host, port)
+    def __init__(
+        self, host: str, port: int, *, tls: bool = False, ssl: object | None = None
+    ) -> None:
+        self.client = XiaogeClient(host, port, tls=tls, ssl=ssl)
         self._down: asyncio.StreamWriter | None = None
         self.client.on_audio = self._to_down
         self.client.on_clear = lambda: log.info("clear(打断)")
@@ -70,15 +73,29 @@ class Bridge:
             await asyncio.gather(self.client.run(), up.serve_forever(), down.serve_forever())
 
 
+def _ssl_context(insecure: bool) -> object | None:
+    if not insecure:
+        return None
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Simulink ↔ 小歌 TCP/WS 桥")
     p.add_argument("host")
     p.add_argument("port", type=int)
     p.add_argument("--up", type=int, default=5001)
     p.add_argument("--down", type=int, default=5002)
+    p.add_argument("--tls", action="store_true", help="用 wss")
+    p.add_argument("--insecure", action="store_true", help="wss 不校验证书(自签)")
     a = p.parse_args()
+    bridge = Bridge(a.host, a.port, tls=a.tls, ssl=_ssl_context(a.insecure))
     try:
-        asyncio.run(Bridge(a.host, a.port).serve(a.up, a.down))
+        asyncio.run(bridge.serve(a.up, a.down))
     except KeyboardInterrupt:
         print("\n桥已退出")
 

@@ -18,9 +18,11 @@
 
 ## B 方案:快速开始
 ```bash
-# 1) 主机起桥(连到小歌)
+# 1) 主机起桥(连到小歌);小歌为 wss(HTTPS)时加 --tls,自签再加 --insecure
 python clients/matlab/bridge/xiaoge_bridge.py <小歌host> <小歌port> --up 5001 --down 5002
+#   例:python .../xiaoge_bridge.py 60.205.197.165 10099 --up 5001 --down 5002 --tls --insecure
 ```
+> **B 链路已对真机验证**:桥连 `wss://60.205.197.165:10099`,经 TCP 上/下行跑通真实语音→TTS(~6.5s)。MATLAB 侧为标准 `tcpclient`,待你在 R2022b 上运行 `demo_file.m` / `build_xiaoge_demo` 确认。
 ```matlab
 % 2a) 无声卡文件验证
 addpath(pwd)
