@@ -1,13 +1,15 @@
 """文件 demo(无需声卡):把一个 wav 发给小歌,把收到的音频(TTS)存成 wav。
 
-用法::  python demo_file.py <host> <port> <in.wav> [out.wav]
-要求 in.wav 为 16kHz / 单声道 / 16-bit PCM(与协议一致)。仅依赖标准库 wave + SDK。
+用法::  python demo_file.py <host> <port> <in.wav> [out.wav] [--tls] [--insecure]
+  --tls       用 wss(HTTPS 部署)
+  --insecure  wss 不校验证书(自签测试,如 60.205.197.165:10099)
+要求 in.wav 为 16kHz / 单声道 / 16-bit PCM。仅依赖标准库 wave + SDK。
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
-import sys
 import wave
 
 from xiaoge_client import NUM_CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH, XiaogeClient
@@ -35,10 +37,20 @@ def _write_wav(path: str, pcm: bytes) -> None:
         w.writeframes(pcm)
 
 
-async def _run(host: str, port: int, in_wav: str, out_wav: str) -> None:
+def _ssl_context(insecure: bool) -> object | None:
+    if not insecure:
+        return None
+    import ssl
+
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+async def _run(client: XiaogeClient, in_wav: str, out_wav: str) -> None:
     pcm = _read_wav(in_wav)
     received = bytearray()
-    client = XiaogeClient(host, port)
     client.on_audio = received.extend
     client.on_clear = received.clear  # 打断:丢弃已收(模拟停止播放)
     client.on_busy = lambda m: print("服务器忙:", m)
@@ -48,7 +60,7 @@ async def _run(host: str, port: int, in_wav: str, out_wav: str) -> None:
     for i in range(0, len(pcm), FRAME_BYTES):
         await client.send_pcm(pcm[i : i + FRAME_BYTES])
         await asyncio.sleep(FRAME_MS / 1000)  # 按实时速率发
-    await asyncio.sleep(3.0)  # 等回复尾巴
+    await asyncio.sleep(5.0)  # 等回复尾巴
     await client.close()
     task.cancel()
     _write_wav(out_wav, bytes(received))
@@ -56,11 +68,16 @@ async def _run(host: str, port: int, in_wav: str, out_wav: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 4:
-        raise SystemExit("用法: python demo_file.py <host> <port> <in.wav> [out.wav]")
-    host, port, in_wav = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-    out_wav = sys.argv[4] if len(sys.argv) > 4 else "xiaoge_reply.wav"
-    asyncio.run(_run(host, port, in_wav, out_wav))
+    p = argparse.ArgumentParser(description="小歌文件 demo(发 wav / 存回复)")
+    p.add_argument("host")
+    p.add_argument("port", type=int)
+    p.add_argument("in_wav")
+    p.add_argument("out_wav", nargs="?", default="xiaoge_reply.wav")
+    p.add_argument("--tls", action="store_true", help="用 wss")
+    p.add_argument("--insecure", action="store_true", help="wss 不校验证书(自签)")
+    a = p.parse_args()
+    client = XiaogeClient(a.host, a.port, tls=a.tls, ssl=_ssl_context(a.insecure))
+    asyncio.run(_run(client, a.in_wav, a.out_wav))
 
 
 if __name__ == "__main__":

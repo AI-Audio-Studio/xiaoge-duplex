@@ -13,7 +13,7 @@ import asyncio
 from xiaoge_client import XiaogeClient
 
 async def main():
-    c = XiaogeClient("192.168.1.10", 8787)   # tls=True 用 wss
+    c = XiaogeClient("192.168.1.10", 8787)   # tls=True 用 wss;ssl=ctx 传自定义/自签证书上下文
     c.on_ready = lambda sr: print("已就绪", sr)
     c.on_audio = lambda pcm: my_speaker(pcm)  # 播放 TTS(16k/单声道/int16 小端)
     c.on_clear = lambda: my_speaker_flush()   # 打断:清空播放
@@ -31,11 +31,20 @@ asyncio.run(main())
 
 ## 示例
 ```bash
-python demo_mic.py  <host> <port>            # 实时麦克风↔扬声器(需 sounddevice)
-python demo_file.py <host> <port> in.wav [out.wav]   # 无声卡:发 wav、存回复 wav(in.wav 须 16k/单声道/16-bit)
+python demo_mic.py  <host> <port> [--tls] [--insecure]        # 实时麦克风↔扬声器(需 sounddevice)
+python demo_file.py <host> <port> in.wav [out.wav] [--tls] [--insecure]   # 无声卡:发 wav、存回复 wav
+#   --tls       用 wss(HTTPS 部署)
+#   --insecure  wss 不校验证书(自签测试)
 ```
 
 ## 自测(冒烟)
 ```bash
 python selftest.py    # 本地 mock 服务验证握手/收发/clear/busy,退出码 0=通过
+```
+
+## 真机验证(已通过)
+已对部署服务器 `wss://60.205.197.165:10099/ws/audio` 用本 SDK 端到端验证:握手 `ready`、
+发真实中文语音、收到数秒 TTS 音频。复现:
+```bash
+python demo_file.py 60.205.197.165 10099 speech16k.wav reply.wav --tls --insecure
 ```

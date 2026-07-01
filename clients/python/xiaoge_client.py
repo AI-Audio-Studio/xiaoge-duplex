@@ -40,11 +40,14 @@ class XiaogeClient:
         on_busy(message: str)      — 服务端忙、连接被拒。
     """
 
-    def __init__(self, host: str, port: int = 8787, *, tls: bool = False) -> None:
+    def __init__(
+        self, host: str, port: int = 8787, *, tls: bool = False, ssl: object | None = None
+    ) -> None:
         self.host = host
         self.port = port
         self.sample_rate = SAMPLE_RATE
         self._url = f"{'wss' if tls else 'ws'}://{host}:{port}/ws/audio"
+        self._ssl = ssl  # wss 时可传 ssl.SSLContext(自签/自定义 CA);None=默认校验
         self._ws: websockets.ClientConnection | None = None
         self.on_ready: Callable[[int], None] | None = None
         self.on_audio: Callable[[bytes], None] | None = None
@@ -59,7 +62,7 @@ class XiaogeClient:
 
     async def run(self) -> None:
         """连接并阻塞运行接收循环,直到连接关闭。"""
-        async with websockets.connect(self._url, max_size=None) as ws:
+        async with websockets.connect(self._url, ssl=self._ssl, max_size=None) as ws:
             self._ws = ws
             logger.info("connected %s", self._url)
             try:
