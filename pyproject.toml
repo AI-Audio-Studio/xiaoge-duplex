@@ -85,7 +85,7 @@ dev = [
     "mypy",
     "scikit-learn",
     "pytest",
-    "ruff==0.15.18",  # 与 CI 同版本(防本地/CI 规则计数撕裂);改后需 `uv lock` 固化到 uv.lock
+    "ruff==0.15.18",  # 与 CI(pip 同版本)一致,防本地/CI 规则计数撕裂;本项目不提交 uv.lock,此 pin 即权威
 
     "pytest-asyncio>=0.25.3",
     "jiwer>=3.1.0",
