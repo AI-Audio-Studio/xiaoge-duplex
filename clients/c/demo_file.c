@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define FRAME_BYTES 640 /* 20ms @ 16k/mono/16bit */
 
@@ -119,15 +120,18 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    /* 按墙钟时间收尾(lws_service 在连接建立中会立即返回,不能用迭代次数计时,
+     * 否则会在异步连接完成前就退出并销毁 → "closed before established")。 */
     size_t sent = 0;
-    int tail = 150; /* 发完后再泵 ~3s 收尾巴 */
-    while (xiaoge_service(c, 20) == 0) {
+    time_t deadline = 0;
+    while (xiaoge_service(c, 50) == 0) {
         if (sent < pcm_len) {
             size_t chunk = pcm_len - sent < FRAME_BYTES ? pcm_len - sent : FRAME_BYTES;
             xiaoge_send_pcm(c, pcm + sent, chunk);
             sent += chunk;
-        } else if (--tail <= 0) {
-            break;
+        } else {
+            if (deadline == 0) deadline = time(NULL) + 8; /* 发完后再等 ~8s 收回复 */
+            if (time(NULL) >= deadline) break;
         }
     }
 
