@@ -4,7 +4,7 @@ classdef XiaogeAudioBlock < matlab.System
     %   每步:输入一帧麦克风 PCM(int16 列向量)→ 发往小歌;输出一帧 TTS PCM。
     %
     %   用法(先在主机起桥):
-    %     python clients/matlab/bridge/xiaoge_bridge.py <host> <port> --up 5001 --down 5002
+    %     python clients/matlab/bridge/xiaoge_bridge.py 60.205.197.165 10099 --up 5001 --down 5002 --tls --insecure
     %   再把本块拖入模型,设 BridgeHost/UpPort/DownPort/FrameSize。
     %
     %   音频格式:16000 Hz、单声道、16-bit。FrameSize 默认 320(20ms@16k)。

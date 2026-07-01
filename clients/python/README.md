@@ -13,7 +13,10 @@ import asyncio
 from xiaoge_client import XiaogeClient
 
 async def main():
-    c = XiaogeClient("192.168.1.10", 8787)   # tls=True 用 wss;ssl=ctx 传自定义/自签证书上下文
+    # 当前部署:60.205.197.165:10099(wss/自签)。自签需传不校验的 SSLContext:
+    import ssl
+    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+    c = XiaogeClient("60.205.197.165", 10099, tls=True, ssl=ctx)
     c.on_ready = lambda sr: print("已就绪", sr)
     c.on_audio = lambda pcm: my_speaker(pcm)  # 播放 TTS(16k/单声道/int16 小端)
     c.on_clear = lambda: my_speaker_flush()   # 打断:清空播放
@@ -29,12 +32,12 @@ asyncio.run(main())
 ```
 **音频格式(必须严格匹配)**:16000 Hz、单声道、16-bit 有符号小端、裸 PCM。
 
-## 示例
+## 示例(当前部署 60.205.197.165:10099,wss 自签)
 ```bash
-python demo_mic.py  <host> <port> [--tls] [--insecure]        # 实时麦克风↔扬声器(需 sounddevice)
-python demo_file.py <host> <port> in.wav [out.wav] [--tls] [--insecure]   # 无声卡:发 wav、存回复 wav
+python demo_mic.py  60.205.197.165 10099 --tls --insecure                 # 实时麦克风↔扬声器(需 sounddevice)
+python demo_file.py 60.205.197.165 10099 in.wav [out.wav] --tls --insecure   # 无声卡:发 wav、存回复 wav
 #   --tls       用 wss(HTTPS 部署)
-#   --insecure  wss 不校验证书(自签测试)
+#   --insecure  wss 不校验证书(自签)。ws 明文部署则去掉这两个开关。
 ```
 
 ## 自测(冒烟)

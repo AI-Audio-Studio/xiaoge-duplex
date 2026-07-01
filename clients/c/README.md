@@ -25,14 +25,16 @@ cmake --build build
 ## 运行文件 demo(自测/验收)
 ```bash
 # in.wav 须 16kHz/单声道/16-bit PCM
-./build/xiaoge_demo_file <host> <port> in.wav out.wav
+./build/xiaoge_demo_file 60.205.197.165 10099 in.wav out.wav
 # 期望:打印 ready、收到字节数 > 0,out.wav 为小歌回复音频
 ```
+> ⚠️ **当前部署 `60.205.197.165:10099` 是 wss(HTTPS,自签)**,而本 demo 现走明文 `ws`(`main` 里 `tls=0`)。
+> 要连这台 wss,需在 `xiaoge_create(...tls=1...)` 并给 libwebsockets 加"允许自签"标志——**C 侧 TLS 开关尚未内置**,需要我补(已提过)。若你的部署是 `ws` 明文则可直接用。
 
 ## API(`xiaoge_client.h`)
 ```c
 xiaoge_callbacks cb = { on_ready, on_audio, on_clear, on_busy, user_ptr };
-xiaoge_client *c = xiaoge_create("192.168.1.10", 8787, /*tls=*/0, &cb);
+xiaoge_client *c = xiaoge_create("60.205.197.165", 10099, /*tls=*/1, &cb);  // 当前部署 wss
 while (xiaoge_service(c, 20) == 0) {     // 单线程泵事件循环
     xiaoge_send_pcm(c, pcm, len);        // 上行 16k/单声道/int16 小端;线程安全
 }

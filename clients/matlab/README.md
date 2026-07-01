@@ -26,7 +26,7 @@ python clients/matlab/bridge/xiaoge_bridge.py <小歌host> <小歌port> --up 500
 ```matlab
 % 2a) 无声卡文件验证
 addpath(pwd)
-demo_file('127.0.0.1', 8787, 'in.wav', 'out.wav')   % in.wav 须 16k/单声道/16-bit
+demo_file('127.0.0.1', 'in.wav', 'out.wav')   % 连本地桥;小歌地址在上面桥命令里。in.wav 须 16k/单声道/16-bit
 
 % 2b) Simulink 实时(需 Audio Toolbox)
 addpath(pwd)
@@ -38,7 +38,7 @@ open_system('xiaoge_demo')   % 运行;BridgeHost/UpPort/DownPort 在块参数里
 1. 按 [lib/README.md](lib/README.md) 下载 Java-WebSocket(+SLF4J)jar、编译 `XiaogeWsAdapter.jar` 放入 `lib/`。
 2. 用 `+xiaoge/Client.m`:
 ```matlab
-c = xiaoge.Client('192.168.1.10', 8787);
+c = xiaoge.Client('60.205.197.165', 10099, true);   % 当前部署(wss;自签需在适配器配置信任)
 c.OnAudio = @(pcm) sound(double(pcm)/32768, 16000);  % 播放
 c.OnClear = @() disp('barge-in');
 c.connect();

@@ -3,8 +3,9 @@
 客户端通过一条 WebSocket 与小歌做全双工语音收发。本文件是三个 SDK(Python/C/MATLAB)的共同依据。
 
 ## 0. 前置
-- 服务端需以 `WEB_AUDIO=1` 启动;监听端口见部署(代码默认 `8765`,`start.ps1`/`.env` 用 `8787`)。
-- 路径:`/ws/audio`。URL:`ws://<host>:<port>/ws/audio`(TLS 时 `wss://`)。
+- 服务端需以 `WEB_AUDIO=1` 启动。
+- 路径:`/ws/audio`。通用形式 `ws(s)://<host>:<port>/ws/audio`。
+- **当前部署**:`wss://60.205.197.165:10099/ws/audio`(HTTPS,自签证书)。
 - **单客户端**:同一时刻只接受一个音频连接;新连接会顶替或被拒。
 
 ## 1. 音频格式(上行/下行一致,必须严格匹配)

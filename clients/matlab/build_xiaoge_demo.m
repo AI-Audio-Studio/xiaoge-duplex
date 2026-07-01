@@ -3,7 +3,7 @@ function build_xiaoge_demo(modelName)
 %   故用脚本生成)。模型:Audio Device Reader → XiaogeAudioBlock → Audio Device Writer。
 %   实时麦克风/扬声器块需 Audio Toolbox;无此工具箱时仍会建块,运行时再提示。
 %
-%   先起桥:  python bridge/xiaoge_bridge.py <host> <port> --up 5001 --down 5002
+%   先起桥:  python bridge/xiaoge_bridge.py 60.205.197.165 10099 --up 5001 --down 5002 --tls --insecure
 %   生成:    build_xiaoge_demo            % 默认模型名 xiaoge_demo
 %   然后在 Simulink 里打开运行(确保本目录在 MATLAB 路径上:addpath(pwd))。
 %   状态:R2022b 适配,**未在交付环境运行**,按 README 验证。

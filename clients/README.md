@@ -3,7 +3,8 @@
 把第三方设备/程序接入小歌全双工语音引擎。三个端共用一套协议:[PROTOCOL.md](PROTOCOL.md)。
 
 ## 前置
-服务端以 `WEB_AUDIO=1` 启动,暴露 `ws://<host>:<port>/ws/audio`(默认 8787)。
+服务端以 `WEB_AUDIO=1` 启动,暴露 `/ws/audio`。
+**当前部署**:`wss://60.205.197.165:10099/ws/audio`(HTTPS,自签证书;连接用 `--tls --insecure`)。
 
 ## 三个客户端
 | 目录 | 适用 | 依赖 | 自测状态 |

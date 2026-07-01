@@ -6,7 +6,7 @@
 
 用法::
 
-    client = XiaogeClient("192.168.1.10", 8787)
+    client = XiaogeClient("60.205.197.165", 10099, tls=True)  # 当前部署(wss)
     client.on_audio = lambda pcm: speaker.write(pcm)   # 播放 TTS
     client.on_clear = lambda: speaker.flush()          # 打断:清空播放
     async def feed():

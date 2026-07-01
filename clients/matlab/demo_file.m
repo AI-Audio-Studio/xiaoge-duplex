@@ -1,16 +1,17 @@
-function demo_file(host, port, inWav, outWav)
+function demo_file(bridgeHost, inWav, outWav)
 %DEMO_FILE  无声卡 demo:经 TCP 桥把 wav 发给小歌,收回的音频存成 wav(B 方案)。
-%   先起桥:  python bridge/xiaoge_bridge.py <host> <port> --up 5001 --down 5002
-%   再运行:  demo_file('127.0.0.1', 8787, 'in.wav', 'out.wav')
+%   小歌地址写在桥命令里(当前部署 60.205.197.165:10099,wss 自签);MATLAB 只连本地桥。
+%   先起桥:  python bridge/xiaoge_bridge.py 60.205.197.165 10099 --up 5001 --down 5002 --tls --insecure
+%   再运行:  demo_file('127.0.0.1', 'in.wav', 'out.wav')   % 桥在本机则用 127.0.0.1
 %   in.wav 须 16kHz/单声道/16-bit。状态:未在交付环境运行,按 README 验证。
-    if nargin < 4, outWav = 'xiaoge_reply.wav'; end
+    if nargin < 3, outWav = 'xiaoge_reply.wav'; end
 
     [x, fs] = audioread(inWav, 'native');
     assert(fs == 16000 && size(x, 2) == 1 && isa(x, 'int16'), ...
         'in.wav 必须是 16kHz/单声道/16-bit');
 
-    up = tcpclient(host, 5001, 'Timeout', 1);
-    down = tcpclient(host, 5002, 'Timeout', 1);
+    up = tcpclient(bridgeHost, 5001, 'Timeout', 1);
+    down = tcpclient(bridgeHost, 5002, 'Timeout', 1);
     cleanup = onCleanup(@() clear('up', 'down')); %#ok<NASGU>
 
     frame = 320;                       % 20ms@16k

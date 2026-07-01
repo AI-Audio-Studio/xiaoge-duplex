@@ -6,7 +6,7 @@ classdef Client < handle
     %      请改用 B 方案(XiaogeAudioBlock + xiaoge_bridge.py),那条链路已自测通过。
     %
     %   用法:
-    %     c = xiaoge.Client('192.168.1.10', 8787);
+    %     c = xiaoge.Client('60.205.197.165', 10099, true);   % 当前部署(wss)
     %     c.OnAudio = @(pcm) playFcn(pcm);   % pcm: int16 列向量(16k/单声道)
     %     c.OnClear = @() flushFcn();        % 打断:清空播放
     %     c.connect();
