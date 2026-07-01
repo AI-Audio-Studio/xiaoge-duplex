@@ -7,6 +7,7 @@
 
 #include <libwebsockets.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -112,6 +113,10 @@ static int cb_lws(struct lws *wsi, enum lws_callback_reasons reason,
         break;
     }
     case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
+        fprintf(stderr, "xiaoge: connection error: %.*s\n", in ? (int)len : 0,
+                in ? (char *)in : "");
+        c->finished = 1;
+        break;
     case LWS_CALLBACK_CLIENT_CLOSED:
         c->finished = 1;
         break;
@@ -153,7 +158,7 @@ xiaoge_client *xiaoge_create(const char *host, int port, int tls, int insecure,
     ci.path = "/ws/audio";
     ci.host = host;
     ci.origin = host;
-    ci.protocol = protocols[0].name;
+    ci.protocol = NULL; /* 不请求子协议(与 Python 客户端一致);服务端未回子协议头会致握手失败 */
     ci.pwsi = &c->wsi;
     if (tls) {
         ci.ssl_connection = LCCSCF_USE_SSL;
