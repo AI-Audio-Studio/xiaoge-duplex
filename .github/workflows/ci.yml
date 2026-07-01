@@ -59,37 +59,20 @@ jobs:
       - name: E2E smoke vs live server (non-gating)
         continue-on-error: true
         run: |
-          echo "== reachability from runner =="
-          curl -k -sS -m 10 -o /dev/null -w "https GET -> code=%{http_code} time=%{time_total}s\n" https://60.205.197.165:10099/ || echo "curl failed rc=$?"
-          python3 - <<'PY'
-          import socket, time
-          t = time.time()
-          try:
-              socket.create_connection(("60.205.197.165", 10099), timeout=10).close()
-              print("TCP connect OK %.2fs" % (time.time() - t))
-          except Exception as e:
-              print("TCP connect FAIL:", repr(e))
-          PY
-          echo "== python SDK e2e (control) =="
-          pip install -q websockets
-          python3 - <<'PY'
-          import asyncio, ssl, wave
-          import websockets
-          ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-          async def main():
-              try:
-                  async with websockets.connect("wss://60.205.197.165:10099/ws/audio", ssl=ctx, open_timeout=10) as ws:
-                      print("py first frame:", await asyncio.wait_for(ws.recv(), 8))
-              except Exception as e:
-                  print("py connect FAIL:", repr(e))
-          asyncio.run(main())
-          PY
-          echo "== C demo =="
+          # 用编译好的 C 二进制连真机(wss 自签):发 1s 静音,收欢迎语 TTS。
+          # 诊断:如需详细 lws/TLS 日志,给 demo 前加 XIAOGE_DEBUG=1。
           python3 - <<'PY'
           import wave
           with wave.open('/tmp/probe.wav', 'wb') as w:
               w.setframerate(16000); w.setnchannels(1); w.setsampwidth(2)
               w.writeframes(b'\x00\x00' * 16000)  # 1s 静音
           PY
-          XIAOGE_DEBUG=1 ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure 2>&1 | tee /tmp/out.txt
-          grep -q "ready, sample_rate" /tmp/out.txt && echo "handshake(ready) OK" || echo "no ready"
+          ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure | tee /tmp/out.txt
+          grep -q "ready, sample_rate" /tmp/out.txt || { echo "FAIL: no ready"; exit 1; }
+          python3 - <<'PY'
+          import wave, sys
+          with wave.open('/tmp/reply.wav') as w:
+              n = w.getnframes()
+          print("received frames:", n)
+          sys.exit(0 if n > 0 else 1)  # 收到欢迎语 TTS 才算过
+          PY
