@@ -51,7 +51,6 @@ async def _scenario(handler, port: int) -> dict:
 
 
 async def main() -> int:
-    ok = True
     normal = await _scenario(_mock_normal, 8799)
     assert normal["ready"] == 16000, normal
     assert normal["audio"] == 320, normal  # 收到一帧 160 样本*2 字节
@@ -62,7 +61,7 @@ async def main() -> int:
     assert busy["busy"] == "server busy", busy
     print("[busy]   busy='server busy'  OK")
 
-    print("=== 全部通过 ===" if ok else "=== 失败 ===")
+    print("=== 全部通过 ===")  # 任一断言失败会抛出,走不到这里
     return 0
 
 

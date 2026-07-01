@@ -10,12 +10,14 @@ on:
     branches: [main]
     paths:
       - "examples/voice_agents/**"
+      - "clients/**"
       - "ourcode.txt"
       - "ruff-ours.toml"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "examples/voice_agents/**"
+      - "clients/**"
       - "ourcode.txt"
       - "ruff-ours.toml"
       - ".github/workflows/ci.yml"
@@ -37,6 +39,6 @@ jobs:
       - name: Ruff lint (our code, strict — docs/project/CODE_GUIDELINES.md)
         run: ruff check --config ruff-ours.toml $(cat ourcode.txt)
       - name: Ruff format check
-        run: ruff format --check examples/voice_agents
+        run: ruff format --check examples/voice_agents clients/python clients/matlab/bridge
       - name: Byte-compile (syntax check)
-        run: python -m compileall -q examples/voice_agents
+        run: python -m compileall -q examples/voice_agents clients/python clients/matlab/bridge
