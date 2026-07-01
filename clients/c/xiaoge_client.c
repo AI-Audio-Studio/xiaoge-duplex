@@ -138,6 +138,9 @@ xiaoge_client *xiaoge_create(const char *host, int port, int tls, int insecure,
     if (cb) c->cb = *cb;
     pthread_mutex_init(&c->lock, NULL);
 
+    if (getenv("XIAOGE_DEBUG")) /* opt-in 详细日志(诊断连接/TLS) */
+        lws_set_log_level(LLL_ERR | LLL_WARN | LLL_NOTICE | LLL_INFO | LLL_CLIENT, NULL);
+
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof(info));
     info.port = CONTEXT_PORT_NO_LISTEN;

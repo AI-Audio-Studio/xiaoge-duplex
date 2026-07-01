@@ -91,5 +91,5 @@ jobs:
               w.setframerate(16000); w.setnchannels(1); w.setsampwidth(2)
               w.writeframes(b'\x00\x00' * 16000)  # 1s 静音
           PY
-          ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure | tee /tmp/out.txt
-          grep -q "ready" /tmp/out.txt && echo "handshake(ready) OK" || echo "no ready"
+          XIAOGE_DEBUG=1 ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure 2>&1 | tee /tmp/out.txt
+          grep -q "ready, sample_rate" /tmp/out.txt && echo "handshake(ready) OK" || echo "no ready"
