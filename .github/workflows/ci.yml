@@ -42,3 +42,15 @@ jobs:
         run: ruff format --check examples/voice_agents clients/python clients/matlab/bridge
       - name: Byte-compile (syntax check)
         run: python -m compileall -q examples/voice_agents clients/python clients/matlab/bridge
+
+  c-build:
+    name: C SDK build (libwebsockets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libwebsockets + cmake
+        run: sudo apt-get update && sudo apt-get install -y libwebsockets-dev cmake build-essential
+      - name: Build clients/c
+        run: |
+          cmake -S clients/c -B clients/c/build
+          cmake --build clients/c/build
