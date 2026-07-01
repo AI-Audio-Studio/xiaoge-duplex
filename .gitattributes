@@ -1,0 +1,4 @@
+# ourcode.txt 会被 makefile/ci.yml 以 `$(cat ourcode.txt)` 读取并按行做 shell 分词;
+# 若在 Windows 工作区被转成 CRLF,每个路径会带尾随 \r 导致找不到文件。
+# 钉死为 LF,保证 `make lint-ours` 跨平台一致(不影响母体/其余文件)。
+ourcode.txt text eol=lf

@@ -10,12 +10,14 @@ on:
     branches: [main]
     paths:
       - "examples/voice_agents/**"
+      - "clients/**"
       - "ourcode.txt"
       - "ruff-ours.toml"
       - ".github/workflows/ci.yml"
   pull_request:
     paths:
       - "examples/voice_agents/**"
+      - "clients/**"
       - "ourcode.txt"
       - "ruff-ours.toml"
       - ".github/workflows/ci.yml"
@@ -37,6 +39,40 @@ jobs:
       - name: Ruff lint (our code, strict — docs/project/CODE_GUIDELINES.md)
         run: ruff check --config ruff-ours.toml $(cat ourcode.txt)
       - name: Ruff format check
-        run: ruff format --check examples/voice_agents
+        run: ruff format --check examples/voice_agents clients/python clients/matlab/bridge
       - name: Byte-compile (syntax check)
-        run: python -m compileall -q examples/voice_agents
+        run: python -m compileall -q examples/voice_agents clients/python clients/matlab/bridge
+
+  c-build:
+    name: C SDK build (libwebsockets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libwebsockets + cmake
+        run: sudo apt-get update && sudo apt-get install -y libwebsockets-dev cmake build-essential
+      - name: Build clients/c
+        run: |
+          cmake -S clients/c -B clients/c/build
+          cmake --build clients/c/build
+      # 端到端冒烟:用编译好的 C 二进制连真机(wss 自签),发 1s 静音,收欢迎语 TTS。
+      # 非阻塞(continue-on-error):依赖外部服务器,不作为门禁——符合"测试不影响正常流程"。
+      - name: E2E smoke vs live server (non-gating)
+        continue-on-error: true
+        run: |
+          # 用编译好的 C 二进制连真机(wss 自签):发 1s 静音,收欢迎语 TTS。
+          # 诊断:如需详细 lws/TLS 日志,给 demo 前加 XIAOGE_DEBUG=1。
+          python3 - <<'PY'
+          import wave
+          with wave.open('/tmp/probe.wav', 'wb') as w:
+              w.setframerate(16000); w.setnchannels(1); w.setsampwidth(2)
+              w.writeframes(b'\x00\x00' * 16000)  # 1s 静音
+          PY
+          ./clients/c/build/xiaoge_demo_file 60.205.197.165 10099 /tmp/probe.wav /tmp/reply.wav --tls --insecure | tee /tmp/out.txt
+          grep -q "ready, sample_rate" /tmp/out.txt || { echo "FAIL: no ready"; exit 1; }
+          python3 - <<'PY'
+          import wave, sys
+          with wave.open('/tmp/reply.wav') as w:
+              n = w.getnframes()
+          print("received frames:", n)
+          sys.exit(0 if n > 0 else 1)  # 收到欢迎语 TTS 才算过
+          PY
