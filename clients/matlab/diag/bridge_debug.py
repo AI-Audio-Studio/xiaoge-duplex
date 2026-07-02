@@ -3,7 +3,7 @@
 两种模式:
   1) 真机模式:桥连小歌,转发上/下行,并把从小歌收到的音频另存 bridge_recv.wav
      (证明桥确实收到了下行,与 MATLAB 是否收到解耦):
-       python bridge_debug.py 60.205.197.165 10099 --tls --insecure --up 5001 --down 5002
+       python bridge_debug.py 60.205.197.165 10098 --tls --insecure --up 5001 --down 5002
   2) 自测模式(--selftest):不连小歌,只要有下行客户端连上 5002,就持续下发一段
      440Hz 正弦音,用来单独验证「桥 → MATLAB」这段 TCP 读取是否正常:
        python bridge_debug.py --selftest --up 5001 --down 5002
@@ -132,6 +132,7 @@ class DebugBridge:
                 f"audio_recv={self.audio_frames}帧/{self.audio_bytes}B "
                 f"down_written={self.down_written}B dropped={self.down_dropped}B"
             )
+            self.dump_wav(quiet=True)  # 每秒落盘,避免依赖 Ctrl-C
 
     async def serve(self, up_port: int, down_port: int) -> None:
         tasks = []
@@ -149,14 +150,15 @@ class DebugBridge:
         async with up, down:
             await asyncio.gather(*tasks)
 
-    def dump_wav(self) -> None:
+    def dump_wav(self, quiet: bool = False) -> None:
         if self.sink and not self.selftest:
             with wave.open("bridge_recv.wav", "wb") as w:
                 w.setframerate(16000)
                 w.setnchannels(1)
                 w.setsampwidth(2)
                 w.writeframes(bytes(self.sink))
-            log(f"已把桥收到的小歌音频存为 bridge_recv.wav ({len(self.sink)}B)")
+            if not quiet:
+                log(f"已把桥收到的小歌音频存为 bridge_recv.wav ({len(self.sink)}B)")
 
 
 def main() -> None:

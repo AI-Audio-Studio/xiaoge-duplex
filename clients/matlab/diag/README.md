@@ -28,7 +28,7 @@ diag_downlink('127.0.0.1')
 
 桥(真机;小歌是 wss 自签):
 ```bash
-python bridge_debug.py 60.205.197.165 10099 --tls --insecure --up 5001 --down 5002
+python bridge_debug.py 60.205.197.165 10098 --tls --insecure --up 5001 --down 5002
 ```
 MATLAB(发一段 16k/单声道/16bit 语音;没有就用默认静音,靠欢迎语/回声也行):
 ```matlab
