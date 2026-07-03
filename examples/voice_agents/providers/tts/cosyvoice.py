@@ -85,12 +85,16 @@ class _CosyVoiceCallback(CosyResultCallback):
     def __init__(self) -> None:
         self.audio_queue: queue.Queue[bytes | Exception | None] = queue.Queue()
         self.audio_done = threading.Event()
+        # 单调标志:本轮是否收到过任何音频(陈旧连接重放的安全闸——queue.empty()
+        # 会因 drain 消费而失真,不能用作判据)。
+        self.received_audio = False
 
     def on_open(self) -> None:
         return
 
     def on_data(self, data: bytes) -> None:
         if data:
+            self.received_audio = True
             self.audio_queue.put(bytes(data))
 
     def on_complete(self) -> None:
@@ -249,29 +253,58 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts = tts
 
-    async def _first_call_with_stale_retry(
-        self, synth: CosySpeechSynthesizer, pooled: bool, callback: _CosyVoiceCallback, text: str
-    ) -> tuple[CosySpeechSynthesizer, bool]:
-        """首句 streaming_call;借到"服务端已关"的陈旧池连接时,换冷连接重试一次。
+    async def _rebuild_cold_and_replay(
+        self, state: dict, callback: _CosyVoiceCallback, sentences: list[str]
+    ) -> None:
+        """陈旧连接恢复:归还旧连接(池自会 renew),冷连接重建并重放本轮已发句子。
 
-        实测(2026-07-03 回归,亦见于 6/20~6/26 历史 run):上一轮 finish 后归还的池连接
-        可能已被服务端关闭而池尚未 renew(~0.7s 窗口),此时 streaming_call 抛
-        WebSocketConnectionClosedException,该轮回复音频整段丢失。仅首句重试
-        (尚无任何音频入队,无重复播放风险);冷连接保证新鲜,~0.8s 代价只在触发时支付。
+        实测(2026-07-03 回归,亦见于 6/20~6/26 历史 run):池连接可能已被服务端关闭而池
+        尚未 renew(~0.7s 窗口),甚至在本轮句间死亡(v1 只保首句,20260703_211433 复现
+        非首句变体)——此时已发句子的音频也丢在死连接里,必须整轮重放。安全闸:
+        **仅在尚未收到任何音频时**(callback.received_audio=False)允许重放(无重复播放
+        风险),且每流只重试一次;冷连接保证新鲜,~0.8s 代价只在触发时支付。
         """
+        logger.warning(
+            "cosyvoice connection stale; rebuilding cold and replaying %d sentence(s)",
+            len(sentences),
+        )
+        await asyncio.to_thread(self._tts._release_synth, state["synth"], state["pooled"])
+        state["synth"] = await asyncio.to_thread(self._tts._build_synth, callback)
+        state["pooled"] = False
+        for s in sentences:
+            await asyncio.to_thread(state["synth"].streaming_call, s)
+
+    async def _call_with_recovery(
+        self, state: dict, callback: _CosyVoiceCallback, sent: list[str], text: str
+    ) -> None:
+        """发送一句;陈旧连接且未收到过音频时,冷连接重建+重放(含本句),每流一次。"""
         try:
-            await asyncio.to_thread(synth.streaming_call, text)
-            return synth, pooled
+            await asyncio.to_thread(state["synth"].streaming_call, text)
         except WebSocketConnectionClosedException:
-            logger.warning("cosyvoice pooled connection stale; retrying once on a cold connection")
-            await asyncio.to_thread(self._tts._release_synth, synth, pooled)  # 池会 renew 这条
-            fresh = await asyncio.to_thread(self._tts._build_synth, callback)
-            await asyncio.to_thread(fresh.streaming_call, text)
-            return fresh, False
+            if state["retried"] or callback.received_audio:
+                raise
+            state["retried"] = True
+            await self._rebuild_cold_and_replay(state, callback, [*sent, text])
+        sent.append(text)
+
+    async def _complete_with_recovery(
+        self, state: dict, callback: _CosyVoiceCallback, sent: list[str]
+    ) -> None:
+        """streaming_complete;同一恢复策略(重放全部已发句子后再收尾)。"""
+        try:
+            await asyncio.to_thread(state["synth"].streaming_complete)
+        except WebSocketConnectionClosedException:
+            if state["retried"] or callback.received_audio:
+                raise
+            state["retried"] = True
+            await self._rebuild_cold_and_replay(state, callback, sent)
+            await asyncio.to_thread(state["synth"].streaming_complete)
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         callback = _CosyVoiceCallback()
-        synth, pooled = await asyncio.to_thread(self._tts.take_synth, callback)
+        first_synth, first_pooled = await asyncio.to_thread(self._tts.take_synth, callback)
+        state: dict = {"synth": first_synth, "pooled": first_pooled, "retried": False}
+        sent: list[str] = []
 
         output_emitter.initialize(
             request_id=shortuuid("cosyvoice-tts-"),
@@ -282,21 +315,14 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
         )
 
         drain_task = asyncio.create_task(drain_audio_queue(callback.audio_queue, output_emitter))
-        any_text = False
 
         try:
             async for sentence in iter_sentence_chunks(self._input_ch):
-                if not any_text:
-                    synth, pooled = await self._first_call_with_stale_retry(
-                        synth, pooled, callback, sentence
-                    )
-                else:
-                    await asyncio.to_thread(synth.streaming_call, sentence)
-                any_text = True
+                await self._call_with_recovery(state, callback, sent, sentence)
 
-            if any_text:
+            if sent:
                 # 阻塞至服务端合成完成(on_complete 落定),此时全部 on_data 已入队。
-                await asyncio.to_thread(synth.streaming_complete)
+                await self._complete_with_recovery(state, callback, sent)
 
             callback.audio_queue.put(None)
 
@@ -306,9 +332,9 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
             callback.audio_queue.put(None)
             drain_task.cancel()
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(synth.streaming_cancel)
-            await asyncio.to_thread(self._tts._release_synth, synth, pooled)
+                await asyncio.to_thread(state["synth"].streaming_cancel)
+            await asyncio.to_thread(self._tts._release_synth, state["synth"], state["pooled"])
             raise
 
-        await asyncio.to_thread(self._tts._release_synth, synth, pooled)
+        await asyncio.to_thread(self._tts._release_synth, state["synth"], state["pooled"])
         await drain_task
