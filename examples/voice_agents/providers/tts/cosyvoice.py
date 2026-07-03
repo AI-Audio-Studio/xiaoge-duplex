@@ -21,6 +21,7 @@ from dashscope.audio.tts_v2 import (
     SpeechSynthesizer as CosySpeechSynthesizer,
     SpeechSynthesizerObjectPool as CosySynthPool,
 )
+from websocket import WebSocketConnectionClosedException
 
 from livekit.agents import APIConnectOptions, tts
 from livekit.agents._exceptions import APIConnectionError, APIStatusError
@@ -248,6 +249,26 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
         super().__init__(tts=tts, conn_options=conn_options)
         self._tts = tts
 
+    async def _first_call_with_stale_retry(
+        self, synth: CosySpeechSynthesizer, pooled: bool, callback: _CosyVoiceCallback, text: str
+    ) -> tuple[CosySpeechSynthesizer, bool]:
+        """首句 streaming_call;借到"服务端已关"的陈旧池连接时,换冷连接重试一次。
+
+        实测(2026-07-03 回归,亦见于 6/20~6/26 历史 run):上一轮 finish 后归还的池连接
+        可能已被服务端关闭而池尚未 renew(~0.7s 窗口),此时 streaming_call 抛
+        WebSocketConnectionClosedException,该轮回复音频整段丢失。仅首句重试
+        (尚无任何音频入队,无重复播放风险);冷连接保证新鲜,~0.8s 代价只在触发时支付。
+        """
+        try:
+            await asyncio.to_thread(synth.streaming_call, text)
+            return synth, pooled
+        except WebSocketConnectionClosedException:
+            logger.warning("cosyvoice pooled connection stale; retrying once on a cold connection")
+            await asyncio.to_thread(self._tts._release_synth, synth, pooled)  # 池会 renew 这条
+            fresh = await asyncio.to_thread(self._tts._build_synth, callback)
+            await asyncio.to_thread(fresh.streaming_call, text)
+            return fresh, False
+
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         callback = _CosyVoiceCallback()
         synth, pooled = await asyncio.to_thread(self._tts.take_synth, callback)
@@ -265,7 +286,12 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
 
         try:
             async for sentence in iter_sentence_chunks(self._input_ch):
-                await asyncio.to_thread(synth.streaming_call, sentence)
+                if not any_text:
+                    synth, pooled = await self._first_call_with_stale_retry(
+                        synth, pooled, callback, sentence
+                    )
+                else:
+                    await asyncio.to_thread(synth.streaming_call, sentence)
                 any_text = True
 
             if any_text:
