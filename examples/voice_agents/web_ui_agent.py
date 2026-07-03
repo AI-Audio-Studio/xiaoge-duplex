@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
@@ -31,6 +30,21 @@ import aiohttp.web
 import httpx
 import openai
 from audio_recorder import AudioRecorder
+from common.config_utils import env_bool as _env_bool
+from common.runtime import (
+    append_turn_log as _append_turn_log,
+    configure_utf8_stdio as _configure_utf8_stdio,
+    ms as _ms,
+)
+from common.text_rules import (
+    ACK_STRIP_RE as _ACK_STRIP_RE,
+    LEADING_PUNCT_RE as _LEADING_PUNCT_RE,
+    OVERLAP_ACK_CHARS as _OVERLAP_ACK_CHARS,
+    is_backchannel as _is_backchannel,
+    is_overlap_ack as _is_overlap_ack,
+    normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
+    should_ignore_user_turn as _should_ignore_user_turn,
+)
 from custom_audio_providers import (
     CosyVoiceStreamingTTS,
     FunASROfflineSTT,
@@ -85,132 +99,13 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 # 见 event_timeline.install_debug_log)。正常运行不再挂任何文件日志处理器(零开销),
 # 也不再写 .run/agent.log。
 
-_TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
-_PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
-_STOP_WORDS = (
-    "停",
-    "停下",
-    "停一下",
-    "暂停",
-    "好了",
-    "行了",
-    "别说",
-    "别说了",
-    "别讲",
-    "别讲了",
-    "别念了",
-    "等一下",
-    "等等",
-    "等下",
-    "稍等",
-    "知道了",
-    "我知道了",
-    "闭嘴",
-    "安静",
-    "不听了",
-    "不用了",
-    "不要了",
-    "休庭",
-)
-_STOP_LEAD_IN = r"(?:那|你|就|请|先|那你|那就)?"
-_STOP_REPLY_PATTERNS = tuple(
-    re.compile(rf"^\s*{_STOP_LEAD_IN}{re.escape(w)}[一下吧呢啊呀了嘛]*\s*[。.！!，,、\s]*$")
-    for w in _STOP_WORDS
-)
-_BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
-_BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
-_OVERLAP_ACK_CHARS = _BACKCHANNEL_CHARS + "对好是行的呀嘛"
-_ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
-# 句首游离标点:FunASR 常把上句尾标点带到下句句首。仅用于显示净化,不动进上下文的原文。
-_LEADING_PUNCT_RE = re.compile(r"^[\s，,。.、！!？?～~；;：:…—·、\-]+")
+# 文本判定规则(停止词/附和/压话确认/数字归一化)在 common.text_rules,顶部按 `_` 前缀别名引入。
 # 在线软打断的 VAD 佐证宽限(秒):VAD 刚停说话后这段时间内仍接受打断(容忍识别滞后)。
 _ONLINE_VAD_GRACE = float(os.getenv("XIAOGE_ONLINE_VAD_GRACE", "0.6"))
-_SEGMENT_SPLIT_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
+# 跨对象共享标志:用户当前这句话是否压着 AI 播报开口(附和拒识的上下文闸门,per-app 可变状态)。
 _overlap_turn_state: dict[str, bool] = {"user_spoke_over_agent": False}
 
-
-def _is_overlap_ack(text: str | None) -> bool:
-    if text is None:
-        return False
-    core = _ACK_STRIP_RE.sub("", text.strip())
-    return bool(core) and all(ch in _OVERLAP_ACK_CHARS for ch in core)
-
-
-def _configure_utf8_stdio() -> None:
-    os.environ.setdefault("PYTHONUTF8", "1")
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetConsoleOutputCP(65001)
-        kernel32.SetConsoleCP(65001)
-    except Exception:
-        pass
-
-
 _configure_utf8_stdio()
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _should_ignore_user_turn(text: str | None) -> bool:
-    if text is None:
-        return False
-    segments = [seg for seg in _SEGMENT_SPLIT_RE.split(text.strip()) if seg]
-    if not segments:
-        return False
-    has_stop_word = False
-    for seg in segments:
-        if any(pattern.fullmatch(seg) for pattern in _STOP_REPLY_PATTERNS):
-            has_stop_word = True
-            continue
-        if all(ch in _OVERLAP_ACK_CHARS for ch in seg):
-            continue
-        return False
-    return has_stop_word
-
-
-def _is_backchannel(text: str | None) -> bool:
-    if text is None:
-        return False
-    normalized = text.strip()
-    return bool(normalized) and bool(_BACKCHANNEL_RE.fullmatch(normalized))
-
-
-def _normalize_spoken_digit_sequence(text: str | None) -> str | None:
-    if text is None:
-        return None
-    stripped = text.strip()
-    if not _PURE_DIGIT_RE.fullmatch(stripped):
-        return text
-    return "、".join(stripped)
-
-
-def _ms(value: float | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value * 1000:.1f}ms"
-
-
-def _append_turn_log(line: str) -> None:
-    now = time.time()
-    ts = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d}"
-    with _TURN_METRICS_LOG.open("a", encoding="utf-8") as f:
-        f.write(f"{ts} {line}\n")
 
 
 # ─── SwitchableSTT ───────────────────────────────────────────────────────────

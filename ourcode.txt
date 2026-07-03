@@ -1,3 +1,8 @@
+examples/voice_agents/common/__init__.py
+examples/voice_agents/common/config_utils.py
+examples/voice_agents/common/text_rules.py
+examples/voice_agents/common/runtime.py
+examples/voice_agents/common/taps.py
 examples/voice_agents/web_ui_agent.py
 examples/voice_agents/listening_mode.py
 examples/voice_agents/mute_gate.py
@@ -28,3 +33,4 @@ tests/test_ours_text_rules.py
 tests/test_ours_text_sanitizer.py
 tests/test_ours_turn_config.py
 tests/test_ours_listening_mode.py
+tests/test_ours_config_utils.py

@@ -25,6 +25,8 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from common.taps import TapAudioInput, TapAudioOutput
+
 from livekit import rtc
 from livekit.agents.voice import io
 
@@ -173,41 +175,22 @@ class _ConversationWavWriter:
 # ── AudioInput / AudioOutput 旁路 ─────────────────────────────────────────────
 
 
-class RecordingTapAudioInput(io.AudioInput):
+class RecordingTapAudioInput(TapAudioInput):
     def __init__(self, source: io.AudioInput, writer: _ConversationWavWriter) -> None:
-        super().__init__(label="recording-tap-input", source=source)
+        super().__init__(source, label="recording-tap-input")
         self._writer = writer
 
-    async def __anext__(self) -> rtc.AudioFrame:
-        frame = await super().__anext__()
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._writer.write_mic(frame)
-        return frame
 
 
-class RecordingTapAudioOutput(io.AudioOutput):
+class RecordingTapAudioOutput(TapAudioOutput):
     def __init__(self, next_output: io.AudioOutput, writer: _ConversationWavWriter) -> None:
-        super().__init__(
-            label="recording-tap-output",
-            next_in_chain=next_output,
-            sample_rate=next_output.sample_rate,
-            capabilities=io.AudioOutputCapabilities(pause=next_output.can_pause),
-        )
+        super().__init__(next_output, label="recording-tap-output")
         self._writer = writer
 
-    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
-        if self.next_in_chain:
-            await self.next_in_chain.capture_frame(frame)
-        await super().capture_frame(frame)
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._writer.write_tts(frame)
-
-    def flush(self) -> None:
-        super().flush()
-        if self.next_in_chain:
-            self.next_in_chain.flush()
-
-    def clear_buffer(self) -> None:
-        if self.next_in_chain:
-            self.next_in_chain.clear_buffer()
 
 
 # ── 对外接口 ──────────────────────────────────────────────────────────────────

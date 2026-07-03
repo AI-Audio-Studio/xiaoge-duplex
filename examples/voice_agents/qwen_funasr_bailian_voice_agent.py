@@ -1,14 +1,25 @@
 import asyncio
 import logging
 import os
-import re
-import sys
 import time
-from pathlib import Path
 
 import httpx
 import openai
 from audio_recorder import AudioRecorder
+from common.config_utils import env_bool as _env_bool
+from common.runtime import (
+    append_turn_log as _append_turn_log,
+    configure_utf8_stdio as _configure_utf8_stdio,
+    ms as _ms,
+)
+from common.text_rules import (
+    ACK_STRIP_RE as _ACK_STRIP_RE,
+    OVERLAP_ACK_CHARS as _OVERLAP_ACK_CHARS,
+    is_backchannel as _is_backchannel,
+    is_overlap_ack as _is_overlap_ack,
+    normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
+    should_ignore_user_turn as _should_ignore_user_turn,
+)
 from custom_audio_providers import (
     FunASROfflineSTT,
     HttpStreamingTTS,
@@ -57,59 +68,7 @@ load_dotenv()
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-_TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
-_PURE_DIGIT_RE = re.compile(r"^\d{2,16}$")
-# 命中后：强制打断当前播放 + 跳过本次回复（见 VoiceAgent.on_user_turn_completed）。
-_STOP_WORDS = (
-    "停",
-    "停下",
-    "停一下",
-    "暂停",
-    "好了",
-    "行了",
-    "别说",
-    "别说了",
-    "别讲",
-    "别讲了",
-    "别念了",
-    "等一下",
-    "等等",
-    "等下",
-    "稍等",
-    "知道了",
-    "我知道了",
-    "闭嘴",
-    "安静",
-    "不听了",
-    "不用了",
-    "不要了",
-    "休庭",  # FunASR 常把"停/暂停"误识成"休庭"，兜底
-)
-# 可选引导词前缀：实测用户说"那别说了"，"那"不在停止词表也不在附和字集，
-# ^ 锚定 fullmatch 失配 -> 没 skip_reply，LLM 回了"好的，不说了"（播放本身已被
-# KWS 模糊命中掐掉）。"那/就/你"这类引导词不改变停止意图，匹配时允许带上。
-_STOP_LEAD_IN = r"(?:那|你|就|请|先|那你|那就)?"
-_STOP_REPLY_PATTERNS = tuple(
-    re.compile(rf"^\s*{_STOP_LEAD_IN}{re.escape(w)}[一下吧呢啊呀了嘛]*\s*[。.！!，,、\s]*$")
-    for w in _STOP_WORDS
-)
-
-# 背调词（语气词）：用户边听边"嗯/哦"的回应，不是新指令。命中后只跳过回复、
-# 不强制打断 —— 靠 resume_false_interruption 让 agent 把原话接着说完。
-# 整句必须全部由语气字 + 标点组成才算（"哦好吧"含实义不命中）。
-_BACKCHANNEL_CHARS = "嗯哦噢喔啊呃唉唔诶哼呢"
-_BACKCHANNEL_RE = re.compile(rf"^[{_BACKCHANNEL_CHARS}][{_BACKCHANNEL_CHARS}，,。.、！!？?～~\s]*$")
-
-# 压话确认词：用户在 AI 播报期间说的"对/好/是的"等附和，不是新指令。
-# 实测踩坑：听故事时"嗯……对……"连发，多个 final 累加成一轮"嗯。 对。"——
-# ①"对"不在背调字符集 -> 不拒识 -> LLM 生成新回复顶掉正在播的故事（回复路径打断，
-#    min_words 闸门管不着这条路）；②累加后 4 词凑过 min_words=3 音频闸门。
-# 但"对/好"在 AI 提问后是真答案，不能无脑拒 -> 仅当本轮用户是"压着 AI 播报开口"
-# （见 _overlap_turn_state）才按附和拒识。已知代价：AI 问题还没念完用户就抢答
-# "对"会被误拒，需要用户再说一遍；换取的是听故事场景不被附和声切断。
-_OVERLAP_ACK_CHARS = _BACKCHANNEL_CHARS + "对好是行的呀嘛"
-_ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
-
+# 文本判定规则(停止词/附和/压话确认/数字归一化)在 common.text_rules,顶部按 `_` 前缀别名引入。
 # 跨对象共享标志：用户当前这句话是否压着 AI 播报开口。
 # entrypoint 的 user_state_changed 在每次开口时直接覆盖（不粘滞、不靠提交复位）：
 # 纯附和轮会被 BACKCHANNEL_OVERLAP_EARLY 清掉、根本不提交，到不了
@@ -117,47 +76,7 @@ _ACK_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
 # （否则 AI 说完后用户答"对"会被误判成压话而吞掉）。
 _overlap_turn_state = {"user_spoke_over_agent": False}
 
-
-def _is_overlap_ack(text: str | None) -> bool:
-    if text is None:
-        return False
-    core = _ACK_STRIP_RE.sub("", text.strip())
-    if not core:
-        return False
-    return all(ch in _OVERLAP_ACK_CHARS for ch in core)
-
-
-def _configure_utf8_stdio() -> None:
-    os.environ.setdefault("PYTHONUTF8", "1")
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        if hasattr(sys.stderr, "reconfigure"):
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
-    if os.name != "nt":
-        return
-
-    try:
-        import ctypes
-
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetConsoleOutputCP(65001)
-        kernel32.SetConsoleCP(65001)
-    except Exception:
-        pass
-
-
 _configure_utf8_stdio()
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 _STT_BACKENDS = {"funasr", "qwen3"}
@@ -302,71 +221,6 @@ def prewarm(proc: JobProcess) -> None:
 
 
 server.setup_fnc = prewarm
-
-
-def _ms(value: float | None) -> str:
-    if value is None:
-        return "-"
-    return f"{value * 1000:.1f}ms"
-
-
-def _append_turn_log(line: str) -> None:
-    now = time.time()
-    ts = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d}"
-    with _TURN_METRICS_LOG.open("a", encoding="utf-8") as f:
-        f.write(f"{ts} {line}\n")
-
-
-def _normalize_spoken_digit_sequence(text: str | None) -> str | None:
-    if text is None:
-        return None
-
-    stripped = text.strip()
-    if not _PURE_DIGIT_RE.fullmatch(stripped):
-        return text
-
-    # ASR may collapse "1、2、3、4、5" into "12345". Re-expand it so the LLM
-    # and any confirmation reply both treat it as a digit sequence, not an integer.
-    return "、".join(stripped)
-
-
-# 轮级停止判定按标点分段，逐段判，而不是整句单 fullmatch。实测三类漏法都是
-# "整句锚定"被多余成分顶掉：①早清残留/附和前缀"嗯。 停。"②引导词"那别说了"
-# （引导词在 pattern 里）③双停止词连说"行了，别说了。"——"行了"匹配完还挂着
-# "别说了"，fullmatch 失败 -> LLM 多回一句（实测）。
-# 规则：每段要么命中停止词、要么是纯附和字，且至少一段是停止词 -> 整轮拒识。
-# 含任何实义段（"对。 继续。"/"等等你刚才说啥"）则正常走轮次。
-_SEGMENT_SPLIT_RE = re.compile(r"[\s，,。.、！!？?～~；;：:]+")
-
-
-def _should_ignore_user_turn(text: str | None) -> bool:
-    if text is None:
-        return False
-
-    segments = [seg for seg in _SEGMENT_SPLIT_RE.split(text.strip()) if seg]
-    if not segments:
-        return False
-
-    has_stop_word = False
-    for seg in segments:
-        if any(pattern.fullmatch(seg) for pattern in _STOP_REPLY_PATTERNS):
-            has_stop_word = True
-            continue
-        if all(ch in _OVERLAP_ACK_CHARS for ch in seg):
-            continue
-        return False
-    return has_stop_word
-
-
-def _is_backchannel(text: str | None) -> bool:
-    if text is None:
-        return False
-
-    normalized = text.strip()
-    if not normalized:
-        return False
-
-    return bool(_BACKCHANNEL_RE.fullmatch(normalized))
 
 
 @server.rtc_session()
