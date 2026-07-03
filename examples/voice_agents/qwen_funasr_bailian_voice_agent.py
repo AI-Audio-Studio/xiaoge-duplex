@@ -20,13 +20,6 @@ from common.text_rules import (
     normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
     should_ignore_user_turn as _should_ignore_user_turn,
 )
-from custom_audio_providers import (
-    FunASROfflineSTT,
-    HttpStreamingTTS,
-    Qwen3ASROfflineSTT,
-    QwenStreamingTTS,
-    _funasr_hotwords,
-)
 from dotenv import load_dotenv
 from kws_interrupt import (
     KwsConfig,
@@ -40,6 +33,13 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+from providers import (
+    FunASROfflineSTT,
+    HttpStreamingTTS,
+    Qwen3ASROfflineSTT,
+    QwenStreamingTTS,
+)
+from providers.config import funasr_hotwords as _funasr_hotwords
 
 from livekit.agents import (
     Agent,

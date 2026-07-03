@@ -13,6 +13,20 @@ examples/voice_agents/kws_interrupt.py
 examples/voice_agents/online_interrupt.py
 examples/voice_agents/funasr_stream_stt.py
 examples/voice_agents/iflytek_stt.py
+examples/voice_agents/providers/__init__.py
+examples/voice_agents/providers/config.py
+examples/voice_agents/providers/helpers.py
+examples/voice_agents/providers/stt/__init__.py
+examples/voice_agents/providers/stt/funasr_offline.py
+examples/voice_agents/providers/stt/funasr_2pass.py
+examples/voice_agents/providers/stt/funasr_stream.py
+examples/voice_agents/providers/stt/qwen3.py
+examples/voice_agents/providers/stt/iflytek.py
+examples/voice_agents/providers/tts/__init__.py
+examples/voice_agents/providers/tts/bailian.py
+examples/voice_agents/providers/tts/qwen_stream.py
+examples/voice_agents/providers/tts/cosyvoice.py
+examples/voice_agents/providers/tts/http.py
 examples/voice_agents/custom_audio_providers.py
 examples/voice_agents/audio_recorder.py
 examples/voice_agents/test_recorder.py
@@ -34,3 +48,4 @@ tests/test_ours_text_sanitizer.py
 tests/test_ours_turn_config.py
 tests/test_ours_listening_mode.py
 tests/test_ours_config_utils.py
+tests/test_ours_providers_helpers.py

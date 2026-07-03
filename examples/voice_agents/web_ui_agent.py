@@ -45,14 +45,6 @@ from common.text_rules import (
     normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
     should_ignore_user_turn as _should_ignore_user_turn,
 )
-from custom_audio_providers import (
-    CosyVoiceStreamingTTS,
-    FunASROfflineSTT,
-    HttpStreamingTTS,
-    Qwen3ASROfflineSTT,
-    QwenStreamingTTS,
-    _funasr_hotwords,
-)
 from dotenv import load_dotenv
 from kws_interrupt import KwsConfig, KwsTapAudioInput, NativeKwsSpotter, _unavailable_reason
 from listening_mode import AutoDecision, ListeningController, ListeningEvent
@@ -64,6 +56,14 @@ from online_interrupt import (
     OnlineTapAudioInput,
     unavailable_reason as _online_unavailable_reason,
 )
+from providers import (
+    CosyVoiceStreamingTTS,
+    FunASROfflineSTT,
+    HttpStreamingTTS,
+    Qwen3ASROfflineSTT,
+    QwenStreamingTTS,
+)
+from providers.config import funasr_hotwords as _funasr_hotwords
 from text_sanitizer import sanitize_stream, strip_markdown
 from turn_config import TurnConfig
 
@@ -1587,13 +1587,13 @@ async def entrypoint(ctx: JobContext) -> None:  # noqa: C901, PLR0912, PLR0915
     _default_stt = "funasr-stream" if _stack == "optimized" else "funasr"
     _stt_mode = (os.getenv("STT_BACKEND") or _default_stt).strip().lower()
     if _stt_mode == "iflytek":
-        from iflytek_stt import IFlyTekRTASR
+        from providers.stt.iflytek import IFlyTekRTASR
 
         stt_engine = IFlyTekRTASR()
         _switchable_stt = None
         _stt_for_session = stt_engine
     elif _stt_mode == "funasr-stream":
-        from funasr_stream_stt import FunASRStreamSTT
+        from providers.stt.funasr_stream import FunASRStreamSTT
 
         stt_engine = FunASRStreamSTT()  # 内置独立 silero VAD;GAP/门控见模块
         _switchable_stt = None
