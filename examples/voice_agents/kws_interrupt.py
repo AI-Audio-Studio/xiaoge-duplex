@@ -105,6 +105,9 @@ class KwsConfig:
             model_dir=(os.getenv("XIAOGE_KWS_MODEL_DIR", "").strip() or _default_model_dir()),
             keywords=keywords,
             keywords_file=os.getenv("XIAOGE_KWS_KEYWORDS_FILE", "").strip() or None,
+            # 降耗旋钮(RESOURCE_REPORT §5-1):sherpa/onnxruntime 解码线程数。默认 2 与
+            # 既有行为一致;实测 KWS 常驻 ~3 核,压到 1 预期显著降耗,命中延迟需实测确认。
+            num_threads=env_int("XIAOGE_KWS_NUM_THREADS", 2),
             keywords_score=env_float("XIAOGE_KWS_KEYWORDS_SCORE", 1.0),
             keywords_threshold=env_float("XIAOGE_KWS_KEYWORDS_THRESHOLD", 0.18),
             num_trailing_blanks=env_int("XIAOGE_KWS_NUM_TRAILING_BLANKS", 1),

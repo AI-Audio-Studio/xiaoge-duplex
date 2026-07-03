@@ -81,3 +81,20 @@ timeline 关键事件（STT final / STOP_* / 状态迁移）序列一致。
 | IDLE(KWS 开) | 待测 | 待测 |
 
 附加硬指标：`FELT_LATENCY`/`wall_clock_e2e` 不回退；`STOP_KWS_EARLY` 命中延迟不回退。
+
+### 阶段 4 已落地的改动（默认行为不变，待实测）
+
+1. **指标日志写盘下线程**（`common/runtime.py`）：原每条 STT final 在 agent 事件循环上
+   同步 open/write；现改为调用线程打时间戳 + 队列 + 后台 daemon 线程批量写。
+   队列满(磁盘卡死)丢日志不丢事件循环;atexit 排空。
+2. **KWS 线程数旋钮**：`XIAOGE_KWS_NUM_THREADS`（默认 2 = 原行为）。IDLE ~3.2 核的
+   主嫌疑是 sherpa/onnxruntime 解码线程;设 1 复测 CPU 与 `STOP_KWS_EARLY` 延迟。
+3. 核实后**不需要改**的项：`audio_recorder`/`test_recorder` 的重采样与 numpy 转换
+   本就在锁外(此前分析报告有误);iflytek bytearray 切片在 40ms 节流循环内非热点,不动。
+
+**实测步骤（后端可达时执行）**
+```powershell
+# A/B:默认 vs $env:XIAOGE_KWS_NUM_THREADS="1",各采 IDLE/ACTIVE(RESOURCE_REPORT §6 方法)
+# 回放:AGENT_TIMELINE=1 + AGENT_SCENARIO 同基线录音,对比 KPI 与 STOP_KWS_EARLY 时延
+```
+若 num_threads=1 使 KWS 命中延迟实测回退,保持默认 2(旋钮保留)。

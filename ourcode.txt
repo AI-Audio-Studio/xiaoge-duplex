@@ -60,3 +60,4 @@ tests/test_ours_turn_config.py
 tests/test_ours_listening_mode.py
 tests/test_ours_config_utils.py
 tests/test_ours_providers_helpers.py
+tests/test_ours_runtime_log.py
