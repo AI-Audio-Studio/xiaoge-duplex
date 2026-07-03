@@ -4,6 +4,17 @@ examples/voice_agents/common/text_rules.py
 examples/voice_agents/common/runtime.py
 examples/voice_agents/common/taps.py
 examples/voice_agents/web_ui_agent.py
+examples/voice_agents/app/__init__.py
+examples/voice_agents/app/session_state.py
+examples/voice_agents/app/switchable.py
+examples/voice_agents/app/backends.py
+examples/voice_agents/app/listening_host.py
+examples/voice_agents/app/web_audio.py
+examples/voice_agents/app/setup_taps.py
+examples/voice_agents/webpanel/__init__.py
+examples/voice_agents/webpanel/state.py
+examples/voice_agents/webpanel/bridge.py
+examples/voice_agents/webpanel/server.py
 examples/voice_agents/listening_mode.py
 examples/voice_agents/mute_gate.py
 examples/voice_agents/text_sanitizer.py

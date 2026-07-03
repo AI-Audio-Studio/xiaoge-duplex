@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "voice_agents"))
 
 import web_ui_agent as wua  # noqa: E402
+from common.runtime import ms as _ms  # noqa: E402
 
 
 class TestIsOverlapAck:
@@ -98,8 +99,8 @@ class TestNormalizeSpokenDigitSequence:
 
 class TestMsFormat:
     def test_none(self) -> None:
-        assert wua._ms(None) == "-"
+        assert _ms(None) == "-"
 
     def test_value(self) -> None:
-        assert wua._ms(0.1234) == "123.4ms"
-        assert wua._ms(0) == "0.0ms"
+        assert _ms(0.1234) == "123.4ms"
+        assert _ms(0) == "0.0ms"
