@@ -78,12 +78,16 @@ timeline 关键事件（STT final / STOP_* / 状态迁移）序列一致。
 | IDLE(KWS 开) | 321%(峰324) | 360MB |
 | IDLE(KWS 关) | 12.5% | 290MB |
 
-阶段 4 优化后按 §6 同方法复测填入：
+阶段 4 优化后实测(2026-07-03,进程树采样,详见 REGRESSION_LOG.md §5):
 
-| 状态 | CPU(优化后) | RAM(优化后) |
+| 状态 | CPU(工作进程,单核口径) | RAM(进程树) |
 |---|---|---|
-| ACTIVE(KWS 开) | 待测 | 待测 |
-| IDLE(KWS 开) | 待测 | 待测 |
+| IDLE(KWS 开,threads=2 默认) | 395% | 1162MB |
+| IDLE(KWS 开,**threads=1**) | **98.6%(降 75%)** | 1172MB |
+
+KWS 命中延迟守门:threads=1 与 2 命中同一停止词时刻 126.29s vs 126.64s,不回退。
+`.env.example` 已推荐 `XIAOGE_KWS_NUM_THREADS=1`(代码默认仍 2)。
+回放回归(46 条历史录音、47 次运行)全部通过,详见 REGRESSION_LOG.md。
 
 附加硬指标：`FELT_LATENCY`/`wall_clock_e2e` 不回退；`STOP_KWS_EARLY` 命中延迟不回退。
 
