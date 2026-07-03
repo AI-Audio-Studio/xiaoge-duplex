@@ -264,7 +264,7 @@ class TurnMetrics:
         self._last_user_stop_at: float | None = None
 
     # ── 安装:自注册 session 监听(只读旁路)──────────────────────────────────
-    def attach(self, session: Any) -> None:  # noqa: C901
+    def attach(self, session: Any) -> None:
         try:
 
             @session.on("conversation_item_added")
@@ -273,30 +273,36 @@ class TurnMetrics:
 
             @session.on("user_state_changed")
             def _on_user_state(ev: Any) -> None:
-                try:
-                    if getattr(ev, "old_state", None) == "speaking" and (
-                        getattr(ev, "new_state", None) != "speaking"
-                    ):
-                        self._last_user_stop_at = getattr(ev, "created_at", None)
-                except Exception:
-                    pass
+                self._on_user_state_ev(ev)
 
             @session.on("agent_state_changed")
             def _on_agent_state(ev: Any) -> None:
-                try:
-                    if getattr(ev, "new_state", None) == "speaking":
-                        start = getattr(ev, "created_at", None)
-                        if start is not None and self._last_user_stop_at is not None:
-                            self._feed_felt((start - self._last_user_stop_at) * 1000.0)
-                            self._last_user_stop_at = None
-                except Exception:
-                    pass
+                self._on_agent_state_ev(ev)
 
             @session.on("agent_false_interruption")
             def _on_false(ev: Any) -> None:
                 self._feed_interrupt("false_interruption")
         except Exception as exc:
             logger.debug("turn metrics attach skipped: %s", exc)
+
+    def _on_user_state_ev(self, ev: Any) -> None:
+        try:
+            if getattr(ev, "old_state", None) == "speaking" and (
+                getattr(ev, "new_state", None) != "speaking"
+            ):
+                self._last_user_stop_at = getattr(ev, "created_at", None)
+        except Exception:
+            pass
+
+    def _on_agent_state_ev(self, ev: Any) -> None:
+        try:
+            if getattr(ev, "new_state", None) == "speaking":
+                start = getattr(ev, "created_at", None)
+                if start is not None and self._last_user_stop_at is not None:
+                    self._feed_felt((start - self._last_user_stop_at) * 1000.0)
+                    self._last_user_stop_at = None
+        except Exception:
+            pass
 
     def _on_item(self, ev: Any) -> None:
         try:

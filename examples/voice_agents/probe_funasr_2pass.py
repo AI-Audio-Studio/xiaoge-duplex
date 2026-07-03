@@ -61,7 +61,58 @@ def load_pcm_16k(path: str) -> bytes:
     return bytes(combined.data)
 
 
-async def main() -> int:  # noqa: C901, PLR0912, PLR0915
+def _handle_text_message(data: str, result: dict) -> bool:
+    """归类一条文本消息。返回 True 表示收到 is_final,应结束接收。"""
+    result["count"] += 1
+    payload = json.loads(data)
+    mode = payload.get("mode", "<none>")
+    text = payload.get("text", "")
+    is_final = payload.get("is_final")
+    print(f"[recv] mode={mode!r} is_final={is_final} text={text!r}")
+    if mode == "2pass-online":
+        result["online"].append(text)
+    elif mode == "2pass-offline":
+        result["offline"].append(text)
+    else:
+        result["other"].add(str(mode))
+    return is_final is True
+
+
+async def _collect_until_final(ws: aiohttp.ClientWSResponse, result: dict) -> None:
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        try:
+            msg = await ws.receive(timeout=max(0.1, deadline - time.monotonic()))
+        except asyncio.TimeoutError:
+            break
+        if msg.type == aiohttp.WSMsgType.TEXT:
+            if _handle_text_message(msg.data, result):
+                break
+        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+            print("[ws] closed by server")
+            break
+        elif msg.type == aiohttp.WSMsgType.ERROR:
+            print("[ws] error frame")
+            break
+
+
+def _print_verdict(result: dict) -> int:
+    print("\n==== PROBE RESULT ====")
+    print(f"total text messages: {result['count']}")
+    print(f"2pass-online (interim) messages: {len(result['online'])} -> {result['online']}")
+    print(f"2pass-offline (final)  messages: {len(result['offline'])} -> {result['offline']}")
+    if result["other"]:
+        print(f"other modes seen: {sorted(result['other'])}")
+
+    if result["online"]:
+        print("\nVERDICT: SUPPORTED. Server emits 2pass-online interim -> option C is viable.")
+        return 0
+    print("\nVERDICT: NO INTERIM. Server returned no 2pass-online messages.")
+    print("Either online models aren't loaded, or server only does offline. Option C blocked.")
+    return 1
+
+
+async def main() -> int:
     pcm = load_pcm_16k(WAV_PATH)
     print(f"[pcm] resampled 16k mono bytes={len(pcm)} (~{len(pcm) / 2 / TARGET_SR:.2f}s)")
 
@@ -80,10 +131,7 @@ async def main() -> int:  # noqa: C901, PLR0912, PLR0915
         "itn": False,
     }
 
-    online_msgs: list[str] = []
-    offline_msgs: list[str] = []
-    other_modes: set[str] = set()
-    all_count = 0
+    result: dict = {"online": [], "offline": [], "other": set(), "count": 0}
 
     timeout = aiohttp.ClientTimeout(total=60)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -100,51 +148,11 @@ async def main() -> int:  # noqa: C901, PLR0912, PLR0915
                 print("[ws] finished sending audio + is_speaking:false")
 
             feeder = asyncio.create_task(feed())
-
-            deadline = time.monotonic() + 20.0
-            while time.monotonic() < deadline:
-                try:
-                    msg = await ws.receive(timeout=max(0.1, deadline - time.monotonic()))
-                except asyncio.TimeoutError:
-                    break
-                if msg.type == aiohttp.WSMsgType.TEXT:
-                    all_count += 1
-                    payload = json.loads(msg.data)
-                    mode = payload.get("mode", "<none>")
-                    text = payload.get("text", "")
-                    is_final = payload.get("is_final")
-                    print(f"[recv] mode={mode!r} is_final={is_final} text={text!r}")
-                    if mode == "2pass-online":
-                        online_msgs.append(text)
-                    elif mode == "2pass-offline":
-                        offline_msgs.append(text)
-                    else:
-                        other_modes.add(str(mode))
-                    if is_final is True:
-                        break
-                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
-                    print("[ws] closed by server")
-                    break
-                elif msg.type == aiohttp.WSMsgType.ERROR:
-                    print("[ws] error frame")
-                    break
-
+            await _collect_until_final(ws, result)
             if not feeder.done():
                 feeder.cancel()
 
-    print("\n==== PROBE RESULT ====")
-    print(f"total text messages: {all_count}")
-    print(f"2pass-online (interim) messages: {len(online_msgs)} -> {online_msgs}")
-    print(f"2pass-offline (final)  messages: {len(offline_msgs)} -> {offline_msgs}")
-    if other_modes:
-        print(f"other modes seen: {sorted(other_modes)}")
-
-    if online_msgs:
-        print("\nVERDICT: SUPPORTED. Server emits 2pass-online interim -> option C is viable.")
-        return 0
-    print("\nVERDICT: NO INTERIM. Server returned no 2pass-online messages.")
-    print("Either online models aren't loaded, or server only does offline. Option C blocked.")
-    return 1
+    return _print_verdict(result)
 
 
 if __name__ == "__main__":

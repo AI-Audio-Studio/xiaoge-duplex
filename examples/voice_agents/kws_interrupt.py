@@ -260,17 +260,23 @@ class KwsTapAudioInput(TapAudioInput):
         self._spotter.push(frame)
 
 
-def _unavailable_reason(config: KwsConfig) -> str | None:  # noqa: PLR0911
-    if not config.enable:
-        return "not requested (XIAOGE_KWS_ENABLE_NATIVE)"
-    if not config.model_dir:
-        return "model dir missing (XIAOGE_KWS_MODEL_DIR)"
+def _missing_dependency() -> str | None:
     if sherpa_onnx is None:
         return "sherpa_onnx not installed"
     if np is None:
         return "numpy not installed"
     if pinyin is None or Style is None:
         return "pypinyin not installed"
+    return None
+
+
+def _unavailable_reason(config: KwsConfig) -> str | None:
+    if not config.enable:
+        return "not requested (XIAOGE_KWS_ENABLE_NATIVE)"
+    if not config.model_dir:
+        return "model dir missing (XIAOGE_KWS_MODEL_DIR)"
+    if reason := _missing_dependency():
+        return reason
     if _find_model_artifacts(Path(config.model_dir)) is None:
         return f"model files missing in {config.model_dir}"
     return None

@@ -6,6 +6,15 @@
 > 配套文档:源码级导读见 `examples/voice_agents/qwen_voice_agent_code_guide.md`(注:其中部分阈值是“本应用覆盖值”,不是框架默认值,见本文 §10 的对照表)。
 
 > 注:文中 `文件:行号` 为撰写时快照,代码已演进,**以符号名/当前代码为准**。
+>
+> **⚠ 2026-07 重构(功能不变)**:自有代码已按职责拆包,旧文件名 → 新位置:
+> `custom_audio_providers.py` → `providers/`(每后端一文件;旧名保留为 re-export shim);
+> `funasr_stream_stt.py`/`iflytek_stt.py` → `providers/stt/`(shim 保留);
+> `web_ui_agent.py`(2100 行)→ 主入口 ~300 行 + `app/`(装配层:backends 注册表/
+> switchable/listening_host/web_audio/setup_taps/session_state)+ `webpanel/`(面板:
+> server/state/bridge + static/index.html)+ `common/`(text_rules/config_utils/
+> runtime/taps 基类)。模块级全局收敛为 `app.session_state.runtime`(AppRuntime)与
+> `webpanel.state.panel`。本文行文中的旧文件引用按上表对照;文件索引见 §13(已更新)。
 
 ---
 
@@ -301,7 +310,10 @@ VAD 静默判定(min_silence_duration=0.35)
 ## 12. 二次开发指南:扩展点、风险、技术债
 
 ### 12.1 扩展点
-- **加 STT/TTS 后端**:`_STT_BACKENDS`/`_TTS_BACKENDS` + `_make_stt_backend()`/`_make_tts_backend()`(单一来源)+ HTML tab。
+- **加 STT/TTS 后端**:`providers/` 下加一个模块(继承 `stt.STT`/`tts.TTS`,复用
+  `providers.helpers`/`providers.config`),再在 `app/backends.py` 的注册表
+  (`STT_BACKENDS`/`TTS_BACKENDS`)补一行(key/tab_id/工厂)——面板 tab 由服务端按
+  注册表自动生成,`/api/{asr,tts}` 校验与构造走同一张表,**无需改 HTML**。
 - **调对话节奏**:`turn_config.py` 的 `TurnConfig`(或 `TURN_*` 环境变量)一处集中(判停/打断/endpointing/抢先/`unlikely_threshold`)。
 - **管线插桩**:`VoiceAgent` 重写 `stt_node/llm_node/tts_node/transcription_node`(已示范 `transcription_node` 与 `tts_node`)。
 - **打断策略**:KWS 的 `on_hit`、在线的 `on_text` 是注入点;停止词 `_STOP_WORDS`、热词 `_funasr_hotwords`、KWS 关键词 `XIAOGE_KWS_KEYWORDS` 均可配。
@@ -334,11 +346,17 @@ VAD 静默判定(min_silence_duration=0.35)
 
 | 文件 | 职责 |
 | --- | --- |
-| `examples/voice_agents/web_ui_agent.py` | 应用入口:会话编排、后端接入、打断装配、控制面板、指标 |
-| `examples/voice_agents/qwen_funasr_bailian_voice_agent.py` | 纯 console 版(无 Web UI)的同类 agent |
-| `examples/voice_agents/custom_audio_providers.py` | FunASR/Qwen3 STT、CosyVoice(默认)/百炼/HTTP TTS 适配器 |
-| `examples/voice_agents/funasr_stream_stt.py` | 流式主 STT(`FunASRStreamSTT`,内置 silero VAD + GAP 聚合,不过 StreamAdapter) |
-| `examples/voice_agents/iflytek_stt.py` | 讯飞 RTASR(`IFlyTekRTASR`,`STT_BACKEND=iflytek` 可选) |
+| `examples/voice_agents/web_ui_agent.py` | 主入口:VoiceAgent(人设+轮次钩子)+ entrypoint 编排(~300 行) |
+| `examples/voice_agents/app/backends.py` | STT/TTS 后端注册表+工厂+build_llm(扩展点单一来源) |
+| `examples/voice_agents/app/setup_taps.py` | entrypoint 装配函数:事件处理器/tap 链/测试仪表(SessionWiring) |
+| `examples/voice_agents/app/session_state.py` | `AppRuntime`:agent 侧共享状态(原模块级全局收敛) |
+| `examples/voice_agents/app/switchable.py` | SwitchableSTT/TTS 热切换代理 |
+| `examples/voice_agents/app/listening_host.py` | 聆听模式 host 助手(TTL/保护窗/退出尾巴/横幅) |
+| `examples/voice_agents/app/web_audio.py` | 浏览器 WebSocket 音频 I/O(WEB_AUDIO=1) |
+| `examples/voice_agents/webpanel/` | 控制面板:server(路由/处理器)、state、bridge(跨循环广播)、static/index.html |
+| `examples/voice_agents/common/` | 公共层:text_rules(停止词/附和)、config_utils(env)、runtime(指标日志)、taps(旁路基类) |
+| `examples/voice_agents/providers/` | STT/TTS 适配器包:stt/(funasr_offline·funasr_2pass·funasr_stream·qwen3·iflytek) + tts/(cosyvoice·bailian·qwen_stream·http) + config/helpers |
+| `examples/voice_agents/qwen_funasr_bailian_voice_agent.py` | 纯 console 版(无 Web UI)的同类 agent(复用 app.backends 工厂) |
 | `examples/voice_agents/kws_interrupt.py` | sherpa-onnx 本地关键词强打断 |
 | `examples/voice_agents/online_interrupt.py` | FunASR 2pass 在线早打断 |
 | `examples/voice_agents/audio_recorder.py` | 麦克风+TTS 混音录音 |
