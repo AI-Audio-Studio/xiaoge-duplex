@@ -71,9 +71,16 @@ class _QwenStreamCallback(QwenTtsRealtimeCallback):
         elif event_type in ("error", "response.error"):
             if self.audio_queue is not None:
                 self.audio_queue.put(Exception(f"Qwen TTS error: {message}"))
+            # 评审#4:报错也要置 done,否则 _run 干等 audio_done.wait(30) 整整 30s
+            # 死寂后才 TimeoutError、真实错误被丢弃(对照 _BailianCallback 的正确处理)。
+            if self.audio_done is not None:
+                self.audio_done.set()
 
     def on_close(self, close_status_code, close_msg) -> None:
-        pass  # drain handles shutdown via audio_done + queue sentinel
+        # 评审#4:连接关闭同样置 done(服务端半途断开时不再空等 30s);
+        # 音频收尾语义仍由 drain 的 audio_done + queue 哨兵闭合,不受影响。
+        if self.audio_done is not None:
+            self.audio_done.set()
 
 
 class QwenStreamingTTS(tts.TTS):
