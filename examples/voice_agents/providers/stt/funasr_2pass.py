@@ -120,6 +120,9 @@ class _FunASRStream(stt.RecognizeStream):
         self._speaking = False
 
     async def _run(self) -> None:
+        # 评审#5:框架在 APIError 后对同一实例重试 _run,实例属性 _speaking 会跨重连
+        # 残留(话中断连时为 True→重连后首个 online 不发 START_OF_SPEECH)。每次开跑重置。
+        self._speaking = False
         init_payload = funasr_init_payload(
             mode="2pass",
             wav_name="livekit-stream",
