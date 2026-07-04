@@ -16,6 +16,14 @@ common/(文本规则/配置/运行时)。
 
 from __future__ import annotations
 
+# 评审#1:.env 必须先于一切自有包 import 加载(webpanel.state/common.runtime 等在
+# import 期读 os.getenv)。下面的显式调用兼作 isort 排序块分隔,勿移动、勿合并;
+# 由此产生的"import 晚于模块级语句"对本文件整体豁免(仅 E402,行为由守护测试锁定):
+# ruff: noqa: E402
+import env_bootstrap
+
+env_bootstrap.ensure_loaded()
+
 import asyncio
 import logging
 import os
@@ -56,7 +64,6 @@ from common.text_rules import (
     normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
     should_ignore_user_turn as _should_ignore_user_turn,
 )
-from dotenv import load_dotenv
 from listening_mode import AutoDecision
 from text_sanitizer import sanitize_stream, strip_markdown
 from turn_config import TurnConfig
@@ -78,7 +85,6 @@ from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("web-ui-agent")
-load_dotenv(override=True)
 
 # 判停模型文件已离线缓存(local_files_only=True 读取),强制离线模式避免每次启动
 # 去连 huggingface.co 触发 ~30s 超时重试导致的冷启动。要更新模型时临时设为 "0"。

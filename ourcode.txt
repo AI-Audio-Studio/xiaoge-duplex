@@ -3,6 +3,7 @@ examples/voice_agents/common/config_utils.py
 examples/voice_agents/common/text_rules.py
 examples/voice_agents/common/runtime.py
 examples/voice_agents/common/taps.py
+examples/voice_agents/env_bootstrap.py
 examples/voice_agents/web_ui_agent.py
 examples/voice_agents/app/__init__.py
 examples/voice_agents/app/session_state.py
@@ -61,3 +62,4 @@ tests/test_ours_listening_mode.py
 tests/test_ours_config_utils.py
 tests/test_ours_providers_helpers.py
 tests/test_ours_runtime_log.py
+tests/test_ours_env_loading.py

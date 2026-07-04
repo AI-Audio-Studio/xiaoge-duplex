@@ -1,3 +1,12 @@
+# 评审#1:.env 必须先于一切自有包 import 加载(common.runtime 等在 import 期读 os.getenv)。
+# 显式调用兼作 isort 排序块分隔,勿移动、勿合并。注:统一经 env_bootstrap 后,本入口
+# 也变为 override=True(原为不带 override 的 load_dotenv;两入口语义就此一致)。
+# E402 对本文件整体豁免(仅此规则,行为由 tests/test_ours_env_loading.py 守护):
+# ruff: noqa: E402
+import env_bootstrap
+
+env_bootstrap.ensure_loaded()
+
 import asyncio
 import logging
 import os
@@ -18,7 +27,6 @@ from common.text_rules import (
     normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
     should_ignore_user_turn as _should_ignore_user_turn,
 )
-from dotenv import load_dotenv
 from kws_interrupt import (
     KwsConfig,
     KwsTapAudioInput,
@@ -52,8 +60,6 @@ from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("qwen-funasr-bailian-voice-agent")
-
-load_dotenv()
 
 # 判停模型文件已离线缓存（local_files_only=True 读取），强制离线模式避免每次启动
 # 去连 huggingface.co 触发 ~30s 超时重试导致的冷启动。要更新模型时临时设为 "0"。
