@@ -23,15 +23,19 @@ _log_thread: threading.Thread | None = None
 _log_thread_lock = threading.Lock()
 
 
-def _drain_pending(first: str) -> list[str]:
+def _drain_pending(first: str) -> tuple[list[str], bool]:
+    """批量取行。返回 (lines, saw_sentinel):哨兵可能夹在批次中间,必须向调用方
+    传递(评审#3:此前只 break 本地循环,哨兵被吞→写线程永不退出)。"""
     lines = [first]
+    saw_sentinel = False
     with contextlib.suppress(queue.Empty):
         while True:
             nxt = _log_queue.get_nowait()
             if nxt is None:
+                saw_sentinel = True
                 break
             lines.append(nxt)
-    return lines
+    return lines, saw_sentinel
 
 
 def _log_writer_loop() -> None:
@@ -39,19 +43,27 @@ def _log_writer_loop() -> None:
         line = _log_queue.get()
         if line is None:
             return
-        lines = _drain_pending(line)  # 批量攒一次写,降低 open/close 频率
+        lines, saw_sentinel = _drain_pending(line)  # 批量攒一次写,降低 open/close 频率
         try:
             with TURN_METRICS_LOG.open("a", encoding="utf-8") as f:
                 f.writelines(lines)
         except Exception:
             pass  # 指标日志尽力而为,绝不影响主流程
+        if saw_sentinel:
+            return  # 哨兵在批次中:写完这批立即退出
 
 
 def _flush_log_at_exit() -> None:
-    with contextlib.suppress(Exception):
-        _log_queue.put_nowait(None)
-        if _log_thread is not None:
-            _log_thread.join(timeout=2.0)
+    """atexit 排空。最坏耗时 0.3s(队列恒满,放弃) 或 0.3+1.5=1.8s(磁盘极慢),
+    均严格小于修复前的固定 2s(复审 S2-3:修"固定卡 2s"不得引入"最坏卡更久")。"""
+    try:
+        _log_queue.put(None, timeout=0.3)
+    except Exception:
+        return  # 队列恒满(磁盘卡死):放弃排空,不再等待
+    t = _log_thread
+    if t is not None:
+        with contextlib.suppress(Exception):
+            t.join(timeout=1.5)
 
 
 def _ensure_log_thread() -> None:
