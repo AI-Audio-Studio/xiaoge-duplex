@@ -3,7 +3,8 @@
 小歌"只听不插":聆听期 ASR 照常,但文本进临时缓冲、不进上下文、不回复。
 进入:命令词 / 自动检测;退出:命令词 / 通话键(host 调 force_exit)。
 
-本模块**只持状态/缓冲/决策,纯同步、无 asyncio / 无 I/O、不 import 工程模块**。
+本模块**只持状态/缓冲/决策,纯同步、无 asyncio / 无 I/O**(仅依赖 common.config_utils
+的纯 env 解析,无工程耦合)。
 host 喂事件(KWS 命中 / 每轮文本 / 通话键)、按返回值动作;asyncio 定时器、session.say、
 broadcast、turn_ctx 注入全在 host。**线程安全靠 host 把所有变更串行到 agent 循环**
 (纯状态机 ≠ 线程安全)。
@@ -12,9 +13,10 @@ broadcast、turn_ctx 注入全在 host。**线程安全靠 host 把所有变更�
 from __future__ import annotations
 
 import difflib
-import os
 from dataclasses import dataclass, field
 from enum import Enum
+
+from common.config_utils import env_bool, env_float, env_int, env_str
 
 _DEFAULT_COMMAND = "小歌聆听模式"  # 主进入命令词(显示用)
 _DEFAULT_COMMAND_ALIASES = ("小歌进入聆听模式", "聆听模式")  # 其他进入命令词(同样进入聆听)
@@ -44,32 +46,6 @@ def _norm(s: str) -> str:
     return "".join(ch for ch in str(s or "") if ch.isalnum()).casefold()
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    if v is None or not v.strip():
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int((os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float((os.getenv(name) or "").strip() or default)
-    except ValueError:
-        return default
-
-
-def _env_str(name: str, default: str) -> str:
-    v = os.getenv(name)
-    return default if v is None else v  # 允许空串(=不出声),故不 strip 掉空
-
-
 @dataclass
 class ListeningController:
     # 配置
@@ -94,25 +70,26 @@ class ListeningController:
 
     @classmethod
     def from_environment(cls) -> ListeningController:
-        cmd_env = _env_str("XIAOGE_LISTEN_COMMAND", "").strip()  # 多个进入命令词用 | 分隔
+        cmd_env = env_str("XIAOGE_LISTEN_COMMAND", "").strip()  # 多个进入命令词用 | 分隔
         if cmd_env:
             cmds = [c.strip() for c in cmd_env.split("|") if c.strip()] or [_DEFAULT_COMMAND]
             command_keyword, command_aliases = cmds[0], tuple(cmds[1:])
         else:
             command_keyword, command_aliases = _DEFAULT_COMMAND, _DEFAULT_COMMAND_ALIASES
+        # bool 用 blank_is_default:本模块历来把"设了但为空"当"没设"(与多数模块的空串=假不同)。
         return cls(
-            enabled=_env_bool("XIAOGE_LISTEN_ENABLE", False),
+            enabled=env_bool("XIAOGE_LISTEN_ENABLE", False, blank_is_default=True),
             command_keyword=command_keyword,
             command_aliases=command_aliases,
-            wake_keyword=_env_str("XIAOGE_LISTEN_WAKE", _DEFAULT_WAKE).strip() or _DEFAULT_WAKE,
-            auto_enabled=_env_bool("XIAOGE_LISTEN_AUTO_ENABLE", True),
-            auto_turns=_env_int("XIAOGE_LISTEN_AUTO_TURNS", 3),
-            auto_min_chars=_env_int("XIAOGE_LISTEN_AUTO_MINCHARS", 20),
-            temp_ttl_s=_env_float("XIAOGE_LISTEN_TEMP_TTL", 120.0),
-            min_organize_chars=_env_int("XIAOGE_LISTEN_MIN_ORGANIZE_CHARS", 15),
-            organize_enabled=_env_bool("XIAOGE_LISTEN_ORGANIZE", False),
-            drain_s=_env_float("XIAOGE_LISTEN_DRAIN", 2.5),
-            enter_notice=_env_str("XIAOGE_LISTEN_ENTER_NOTICE", _DEFAULT_NOTICE),
+            wake_keyword=env_str("XIAOGE_LISTEN_WAKE", _DEFAULT_WAKE).strip() or _DEFAULT_WAKE,
+            auto_enabled=env_bool("XIAOGE_LISTEN_AUTO_ENABLE", True, blank_is_default=True),
+            auto_turns=env_int("XIAOGE_LISTEN_AUTO_TURNS", 3),
+            auto_min_chars=env_int("XIAOGE_LISTEN_AUTO_MINCHARS", 20),
+            temp_ttl_s=env_float("XIAOGE_LISTEN_TEMP_TTL", 120.0),
+            min_organize_chars=env_int("XIAOGE_LISTEN_MIN_ORGANIZE_CHARS", 15),
+            organize_enabled=env_bool("XIAOGE_LISTEN_ORGANIZE", False, blank_is_default=True),
+            drain_s=env_float("XIAOGE_LISTEN_DRAIN", 2.5),
+            enter_notice=env_str("XIAOGE_LISTEN_ENTER_NOTICE", _DEFAULT_NOTICE),
         )
 
     # ── 供 KWS 词表合并 ──────────────────────────────────────────────────────

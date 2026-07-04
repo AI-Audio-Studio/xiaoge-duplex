@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+from common.taps import TapAudioInput, TapAudioOutput
 
 from livekit import rtc
 from livekit.agents.voice import io
@@ -334,38 +335,19 @@ class TestRecorder:
             pass
 
 
-class _RecInput(io.AudioInput):
+class _RecInput(TapAudioInput):
     def __init__(self, source: io.AudioInput, rec: TestRecorder) -> None:
-        super().__init__(label="test-rec-input", source=source)
+        super().__init__(source, label="test-rec-input")
         self._rec = rec
 
-    async def __anext__(self) -> rtc.AudioFrame:
-        frame = await super().__anext__()
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._rec.record_user(frame)
-        return frame
 
 
-class _RecOutput(io.AudioOutput):
+class _RecOutput(TapAudioOutput):
     def __init__(self, next_output: io.AudioOutput, rec: TestRecorder) -> None:
-        super().__init__(
-            label="test-rec-output",
-            next_in_chain=next_output,
-            sample_rate=next_output.sample_rate,
-            capabilities=io.AudioOutputCapabilities(pause=next_output.can_pause),
-        )
+        super().__init__(next_output, label="test-rec-output")
         self._rec = rec
 
-    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
-        if self.next_in_chain:
-            await self.next_in_chain.capture_frame(frame)
-        await super().capture_frame(frame)
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._rec.record_assistant(frame)
-
-    def flush(self) -> None:
-        super().flush()
-        if self.next_in_chain:
-            self.next_in_chain.flush()
-
-    def clear_buffer(self) -> None:
-        if self.next_in_chain:
-            self.next_in_chain.clear_buffer()

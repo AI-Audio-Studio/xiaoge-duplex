@@ -11,65 +11,10 @@ OnlineInterruptConfig / LiveTranscriptConfig 的惯例。
 
 from __future__ import annotations
 
-import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
-logger = logging.getLogger("turn-config")
-
-
-def _f(name: str, default: float) -> float:
-    v = os.getenv(name)
-    if v is None or not v.strip():
-        return default
-    try:
-        return float(v)
-    except ValueError:
-        logger.warning("bad %s=%r, using default %s", name, v, default)
-        return default
-
-
-def _i(name: str, default: int) -> int:
-    v = os.getenv(name)
-    if v is None or not v.strip():
-        return default
-    try:
-        return int(v)
-    except ValueError:
-        logger.warning("bad %s=%r, using default %s", name, v, default)
-        return default
-
-
-def _b(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _f_opt(name: str) -> float | None:
-    """可选 float:未设/空 → None(用模型默认值)。"""
-    v = os.getenv(name)
-    if v is None or not v.strip():
-        return None
-    try:
-        return float(v)
-    except ValueError:
-        logger.warning("bad %s=%r, ignoring", name, v)
-        return None
-
-
-def _pair(name: str, default: tuple[float, float]) -> tuple[float, float]:
-    v = os.getenv(name)
-    if v is None or not v.strip():
-        return default
-    try:
-        a, b = (x.strip() for x in v.split(","))
-        return (float(a), float(b))
-    except Exception:
-        logger.warning("bad %s=%r (want 'a,b'), using default %s", name, v, default)
-        return default
+from common.config_utils import env_bool, env_float, env_float_opt, env_int, env_pair
 
 
 @dataclass
@@ -94,14 +39,14 @@ class TurnConfig:
     @classmethod
     def from_env(cls) -> TurnConfig:
         return cls(
-            vad_min_silence_s=_f("TURN_VAD_MIN_SILENCE", 0.35),
-            endpoint_min_delay_s=_f("TURN_ENDPOINT_MIN_DELAY", 0.3),
-            endpoint_max_delay_s=_f("TURN_ENDPOINT_MAX_DELAY", 0.6),
-            preemptive_tts=_b("TURN_PREEMPTIVE_TTS", True),
-            interruption_min_words=_i("TURN_INTR_MIN_WORDS", 3),
-            interruption_min_duration_s=_f("TURN_INTR_MIN_DURATION", 2.0),
-            backchannel_boundary=_pair("TURN_INTR_BACKCHANNEL", (1.8, 3.5)),
-            unlikely_threshold=_f_opt("TURN_UNLIKELY_THRESHOLD"),
+            vad_min_silence_s=env_float("TURN_VAD_MIN_SILENCE", 0.35),
+            endpoint_min_delay_s=env_float("TURN_ENDPOINT_MIN_DELAY", 0.3),
+            endpoint_max_delay_s=env_float("TURN_ENDPOINT_MAX_DELAY", 0.6),
+            preemptive_tts=env_bool("TURN_PREEMPTIVE_TTS", True),
+            interruption_min_words=env_int("TURN_INTR_MIN_WORDS", 3),
+            interruption_min_duration_s=env_float("TURN_INTR_MIN_DURATION", 2.0),
+            backchannel_boundary=env_pair("TURN_INTR_BACKCHANNEL", (1.8, 3.5)),
+            unlikely_threshold=env_float_opt("TURN_UNLIKELY_THRESHOLD"),
         )
 
     def turn_handling(self, turn_detection: Any) -> dict[str, Any]:
