@@ -96,10 +96,8 @@
 6. ✅ 本表回填完整(C1~C6 ↔ 评审 #1/#2/#3/#9/#4/#5)。
 
 **WP-1/WP-2 全部落地,分支链就绪,可交合并评审(按本表核销);P2 各项按 §B WP-4 合并后执行。**
-| `4fe601d` | #3(C3) | _drain_pending 返回 saw_sentinel(写完本批即退);atexit 阻塞 put(0.3s)+join(1.5s),失败即放弃——最坏 1.8s < 修复前固定 2s | 新增"行+哨兵同批"单测绿;评审复现脚本 A/B 复验:2.004s+线程泄漏 → 0.000s 干净退出 |
-| `30cfec4` | #9(C4) | setup_taps 503→417(在线打断策略拆出 app/online_interrupt_host.py);行数门禁进 make lint-ours(scripts/check_line_counts.py,>500错/>400警);5 处点名长行拆行;BASELINE 勘误注明 | 门禁实跑:无 >500 文件(3 个 400~500 警告);87 单测全绿;env 守护测试同步指向新模块 |
-| `b115c54` | #4(C5) | error/response.error 与 on_close 补 audio_done.set()(照抄 Bailian) | 行为抽查:error/on_close 后 done 置位断言通过;lint 绿 |
-| `40406e7` | #5(C6) | _run 开头重置 _speaking(防跨框架重连残留) | 源码断言 + lint 绿;类为 A/B 备用未接线 |
+
+*(编辑备注:本行下方原有 4 行 C3~C6 的重复表行,系回填时的编辑残留,合并评审时由评审组删除——内容与上表 83~88 行完全重复,无信息损失。)*
 
 ---
 
@@ -126,6 +124,48 @@
 
 > 评审组签署:三轮评审-回应闭环,10 项发现全部形成终稿处置,无遗留争议。
 > 本确认为评审阶段最后一笔;下一次评审组介入即合并评审(按 §D 核销)。
+
+---
+
+## §F 合并评审核销(2026-07-04,评审组)
+
+**结论:§D 六笔全部核销通过,合并评审通过,分支链可交合并;P2 各项按 §B WP-4
+合并后执行。** 评审组仅改动本评审文件(删除 §D 表后 4 行编辑残留 + 追加本节),
+未改动任何其他文件。
+
+### F1. 逐笔核销(每笔均独立复核,非采信 §D 自述)
+
+| 提交 | 评审编号 | 核销方式 | 结果 |
+|---|---|---|---|
+| `f6a1351` | #1(C1) | diff 逐行对照终稿:`env_bootstrap` 微模块(XIAOGE_DOTENV 钩子)置于两入口 `__future__` 之后首个自有 import,原 `load_dotenv` 调用点删除,E402 整文件豁免仅此规则且有注释;守护测试读源码复核(子进程+干净环境+cwd 远离仓库根+四哨兵断言,设计合格) | ✅ |
+| `afd5622` | #2(C2) | diff 逐行对照 T1 终稿顺序:摘 state(None/False)→close(old)(suppress)→归还(仅一次)→冷建→重放,外层清理 None 安全;**实战证据抽证**:`runs/20260704_190724`、`runs/20260704_191528` 的 debug.log 各含一条 `cosyvoice connection stale; rebuilding cold and replaying 2 sentence(s)`——恢复路径真实命中且无后续错误 | ✅ |
+| `4fe601d` | #3(C3) | diff 逐行核对:`_drain_pending` 返回 `(lines, saw_sentinel)`,writer 写完批次即退;atexit `put(timeout=0.3)` 失败即放弃不 join、成功 `join(1.5)`,最坏 1.8s < 2s 符合 S2-3 上限约束 | ✅ |
+| `30cfec4` | #9(C4) | 实测 `wc -l`:setup_taps 409 行、online_interrupt_host 119 行;门禁脚本**实跑** exit 0(0 超标,3 个 400~500 软目标警告);BASELINE 勘误 diff 核对(注明原因,符合裁定) | ✅ |
+| `b115c54` | #4(C5) | diff 核对:error/response.error 分支与 on_close 均补 `audio_done.set()`,与 `_BailianCallback` 处理对齐 | ✅ |
+| `40406e7` | #5(C6) | diff 核对:`_run` 开头 `self._speaking = False`,一行,位置正确 | ✅ |
+
+### F2. 全局验收独立复验(对应 §C)
+
+1. ✅ `ruff check --config ruff-ours.toml`(ourcode 清单)**实跑 All checks passed**;
+   行数门禁**实跑** 0 超标;noqa 审计:自有代码**无 C901/PLR09 复杂度豁免**,新增
+   E402 豁免仅两个入口文件(C1 已声明),其余为既有条目——与 §C-1"复杂度豁免 0"一致。
+2. ✅ `tests/test_ours_*.py` 本机**实跑 87 passed**(82 存量 + C1×1 + C2×3 + C3×1)。
+3. ⚙ §C-3(直接 python 启动 8787 实测)与 §C-4(回放 KPI)为运行时自证,评审组以
+   旁证采信:run 目录存在且含完整产物(wav/timeline/turn_kpis),C2 恢复命中日志
+   实文核对(见 F1);采信合理,不再要求重跑。
+4. ✅ 工程改动范围核查:6 个代码提交仅触及评审定稿点名的文件;`git status` 干净
+   (仅评审前既有的未跟踪 zip)。
+
+### F3. 两处文档级备注(不阻塞,已处理/移交)
+
+- §D 表后 4 行 C3~C6 重复表行为编辑残留,评审组已删除并留备注,无信息损失;
+- §D-C4 行写"503→**417**",实测当前 setup_taps 为 **409** 行(417 是 turn_metrics.py
+  的行数,疑为笔误)——数字向好方向偏差,不影响结论,不要求改。
+
+> 合并评审签署:WP-1(P0×4)+ WP-2(P1×2)全部落地且逐笔核销通过,"先红后绿"
+> 承诺在 C2 提交说明中兑现(旧顺序实测双重归还 2 次)。分支链
+> `phase0→…→phase5-wrapup` 就绪,可合并;P2-a~f 与清理 7 立项按 §B WP-4 在合并后
+> 执行,届时无须评审组前置介入,仅按各自验收条目自证即可。
 
 ---
 
