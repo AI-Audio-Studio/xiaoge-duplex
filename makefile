@@ -80,6 +80,9 @@ lint-ours: ## Lint OUR code against project guidelines (docs/project/CODE_GUIDEL
 		echo "$(BOLD)$(RED)✗ 违反 docs/project/CODE_GUIDELINES.md;请重构,或在 ruff-ours.toml 临时挂账并登记待办$(RESET)"; \
 		exit 1; \
 	fi
+	@uv run python scripts/check_line_counts.py && \
+		echo "$(BOLD)$(GREEN)✓ 文件行数门禁通过(硬上限500,评审#9)$(RESET)" || \
+		{ echo "$(BOLD)$(RED)✗ 有文件超 500 行硬上限(CODE_GUIDELINES §2);请拆分$(RESET)"; exit 1; }
 
 type-check: ## Run mypy type checker
 	@echo "$(BOLD)$(CYAN)Running type checker...$(RESET)"

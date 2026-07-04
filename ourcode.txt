@@ -12,6 +12,7 @@ examples/voice_agents/app/backends.py
 examples/voice_agents/app/listening_host.py
 examples/voice_agents/app/web_audio.py
 examples/voice_agents/app/setup_taps.py
+examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
 examples/voice_agents/webpanel/state.py
 examples/voice_agents/webpanel/bridge.py
@@ -64,3 +65,4 @@ tests/test_ours_providers_helpers.py
 tests/test_ours_runtime_log.py
 tests/test_ours_env_loading.py
 tests/test_ours_cosyvoice_recovery.py
+scripts/check_line_counts.py

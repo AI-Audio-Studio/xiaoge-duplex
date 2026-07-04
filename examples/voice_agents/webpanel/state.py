@@ -35,7 +35,8 @@ BUSY_HTML = f"""\
 <title>{BUSY_MESSAGE}</title>
 <style>
 html,body{{height:100%;margin:0}}
-body{{display:flex;align-items:center;justify-content:center;background:#fff7f3;color:#9a3412;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
+body{{display:flex;align-items:center;justify-content:center;background:#fff7f3;
+color:#9a3412;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
 .busy{{font-size:42px;font-weight:800;line-height:1.3;text-align:center;padding:32px}}
 @media (max-width:640px){{.busy{{font-size:30px}}}}
 </style>

@@ -218,7 +218,8 @@ def _log_user_metrics(turn_trace: dict[str, float], item: ChatMessage) -> None:
     line = (
         "TURN_USER "
         f"text={item.text_content!r} "
-        f"speech={_ms(item.metrics.get('started_speaking_at'))}->{_ms(item.metrics.get('stopped_speaking_at'))} "
+        f"speech={_ms(item.metrics.get('started_speaking_at'))}"
+        f"->{_ms(item.metrics.get('stopped_speaking_at'))} "
         f"transcription_delay={_ms(item.metrics.get('transcription_delay'))} "
         f"end_of_turn_delay={_ms(item.metrics.get('end_of_turn_delay'))} "
         f"on_user_turn_completed_delay={_ms(item.metrics.get('on_user_turn_completed_delay'))}"
@@ -241,7 +242,8 @@ def _log_assistant_metrics(turn_trace: dict[str, float], item: ChatMessage) -> N
         f"playback_latency={_ms(item.metrics.get('playback_latency'))} "
         f"e2e_latency={_ms(item.metrics.get('e2e_latency'))} "
         f"wall_clock_e2e={_ms(wall_clock_e2e)} "
-        f"speaking={_ms(item.metrics.get('started_speaking_at'))}->{_ms(item.metrics.get('stopped_speaking_at'))}"
+        f"speaking={_ms(item.metrics.get('started_speaking_at'))}"
+        f"->{_ms(item.metrics.get('stopped_speaking_at'))}"
     )
     logger.info(line)
     _append_turn_log(line)

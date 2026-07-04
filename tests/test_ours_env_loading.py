@@ -1,7 +1,7 @@
 """import 顺序守护测试(评审#1 / 复审 S2-1)。
 
-锁定属性:入口模块加载完成后,`webpanel.state` / `common.runtime` / `app.setup_taps`
-的模块级常量必须反映 **.env** 的值——即 `env_bootstrap`(load_dotenv)先于一切自有包
+锁定属性:入口模块加载完成后,`webpanel.state` / `common.runtime` /
+`app.online_interrupt_host` 的模块级常量必须反映 **.env** 的值——即 `env_bootstrap`(load_dotenv)先于一切自有包
 import 执行。若未来有人把自有包 import 挪到 bootstrap 之上,本测试失败。
 
 方法:子进程 + 干净环境(剔除哨兵变量)+ `XIAOGE_DOTENV` 指向仅含哨兵值的临时 .env,
@@ -29,9 +29,9 @@ _SENTINELS = {
 _PROBE = (
     "import sys; sys.path.insert(0, {agent_dir!r}); "
     "import web_ui_agent; "  # 入口 import(触发 env_bootstrap → 自有包链)
-    "import webpanel.state as ws, common.runtime as cr, app.setup_taps as st; "
+    "import webpanel.state as ws, common.runtime as cr, app.online_interrupt_host as oh; "
     "print(ws.WEB_AUDIO); print(ws.WEB_PORT); "
-    "print(cr.TURN_METRICS_LOG); print(st.ONLINE_VAD_GRACE)"
+    "print(cr.TURN_METRICS_LOG); print(oh.ONLINE_VAD_GRACE)"
 )
 
 

@@ -39,6 +39,7 @@ from app.listening_host import (
     listen_interrupt_blocked,
     listen_tail_pending,
 )
+from app.online_interrupt_host import setup_online_interrupt
 from app.session_state import runtime
 from app.setup_taps import (
     SessionWiring,
@@ -46,7 +47,6 @@ from app.setup_taps import (
     setup_kws,
     setup_live_transcript,
     setup_mute_gate,
-    setup_online_interrupt,
     setup_recording,
     setup_scenario_injection,
     setup_stt,
