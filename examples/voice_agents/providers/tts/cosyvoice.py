@@ -268,11 +268,19 @@ class _CosyVoiceSynthesizeStream(tts.SynthesizeStream):
             "cosyvoice connection stale; rebuilding cold and replaying %d sentence(s)",
             len(sentences),
         )
-        await asyncio.to_thread(self._tts._release_synth, state["synth"], state["pooled"])
-        state["synth"] = await asyncio.to_thread(self._tts._build_synth, callback)
-        state["pooled"] = False
+        # T1 终稿顺序:摘 state → close 旧 → 归还旧 → 冷建 → 重放。
+        # 摘除后外层清理只见安全态(None/False,suppress 路径 None 安全)——防双重归还的
+        # 解药是"先摘除";close 先于归还是 S2-2b 双保险(不赌池 renew 窗口);旧对象责任
+        # 在进入可取消的冷建窗口**之前**全部了结,取消路径零收尾。
+        old, old_pooled = state["synth"], state["pooled"]
+        state["synth"], state["pooled"] = None, False
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(old.close)  # 幂等,先关死
+        await asyncio.to_thread(self._tts._release_synth, old, old_pooled)  # 真归还,仅此一次
+        fresh = await asyncio.to_thread(self._tts._build_synth, callback)
+        state["synth"] = fresh
         for s in sentences:
-            await asyncio.to_thread(state["synth"].streaming_call, s)
+            await asyncio.to_thread(fresh.streaming_call, s)
 
     async def _call_with_recovery(
         self, state: dict, callback: _CosyVoiceCallback, sent: list[str], text: str

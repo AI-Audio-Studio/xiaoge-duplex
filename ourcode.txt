@@ -63,3 +63,4 @@ tests/test_ours_config_utils.py
 tests/test_ours_providers_helpers.py
 tests/test_ours_runtime_log.py
 tests/test_ours_env_loading.py
+tests/test_ours_cosyvoice_recovery.py
