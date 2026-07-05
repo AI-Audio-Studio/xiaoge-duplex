@@ -17,6 +17,7 @@
 | 判停 & STT（turn-taking / STT） | **[design/turn-stt/TURN_RULES.md](design/turn-stt/TURN_RULES.md)（判停规则速查）** · [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
+| 服务器并发改造 | [design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（分析与设计 v1,待评审） |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |
