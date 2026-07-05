@@ -19,6 +19,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.config_utils import env_bool, env_float, env_int
+from common.taps import TapAudioInput
+
 from livekit import rtc
 from livekit.agents.voice import io
 
@@ -98,14 +101,17 @@ class KwsConfig:
             or DEFAULT_KEYWORDS
         )
         return cls(
-            enable=_parse_bool(os.getenv("XIAOGE_KWS_ENABLE_NATIVE", "1")),
+            enable=env_bool("XIAOGE_KWS_ENABLE_NATIVE", True),
             model_dir=(os.getenv("XIAOGE_KWS_MODEL_DIR", "").strip() or _default_model_dir()),
             keywords=keywords,
             keywords_file=os.getenv("XIAOGE_KWS_KEYWORDS_FILE", "").strip() or None,
-            keywords_score=_parse_float(os.getenv("XIAOGE_KWS_KEYWORDS_SCORE"), 1.0),
-            keywords_threshold=_parse_float(os.getenv("XIAOGE_KWS_KEYWORDS_THRESHOLD"), 0.18),
-            num_trailing_blanks=_parse_int(os.getenv("XIAOGE_KWS_NUM_TRAILING_BLANKS"), 1),
-            debounce_ms=_parse_int(os.getenv("XIAOGE_KWS_DEBOUNCE_MS"), 800),
+            # 降耗旋钮(RESOURCE_REPORT §5-1):sherpa/onnxruntime 解码线程数。默认 2 与
+            # 既有行为一致;实测 KWS 常驻 ~3 核,压到 1 预期显著降耗,命中延迟需实测确认。
+            num_threads=env_int("XIAOGE_KWS_NUM_THREADS", 2),
+            keywords_score=env_float("XIAOGE_KWS_KEYWORDS_SCORE", 1.0),
+            keywords_threshold=env_float("XIAOGE_KWS_KEYWORDS_THRESHOLD", 0.18),
+            num_trailing_blanks=env_int("XIAOGE_KWS_NUM_TRAILING_BLANKS", 1),
+            debounce_ms=env_int("XIAOGE_KWS_DEBOUNCE_MS", 800),
         )
 
 
@@ -243,34 +249,34 @@ class NativeKwsSpotter:
         return hit
 
 
-class KwsTapAudioInput(io.AudioInput):
-    """透传包装：每帧原样返回给管线，同时旁路喂给 KWS。
-
-    依赖 io.AudioInput 基类：__anext__ / on_attached / on_detached 都委托给 source，
-    所以 session.input.audio setter 的 detach->attach 不会切断底层输入。
-    """
+class KwsTapAudioInput(TapAudioInput):
+    """透传包装：每帧原样返回给管线，同时旁路喂给 KWS。"""
 
     def __init__(self, source: io.AudioInput, spotter: NativeKwsSpotter) -> None:
-        super().__init__(label="kws-tap", source=source)
+        super().__init__(source, label="kws-tap")
         self._spotter = spotter
 
-    async def __anext__(self) -> rtc.AudioFrame:
-        frame = await super().__anext__()
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._spotter.push(frame)
-        return frame
 
 
-def _unavailable_reason(config: KwsConfig) -> str | None:  # noqa: PLR0911
-    if not config.enable:
-        return "not requested (XIAOGE_KWS_ENABLE_NATIVE)"
-    if not config.model_dir:
-        return "model dir missing (XIAOGE_KWS_MODEL_DIR)"
+def _missing_dependency() -> str | None:
     if sherpa_onnx is None:
         return "sherpa_onnx not installed"
     if np is None:
         return "numpy not installed"
     if pinyin is None or Style is None:
         return "pypinyin not installed"
+    return None
+
+
+def _unavailable_reason(config: KwsConfig) -> str | None:
+    if not config.enable:
+        return "not requested (XIAOGE_KWS_ENABLE_NATIVE)"
+    if not config.model_dir:
+        return "model dir missing (XIAOGE_KWS_MODEL_DIR)"
+    if reason := _missing_dependency():
+        return reason
     if _find_model_artifacts(Path(config.model_dir)) is None:
         return f"model files missing in {config.model_dir}"
     return None
@@ -316,25 +322,3 @@ def _phrase_to_keyword_line(phrase: str) -> str:
         if final:
             tokens.append(final)
     return f"{' '.join(tokens)} @{clean}"
-
-
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _parse_int(value: str | None, default: int) -> int:
-    if not value:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_float(value: str | None, default: float) -> float:
-    if not value:
-        return default
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default

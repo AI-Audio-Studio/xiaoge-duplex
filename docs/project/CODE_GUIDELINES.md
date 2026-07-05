@@ -12,11 +12,19 @@
 
 > 母体与我们的代码在 `examples/voice_agents/` 下**交织**,且整库由同一账号导入(git 作者无法区分),所以范围只能用**显式清单**界定。
 
-**权威清单 = `ourcode.txt`**(单一来源,纯路径一行一个;`makefile` 与 `ci.yml` 都读它)。下面镜像一份便于阅读(含职责标注;改动以 `ourcode.txt` 为准):
+**权威清单 = `ourcode.txt`**(单一来源,纯路径一行一个;`makefile` 与 `ci.yml` 都读它)。下面镜像一份便于阅读(含职责标注;改动以 `ourcode.txt` 为准;2026-07 重构后为包结构):
 
 ```
 examples/voice_agents/
-  web_ui_agent.py            主应用(入口)
+  web_ui_agent.py            主入口(VoiceAgent + entrypoint 编排,~300 行)
+  common/                    公共层:text_rules(停止词/附和判定)、config_utils(env 解析)、
+                             runtime(stdio/指标日志)、taps(音频旁路基类)
+  providers/                 STT/TTS 适配器包:config/helpers + stt/(funasr_offline·
+                             funasr_2pass·funasr_stream·qwen3·iflytek) + tts/(cosyvoice·
+                             bailian·qwen_stream·http)
+  app/                       装配层:session_state(AppRuntime)、switchable、backends
+                             (后端注册表+工厂)、listening_host、web_audio、setup_taps
+  webpanel/                  控制面板:server/state/bridge + static/index.html
   listening_mode.py          聆听模式状态机
   mute_gate.py               真关麦门
   text_sanitizer.py          LLM 文本净化
@@ -24,17 +32,16 @@ examples/voice_agents/
   turn_config.py             判停参数集中
   kws_interrupt.py           KWS 强打断
   online_interrupt.py        在线 2pass 抢断
-  funasr_stream_stt.py       FunASR 流式主 STT
-  iflytek_stt.py             讯飞 RTASR
-  custom_audio_providers.py  STT/TTS 适配器
   audio_recorder.py          正常模式录音
   test_recorder.py           测试多轨录音
   event_timeline.py          测试时间线
   turn_metrics.py            判停 KPI
   scripted_audio.py          录音回放注入
   probe_funasr_2pass.py      FunASR 探针
+  custom_audio_providers.py / funasr_stream_stt.py / iflytek_stt.py   兼容 shim(re-export)
   qwen_funasr_bailian_voice_agent.py / qwen_gateway_console_agent.py
   kimi_console_agent.py / nvidia_test.py    控制台 Agent(本项目)
+tests/test_ours_*.py         自有代码行为锁定单测
 ```
 
 **新增自有文件时**:把路径加进 `ourcode.txt`(一行一个),即自动纳入约束。
@@ -69,23 +76,18 @@ examples/voice_agents/
 - **版本一致**:`pyproject.toml` 钉 `ruff==0.15.18`(与 CI 同版本)并 `uv lock` 固化,避免"本地绿 / CI 红"。
 - **隔离**:全仓 `make check`/CI 的宽松 `ruff check` **不变**,母体 `livekit-*` 照常通过;加严只作用于 `ourcode.txt` 内文件。
 
-## 5. 历史挂账与棘轮(重构待办)
-以下既有文件当前超标,先挂账让门禁为绿、**只拦新增违规**;重构达标后撤挂账即收紧。
+## 5. 历史挂账与棘轮(已清零)
 
-**挂账粒度(A1)**:在**具体超标函数的 `def` 行**打 `# noqa: <规则>`(如 `# noqa: C901,PLR0915`),**不用整文件 `per-file-ignores`**——整文件豁免会连同文件内**新写**的超标函数一起放过("只拦新增"对挂账文件失效);函数级 noqa 才能让同文件新函数仍受检。
+**状态(2026-07 重构后):挂账台账清零。** 原 6 文件 12 处函数级 `# noqa`(C901/PLR09xx)
+已随分阶段重构全部摘除(阶段2 拆 providers/ 摘 6 处、阶段3 拆 app//webpanel/ 摘 3 处、
+阶段5 摘 kws/turn_metrics/probe 3 处),`ruff check --config ruff-ours.toml $(cat ourcode.txt)`
+在**无任何豁免**的情况下为绿。
 
-**集中台账**:函数级 noqa 散落各处,故保留此表作"一眼看全欠债"的人读清单,并以 `grep -rn noqa $(cat ourcode.txt)` 兜底审计。
+**棘轮规则(仍然有效)**:此后自有代码新增 `# noqa: C901/PLR09xx` 须在 PR 中说明理由并
+登记到本节;审计命令 `grep -rn noqa $(cat ourcode.txt)`(当前应为 0 条复杂度豁免)。
 
-| 文件 | 挂账规则 | 优先级 |
-|---|---|---|
-| `web_ui_agent.py` | C901, PLR0915, PLR0912 | **高**(2100+ 行"上帝文件",建议按职责拆:Web 面板/事件钩子/STT-TTS 构建/tap 装配) |
-| `custom_audio_providers.py` | C901, PLR0913 | 中(多 Provider,可拆文件) |
-| `probe_funasr_2pass.py` | C901, PLR0912, PLR0915 | 低(探针工具) |
-| `kws_interrupt.py` | PLR0911 | 低(单函数 return 偏多) |
-| `turn_metrics.py` | C901 | 低 |
-| `qwen_funasr_bailian_voice_agent.py` | C901, PLR0915 | 低(控制台 Agent) |
-
-**收紧(ratchet)**:重构某函数达标后删其 `# noqa` → CI 继续绿,该处此后不允许回退。
+**挂账粒度(如再出现)**:在**具体超标函数的 `def` 行**打 `# noqa: <规则>`,**不用整文件
+`per-file-ignores`**——整文件豁免会连同文件内新写的超标函数一起放过。
 
 ## 6. 一条总纲
 **内聚 > 数字。** 为凑行数把一段高内聚逻辑硬切成多个只调用一次的碎函数,比一个 60 行的清晰函数更糟。阈值用来"触发一次审视",不是用来"达标交差"。

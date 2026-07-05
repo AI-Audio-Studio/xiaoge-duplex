@@ -29,14 +29,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from common.config_utils import env_bool as _env_bool
+
 logger = logging.getLogger("live-transcript")
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    v = os.getenv(name)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass

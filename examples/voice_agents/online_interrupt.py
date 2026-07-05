@@ -22,6 +22,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import aiohttp
+from common.config_utils import env_bool, env_int
+from common.taps import TapAudioInput
 
 from livekit import rtc
 from livekit.agents.voice import io
@@ -41,10 +43,10 @@ class OnlineInterruptConfig:
     @classmethod
     def from_env(cls) -> OnlineInterruptConfig:
         return cls(
-            enable=_parse_bool(os.getenv("XIAOGE_ONLINE_INTERRUPT_ENABLE", "1")),
+            enable=env_bool("XIAOGE_ONLINE_INTERRUPT_ENABLE", True),
             ws_url=os.getenv("FUNASR_WS_URL", "").strip() or None,
-            verify_ssl=_parse_bool(os.getenv("FUNASR_VERIFY_SSL", "0")),
-            min_chars=_parse_int(os.getenv("XIAOGE_ONLINE_INTERRUPT_MIN_CHARS"), 3),
+            verify_ssl=env_bool("FUNASR_VERIFY_SSL", False),
+            min_chars=env_int("XIAOGE_ONLINE_INTERRUPT_MIN_CHARS", 3),
         )
 
 
@@ -187,27 +189,12 @@ class OnlineAsrTap:
         raise ConnectionError("online interrupt websocket closed")
 
 
-class OnlineTapAudioInput(io.AudioInput):
+class OnlineTapAudioInput(TapAudioInput):
     """透传包装：每帧原样返回给管线，同时旁路喂给 online 打断流。"""
 
     def __init__(self, source: io.AudioInput, tap: OnlineAsrTap) -> None:
-        super().__init__(label="online-interrupt-tap", source=source)
+        super().__init__(source, label="online-interrupt-tap")
         self._tap = tap
 
-    async def __anext__(self) -> rtc.AudioFrame:
-        frame = await super().__anext__()
+    def _on_frame(self, frame: rtc.AudioFrame) -> None:
         self._tap.push(frame)
-        return frame
-
-
-def _parse_bool(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _parse_int(value: str | None, default: int) -> int:
-    if not value:
-        return default
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default

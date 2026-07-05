@@ -14,7 +14,7 @@
 按特性分组，每个特性的设计 / 评审 / 重构放在同一子目录。
 | 特性 | 文档 |
 | --- | --- |
-| 判停 & STT（turn-taking / STT） | [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
+| 判停 & STT（turn-taking / STT） | **[design/turn-stt/TURN_RULES.md](design/turn-stt/TURN_RULES.md)（判停规则速查）** · [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
 
