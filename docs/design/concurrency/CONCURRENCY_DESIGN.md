@@ -186,7 +186,8 @@ nginx 方案(cookie map + auth_request + 动态 upstream)复杂度不低于自�
 | `WEB_UI_PORT` | **8765(现代码,V1)→ 拍板改 8787**(D-23,待实施) | 191xx(每进程独立) | 附 V/D-23 |
 | `XIAOGE_KWS_ENABLE_NATIVE` | 1 | `0` | D-06 |
 | `XIAOGE_RECORD_MODE`(名实施定) | 现状(无开关语义) | **`full`** | D-09/D-14 |
-| `XIAOGE_RECORD_CODEC`(名实施定) | `wav`(关) | **`opus`**(开) | D-10/D-14 |
+| `XIAOGE_RECORD_CODEC`(名实施定;**由池管理器/转码器消费,agent 不读**——agent 永远只写 WAV,W1) | `wav`(关) | **`opus`**(开) | D-10/D-14 |
+| `XIAOGE_SESSION_ID`(名实施定;目录 id 与日志 id 的数据源,W4) | 未设(回退 pid 后 4 位) | 池管理器生成的会话短 id | 小改 1/4 |
 | `XIAOGE_TIMELINE_LEVEL`(名实施定) | `off` | **`audit`** | D-11/D-14 |
 | `TURN_METRICS_LOG` | 单文件 | 每进程独立路径 | |
 | asr/tts 管理接口开关(名实施定) | 显示 | **隐藏** | D-19 |
