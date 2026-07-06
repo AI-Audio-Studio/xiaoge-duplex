@@ -17,13 +17,14 @@
 | 判停 & STT（turn-taking / STT） | **[design/turn-stt/TURN_RULES.md](design/turn-stt/TURN_RULES.md)（判停规则速查）** · [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
-| 服务器并发改造 | **[design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（v4 唯一现行版:决策总账 D-01~23/配置总表/20 条 checklist）** · [IMPLEMENTATION_PLAN.md](design/concurrency/IMPLEMENTATION_PLAN.md)（实施前评审筹备材料,已评审 W1~W4 落文） · [IMPL_REVIEW_KICKOFF.md](design/concurrency/IMPL_REVIEW_KICKOFF.md)（**实施前评审召集·进行中**） · [评审往返存档 A~W](design/concurrency/CONCURRENCY_REVIEW_ARCHIVE.md)（只读）;开工须实施前评审+负责人批准双门 |
+| 服务器并发改造 | **[design/concurrency/](design/concurrency/README.md) 子目录索引(先读)** —— 汇总 5 个文件(规格 v4 / 实施方案 / 实施前评审 / 摸底实测 / 评审存档)+ 关系图 + 维护规则;第一门已过,待负责人批准第二门,零代码 |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |
 | --- | --- |
 | [reports/RESOURCE_REPORT.md](reports/RESOURCE_REPORT.md) | 资源消耗实测报告（总体 + 分模块 + 最低配置 + 降耗路径） |
-| [reports/CONCURRENCY_PROBE_REPORT.md](reports/CONCURRENCY_PROBE_REPORT.md) | 外部容量摸底第一轮（N=1/2/4 打真机；远端下界 >4，不否决 A1 规划 9~10 路） |
+
+> 并发改造的外部摸底报告按"特性归子目录"惯例移入 [design/concurrency/](design/concurrency/README.md)（CONCURRENCY_PROBE_REPORT.md）。
 
 ## 协作规范 · [project/](project/)
 | 文档 | 说明 |

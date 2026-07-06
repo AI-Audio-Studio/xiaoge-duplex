@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | [CONCURRENCY_DESIGN.md](CONCURRENCY_DESIGN.md)(v4 唯一现行版) | 规格依据:决策总账 D-01~D-23、架构、网关六规则、配置注入总表、§12.2 checklist 20 条 | 定稿(设计充分,存档·附 T/V) |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md)(方案版 v1) | 入场件:P-1~P-9 筹备建议、三组件模块方案、agent 六处小改锚点、20 条验收映射、PR 切分、harness/WP-0/摸底案头稿 | 评审通过(有条件,W1~W4 已落文) |
-| [CONCURRENCY_PROBE_REPORT.md](../../reports/CONCURRENCY_PROBE_REPORT.md) | Q1-N 输入:N=1/2/4 真机摸底 | 第一轮已出(远端下界 >4) |
+| [CONCURRENCY_PROBE_REPORT.md](CONCURRENCY_PROBE_REPORT.md) | Q1-N 输入:N=1/2/4 真机摸底 | 第一轮已出(N≤4 下界 >4,非 9~10 背书) |
 | [CONCURRENCY_REVIEW_ARCHIVE.md](CONCURRENCY_REVIEW_ARCHIVE.md) | 溯源:附 A~W 全部评审往返 | 只读存档 |
 
 ## 2. 开场复核（四处，分钟级，先过再进议程）
