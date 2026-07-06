@@ -1,0 +1,236 @@
+# 并发改造 · 实施前评审筹备材料（方案版 v1，待实施前评审）
+
+> 2026-07-05。**只做方案,不做实现**——本文档是开工双重门第一门(实施前评审)的入场
+> 材料,零代码、零脚本、零配置文件改动。规格依据 = [CONCURRENCY_DESIGN.md](CONCURRENCY_DESIGN.md)
+> (v4 唯一现行版,决策总账 D-01~D-23);本文档**不改变任何已拍板决策**,只把"做什么"
+> 细化为"怎么做+怎么验"。筹备中新增的技术选择一律标 **P-1~P-9**,属建议,待实施前
+> 评审确认。
+>
+> 实施前评审开场四复核(v4 头部约定):T1(v4 §12.2 M5 条)、T2(v4 §6.1 规则 5 末句)、
+> V1/D-23(v4 §7.2 表 + §8-6)。
+
+## 1. 范围
+
+**含**:三组件实施方案(网关 §3 / 池管理器 §4 / agent 六处小改 §5)、20 条 checklist
+逐条验收方法(§6)、并发回归与浸泡 harness 方案(§7)、WP-0 与外部摸底执行案头稿
+(§8/§9)、PR 切分与实施顺序(§10)。
+**不含**:任何实现;Q1-N 数值(§9 摸底的产出)与 Q5 合规结论(临时策略 D-20 先行)。
+
+## 2. 筹备建议汇总(P-1~P-9,待实施前评审确认)
+
+| # | 建议 | 内容 | 理由 |
+| --- | --- | --- | --- |
+| P-1 | 代码位置 | 网关与池管理器放 `examples/voice_agents/gateway/` 与 `examples/voice_agents/poolmgr/`,全部纳入 ourcode.txt / lint-ours / 行数门禁 | 与现有自有代码同域同门禁;不碰 livekit 母体 |
+| P-2 | 网关↔池管理器接口 | 池管理器提供**本地控制 API**(仅绑 127.0.0.1,HTTP JSON):`POST /alloc`→{proc_id,port}、`POST /release`{session_id,reason}、`GET /status`;网关只调 API,**不直接 spawn 进程** | 职责边界(v4 §5)落到接口;两组件可独立测试、独立重启(R4) |
+| P-3 | 网关会话状态机 | `IDLE → ACTIVE → PENDING_DISCONNECT(宽限窗 T) → CLOSED`;**上游连接的生死绑定状态机**而非绑定客户端连接(T2 的结构化表达) | 宽限窗语义唯一权威实现点 |
+| P-4 | 亲和 cookie 格式 | `xg_aff=<proc_id>.<session_id>.<hmac(secret, proc_id\|session_id)>`;secret 默认进程内随机(重启失效=R4 既定语义),env 可选持久化 | HMAC 防伪造跳进程(附 D 加分项)落地形状 |
+| P-5 | 转码任务发现与产物命名 | 触发=池管理器收到 release 后入队 + **启动时扫描遗留 WAV**(崩溃恢复);产物同名换后缀:`user.<seq>.opus` 等(Ogg 容器);校验通过才删源(D-21) | 崩溃后不漏转码;命名可追溯到分段 |
+| P-6 | 按小时分段机制 | TestRecorder 内建 rotate:整点(或起录满 1h)关闭当前段三文件(`.<seq>.wav` 后缀)→ 开新段;渲染线程按段独立渲染,段间时间基准连续 | D-12 落地;备选"只转码已结束会话"不满足拍板,弃 |
+| P-7 | 并发回归 harness | 新脚本(实施期写):起 N 个独立 agent 进程(独立端口/AGENT_SCENARIO/runs 前缀)+ 模拟客户端(复用 `clients/python` SDK)打网关;汇总各路 turn_kpis 与基线带比对 | 复用回放资产;网关路径也被同一 harness 覆盖 |
+| P-8 | PR 切分 | 五个 PR:A1(agent 小改 1/2/3/4/6)→A2(录音/审计子系统)→B(池管理器+转码)→C(网关)→D(集成回归+浸泡+部署文档);见 §10 | 每 PR 可独立验收回滚;沿用重构期分支评审惯例 |
+| P-9 | 摸底判定标准 | 相对单路基线:FunASR final 延迟或 LLM TTFT 或 TTS TTFB **P95 退化 >30%**,或任一错误率 >1% → 判定到顶;取到顶前一档为 N 上限建议值 | Q1-N 需要一个客观判据,避免摸完仍拍脑袋 |
+
+## 3. 网关实施方案(对应 v4 §6;工作量 5~7.5 天)
+
+### 3.1 模块划分(P-1;每文件受 500 行门禁)
+
+| 文件 | 职责 | 预算 |
+| --- | --- | --- |
+| `gateway/main.py` | 启动/TLS 终结/aiohttp app 装配/信号处理 | ~150 行 |
+| `gateway/config.py` | env 解析(对外端口/T 值/口令/限流参数/HMAC secret) | ~80 行 |
+| `gateway/affinity.py` | 亲和表 + cookie 签发/校验(P-4)+ 会话状态机(P-3) | ~250 行 |
+| `gateway/proxy.py` | HTTP 反代 + WS 双向透传泵 + 宽限窗上游持有 | ~300 行 |
+| `gateway/pool_client.py` | 控制 API 客户端(P-2) | ~80 行 |
+| `gateway/static/` | 入口页(准入口令表单)/繁忙页/"另一窗口通话"提示页 | 静态 |
+
+### 3.2 会话状态机(P-3,宽限窗的权威实现)
+
+```
+IDLE ──alloc──► ACTIVE ──客户端 /ws/audio 断开──► PENDING_DISCONNECT(T=10~15s)
+                  ▲                                   │
+                  │同 cookie 重连:新客户端 WS 接回     │超时
+                  │既有上游连接(帧续接,T2)            ▼
+                  └────────────────────────────  CLOSED:调 /release → 池回收
+```
+
+- **上游连接由状态机持有**(ACTIVE 与 PENDING_DISCONNECT 期间均不断开)——T2 的
+  "agent 无感"由此保证;CLOSED 才关上游。
+- 协议客户端(无 cookie)不进 PENDING_DISCONNECT:断开即 CLOSED(D-07)。
+- 宽限窗内到达的下行音频帧:**丢弃**(拍板语义"静默等待,不回放缺失段")。
+
+### 3.3 六条路由规则 → 处理点映射
+
+| 规则(v4 §6.1) | 处理点 | 要点 |
+| --- | --- | --- |
+| 1 `GET /` 无 cookie | main 路由 → 准入校验 → affinity.alloc → 种 cookie → 返回静态页 | 池满→繁忙页;口令错→重回表单(不泄漏信息,R6-④) |
+| 2 带 cookie 反代 | proxy + affinity.validate | 无效/进程亡→WS 4001 / HTTP 409;**不在此处重分配** |
+| 3 `/ws/audio` 无 cookie | 协议客户端直分配 | 池满→WS `busy` 消息(PROTOCOL 原语义) |
+| 4 `/ws` 无 cookie | 直接拒绝(4001) | |
+| 5 宽限窗 | affinity 状态机(§3.2) | 重连=换客户端侧、上游不动 |
+| 6 双标签页 | affinity:同 cookie 已有 ACTIVE 音频连接 → 提示页/拒绝 | 不透传 agent |
+
+### 3.4 安全与限流(R6/D-18)
+
+`/api/*` 白名单 = {mic, asr, tts}(asr/tts 隐藏态由 agent 返回 404,网关不重复裁决,
+避免两处开关不同步);cookie 属性 `Secure+HttpOnly+SameSite=Strict`;每连接令牌桶
+(消息速率)+ 单帧大小上限(建议 32KB,实施定);错误响应统一模板(无端口/进程号/路径)。
+
+### 3.5 配置项(env,全部网关私有,不进 agent)
+
+对外端口/证书路径、`XG_GRACE_SECONDS`(T,默认 12)、`XG_ACCESS_CODE`(准入口令)、
+`XG_HMAC_SECRET`(空=随机)、限流参数、池控制 API 地址。命名实施定,前缀 `XG_` 与
+agent 的 `XIAOGE_` 区分。
+
+## 4. 池管理器实施方案(对应 v4 §7;工作量 2~3 天)
+
+### 4.1 模块划分(P-1)
+
+| 文件 | 职责 | 预算 |
+| --- | --- | --- |
+| `poolmgr/manager.py` | 池状态机/spawn(env 注入表=v4 §7.2)/healthz 轮询/回收/补位/告警 | ~300 行 |
+| `poolmgr/control_api.py` | `/alloc` `/release` `/status`(P-2,仅 127.0.0.1) | ~120 行 |
+| `poolmgr/transcoder.py` | 转码旁路任务(P-5):队列+扫描遗留、PyAV 编码、D-21 分档校验、D-22 限流 | ~250 行 |
+
+### 4.2 进程生命周期状态机
+
+`SPAWNING →(healthz ready)→ READY →(alloc)→ ASSIGNED →(release/超时/崩溃)→ RECYCLING
+(kill+重启)→ SPAWNING`。就绪数 = READY 计数,< 阈值告警(M4);healthz 轮询间隔建议
+2s、连续 3 次失败判亡。
+
+### 4.3 转码任务要点
+
+- 输入队列:release 时入队该会话目录;启动时扫描 `recordings/*/` 遗留 `.wav`(P-5);
+- worker 并发 1~2、`os nice`/低优先级线程(D-22);
+- 每文件:PyAV 编码 → 解码校验(FLAC 采样数逐一相等 / Opus 时长差 ≤1 帧,D-21)→
+  过删源、败留源并记错误日志;
+- 指标:队列深度、最老任务时长 → §11 监控(R7 表第 4 项)。
+
+### 4.4 监控输出方式
+
+结构化行日志(与 agent 指标日志同风格,离线汇总)+ `GET /status` 返回七项快照;
+不引入 Prometheus 等新依赖(留二期)。
+
+## 5. agent 六处小改实施方案(逐处:锚点→改动形状→规模→验收)
+
+> 锚点均已对照当前代码核实。总口径:PC/测试形态**逐字节不变**(D-23 的 8787 除外)。
+
+| # | 改动 | 锚点(现状) | 形状与规模 | 验收(→§6 条目) |
+| --- | --- | --- | --- | --- |
+| 1 | 目录加 id | `app/setup_taps.py:263`(runs/<ts>)、`audio_recorder.py:202-204`(recordings/<ts>) | 目录名改 `<ts>_<sid>`,sid=env `XIAOGE_SESSION_ID`(无则 pid 后 4 位);~5 行×2 处 | 单测:同秒两进程目录不冲突 |
+| 2 | `/healthz` | `webpanel/server.py:263-269` 路由注册处 | `add_get("/healthz")` + 处理函数:返回 `{ready, agent_loop_running}` JSON;不读 panel 主连接、无会话副作用;~15 行 | B4 专项(千次探测) |
+| 3 | 断开退出 | `webpanel/server.py` `_handle_ws_audio`(:67 起) | 入口读 `X-XG-Session` 头存 sid;断开清理分支:仅带标记时 marshal 到 agent loop → 优雅关会话 → 进程退出;无标记行为不变(**无网关时天然不触发,安全**);~20 行 | 集成:标记连接断开→进程退出;非标记→不退出 |
+| 4 | 日志 session_id | `common/runtime.py:110` `append_turn_log` | 行前缀 `[sid]`(env 一次读取,空则不加,现格式不变);~5 行 | 单测:有/无 env 两态格式 |
+| 5 | 录音/审计子系统 | `app/setup_taps.py:330-354` `setup_recording`、`test_recorder.py`、`event_timeline.py` | 见 §5.1 | §6 表 K3/三开关/audit/分段各条 |
+| 6 | 端口默认 8787 | `webpanel/state.py:21` + `web_ui_agent.py` docstring 的 8765 字样 | 1 行 + 注释同步(D-23) | 直启无 env 时监听 8787 |
+
+### 5.1 第 5 处(录音/审计子系统)细化——本次最大块,~1.5 天
+
+- **开关解析**:`RecordSettings.from_env()`(放 `common/config_utils.py` 旁,复用现有
+  env helper):`XIAOGE_RECORD_MODE`(full/single/off/未设=现状)、`XIAOGE_TIMELINE_LEVEL`
+  (off/audit/debug/未设=off)。**`XIAOGE_RECORD_CODEC` 由池管理器/转码器消费,agent
+  不读**(agent 永远只写 WAV,D-10 的"关=保持 WAV"即转码器不跑)——开关面最小化。
+- **`setup_recording` 改造**:timeline(debug)分支原样;新增 MODE 分支——`full`/`single`
+  → TestRecorder **解耦启用**(直接传 `recordings/<id>/` 目录,不依赖 timeline 对象;
+  `single` = TestRecorder 增加 `tracks` 参数只渲染 duplex);`off` → 不装任何录音;
+  未设 → 现状(AudioRecorder 混音)。
+- **timeline audit 档**:`EventTimeline(run_dir, level)`——audit 白名单集合
+  {turn.user, turn.assistant, interrupt.*, error, 生命周期};`attach()` 按档跳过
+  `asr.interim`/状态翻转的订阅(零成本);audit 落 `recordings/<id>/timeline.jsonl`;
+  **不装 install_debug_log、不写 KPI**(K3)。
+- **分段滚动(P-6)**:TestRecorder 增加 rotate——起录满 1 小时关闭当前段(文件名加
+  `.<seq>` 后缀)→ 开新段;渲染按段独立、段间时间基准连续;段边界验收:分段拼接总时长
+  = 不分段整段(误差 ≤ 帧级)。
+- **单测清单(红→绿纪律)**:三开关默认=现状(逐字节:对 `setup_recording` 分支做行为
+  锁定)、audit 白名单过滤、single 只出 duplex、分段拼接时长、debug 档与 `AGENT_TIMELINE=1`
+  完全等价。
+
+## 6. 20 条 checklist → 验收方法映射(v4 §12.2 逐条)
+
+| 条 | 载体 | 方法概要 | 阶段 |
+| --- | --- | --- | --- |
+| R1 宽限窗三断言 | 集成(harness) | 模拟客户端断开→T 内重连(断言同进程、历史在)→超时重连(断言新会话);协议客户端断开(断言即杀) | PR-C/D |
+| R3 双标签页 | 集成 | 同 cookie 二连,断言提示页且 agent 无新连接日志 | PR-C |
+| D1 关闭码 | 集成 | kill 目标进程→断言 WS 4001 / API 409 →前端刷新→新分配 | PR-C |
+| Q6 准入 | 集成+人工 | 无口令 403/表单;正确口令一次通过,后续免输 | PR-C |
+| R6 四条 | 集成+代码走查 | 未知 /api 404;抓包核 cookie 属性;速率超限断开;错误响应模板走查 | PR-C |
+| B4 healthz | 集成 | 千次探测循环,断言 0 重启、真实会话 KPI 无扰动 | PR-B/D |
+| M3 内网绑定 | 部署验收 | `/status` 核注入值;外网 nmap 扫 191xx 不可达 | PR-D |
+| R2 转码归属 | 集成 | release 后进程已退、转码仍完成;kill 转码器,在线会话无扰 | PR-B |
+| N1 分档校验 | 单测 | 构造 WAV→编码→校验通过删源;篡改产物→校验失败留源 | PR-B |
+| N2 限流+批量断开 | 集成(harness) | N 路同断:断言转码并发 ≤2、在线路 KPI 无扰动 | PR-D |
+| R4 故障模型 | 部署验收 | kill 网关/池管理器,systemd 拉起;网关重启后全员回页 | PR-D |
+| M4 池策略 | 集成 | 就绪数告警触发;聆听静默 10min 不被杀 | PR-B/D |
+| K3 解耦两条 | 单测+对比回放 | 生产分支产物清单断言(无 timeline/KPI);PC 形态回放与 main 基线逐字节比对 | PR-A2 |
+| 三开关默认=现状 | 单测 | 未设 env 时行为锁定测试全绿 | PR-A2 |
+| 分段/目录/healthz/退出/日志 id | 单测+集成 | §5 表逐项 | PR-A1/A2 |
+| M5 隐藏 404 | 单测+集成 | 隐藏态 `/api/asr` 404 且页面无 tab;开启态恢复 | PR-A1 |
+| D-23 端口 8787 | 单测 | 无 env 直启监听 8787;`WEB_UI_PORT` 覆盖仍生效 | PR-A1 |
+| R5 时钟 | 部署验收+抽查 | NTP 状态;产物时间戳 UTC 抽查、单调性脚本核验 | PR-D |
+| R7 七项 | 部署验收 | `/status` 与日志逐项可见,人工触发各告警一次 | PR-D |
+| Q5 合规 | 门禁前置 | 正式结论或临时策略(目录权限最小化)生效证明 | 实施前评审时核 |
+
+## 7. 并发回归与浸泡 harness 方案(P-7;实施期落为脚本,本轮只定方案)
+
+- **N 路回放**:每路一个独立 agent 进程(独立 `WEB_UI_PORT`/`XIAOGE_SESSION_ID`/
+  `AGENT_SCENARIO` 不同历史录音),经网关接入(模拟客户端复用 `clients/python` SDK,
+  带/不带 cookie 覆盖两类形态);结束后汇总各路 `turn_kpis.json` 与单路基线带(turns/
+  felt_latency 同带)比对,并抽查 assistant.wav 与源录音对话逻辑对应(互不串音)。
+- **专项场景**:批量断开(同时 kill N 个模拟客户端)、同刻停止词打断、N+1 路 busy、
+  宽限窗(断开后 <T 重连 / >T 重连)。
+- **浸泡**:4 路 × 2h 长录音循环;采样进程树 RSS/句柄数/`recordings` 磁盘增速(应
+  ≈ `full`+`opus` 口径)/转码积压曲线。
+- 产出物:`docs/reports/` 下并发回归报告(沿用 REGRESSION_LOG 体例)。
+
+## 8. WP-0 执行方案(案头稿;动线上须运维发令)
+
+1. **前置**:本地 main 推送 origin(待项目负责人指示);线上当前部署目录整体备份
+   (旧目录保留,回滚=切回);
+2. **env 对照**:diff 线上 `.env` 键集 vs `.env.example`(重构后新增键:
+   `XIAOGE_KWS_NUM_THREADS=1` 建议同步加入);
+3. **升级**:拉取重构后 main → `uv sync --all-extras` → 按现启动方式起服务;
+4. **等价性冒烟**(§12.1-WP-0 口径):浏览器(页面/通话/打断/聆听)+ C/MATLAB/Python
+   三端各一轮(TLS/公网/证书/防火墙路径全走);对照重构前行为;
+5. **观察期**:24h,盯错误日志与既有指标;
+6. **回滚预案**:任一冒烟不过 → 切回旧目录重启(分钟级);记录问题带回开发机复现。
+
+## 9. 外部容量摸底执行方案(案头稿;零代码,可发令即启动)
+
+- **阶梯**:1(基线)→2→4→8 路并发回放,打线上真机远端(FunASR/LLM/DashScope);
+  每路不同历史录音、各绑独立端口;每档跑 ≥2 轮取稳定值;
+- **指标**:FunASR final 延迟 P50/P95、LLM TTFT P50/P95、TTS TTFB P50/P95、E2E
+  felt_latency、各依赖错误/超时率;
+- **判定(P-9)**:任一 P95 相对单路基线退化 >30% 或错误率 >1% → 该档到顶,取前一档
+  为 N 上限建议;
+- **产出**:摸底报告(docs/reports/)→ 结合 D-15 决策框架给出 **Q1-N 建议值**;
+  DashScope 侧另附"N 路同说"专项数据(N3)。
+
+## 10. PR 切分与实施顺序(P-8)
+
+```
+可先行(发令即启动):WP-0(§8) ∥ 外部摸底(§9)──→ Q1-N 定值
+                                   │
+双重门(实施前评审通过 + 负责人批准)┤
+                                   ▼
+PR-A1 agent 小改 1/2/3/4/6 + 单测 ──► PR-A2 录音/审计子系统 + 单测
+                                   ──► PR-B 池管理器 + 转码器
+                                   ──► PR-C 网关
+                                   ──► PR-D 集成回归 + 浸泡 + 部署文档 → 上线
+```
+
+- 每 PR:独立分支基于 main、行为锁定单测先行(红→绿)、`make lint-ours`+行数门禁+
+  87 存量单测全绿、按重构期惯例交评审合入;
+- PR-A1/A2 不依赖网关(改动 3 的退出逻辑无标记不触发,天然安全);PR-B 可用假 agent
+  进程独立测;PR-C 依赖 B 的控制 API;PR-D 全链集成。
+- 工作量对照 v4 §14 不变(合计 13~18 天);本清单只是切分,不改估算。
+
+## 11. 待实施前评审确认清单(本材料的评审点)
+
+1. P-1~P-9 九项筹备建议(§2 表);
+2. §5 六处小改的锚点与形状(尤其第 5 处的"CODEC 仅转码器消费、agent 不读"与 P-6
+   分段机制);
+3. §6 的 20 条验收方法映射是否齐备、载体是否恰当;
+4. §10 PR 切分与顺序;
+5. 开场四复核:T1/T2/V1/D-23(v4 正文)。
+
+> 通过本材料评审 + 项目负责人批准(双重门)后,方可按 §10 顺序动代码;WP-0 与摸底
+> 不受此门约束,发令即可执行。**本材料本身零代码改动。**
