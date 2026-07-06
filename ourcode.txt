@@ -65,4 +65,5 @@ tests/test_ours_providers_helpers.py
 tests/test_ours_runtime_log.py
 tests/test_ours_env_loading.py
 tests/test_ours_cosyvoice_recovery.py
+tests/test_ours_concurrency_a1.py
 scripts/check_line_counts.py

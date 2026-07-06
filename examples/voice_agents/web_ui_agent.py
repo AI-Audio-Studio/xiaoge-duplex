@@ -3,7 +3,7 @@
 Usage (identical to original, but auto-opens a browser):
     python web_ui_agent.py console
 
-Browser UI at http://localhost:8765 (override with WEB_UI_PORT env var):
+Browser UI at http://localhost:8787 (override with WEB_UI_PORT env var):
   - Real-time conversation log
   - Microphone mute/unmute
   - ASR backend switch (FunASR ↔ Qwen3-ASR) — takes effect on the NEXT utterance
@@ -282,6 +282,7 @@ server.setup_fnc = prewarm
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     runtime.agent_loop = asyncio.get_running_loop()
+    runtime.job_ctx = ctx  # 供网关标记会话断开时优雅退出进程(webpanel/server.py #3)
 
     stt_engine, stt_for_session, live_from_main = setup_stt(ctx)
     tts_engine = build_tts()

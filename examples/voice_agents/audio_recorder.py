@@ -25,6 +25,7 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from common.runtime import session_id
 from common.taps import TapAudioInput, TapAudioOutput
 
 from livekit import rtc
@@ -200,7 +201,7 @@ class AudioRecorder:
     """安装到 AgentSession，把麦克风和 TTS 混音录成单个对话 WAV。"""
 
     def __init__(self, session_dir: str | Path = "recordings") -> None:
-        ts = time.strftime("%Y%m%d_%H%M%S")
+        ts = f"{time.strftime('%Y%m%d_%H%M%S')}_{session_id()}"
         self._dir = Path(session_dir) / ts
         self._writer: _ConversationWavWriter | None = None
 

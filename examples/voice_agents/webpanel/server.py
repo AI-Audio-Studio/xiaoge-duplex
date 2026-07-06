@@ -64,9 +64,20 @@ async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
     return aiohttp.web.Response(text=_INDEX_HTML, content_type="text/html", charset="utf-8")
 
 
+async def _handle_healthz(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """就绪/健康探测(池管理器 B4):专用轻路由,不占 WS primary 槽、无会话副作用。"""
+    aloop = runtime.agent_loop
+    loop_running = aloop is not None and aloop.is_running()
+    ready = loop_running and runtime.session is not None
+    return aiohttp.web.json_response({"ready": ready, "agent_loop_running": loop_running})
+
+
 async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     ws = aiohttp.web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
+    # 网关为真实会话连接注入 X-XG-Session 标记;断开时据此优雅退出进程(#3,配合池回收)。
+    # 无网关(PC/测试形态)时头缺失 → 退出逻辑天然不触发,行为不变。
+    xg_session = request.headers.get("X-XG-Session")
     lock = panel.connection_lock
     if lock is not None:
         async with lock:
@@ -111,7 +122,22 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
         panel.audio_ws_primary_client = None
     panel.audio_ws_clients.discard(ws)
     logger.info("audio WS client disconnected (%d remaining)", len(panel.audio_ws_clients))
+    _request_graceful_exit(xg_session)
     return ws
+
+
+def _request_graceful_exit(session_tag: str | None) -> None:
+    """网关标记的真实会话断开 → 经 agent 循环 marshal ctx.shutdown() 优雅退出进程
+    (跑完 shutdown 回调:录音收尾等),池管理器随后重启回收。仅并发部署下触发;
+    未标记(session_tag 为空,即无网关/PC 形态)直接返回,行为不变。"""
+    if not session_tag:
+        return
+    ctx = runtime.job_ctx
+    aloop = runtime.agent_loop
+    if ctx is None or aloop is None or not aloop.is_running():
+        return
+    logger.info("gateway session %s disconnected -> graceful process shutdown", session_tag)
+    aloop.call_soon_threadsafe(lambda: ctx.shutdown(reason="gateway session ended"))
 
 
 async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
@@ -261,6 +287,7 @@ async def _run_web_server(port: int) -> None:
 
     app = aiohttp.web.Application()
     app.router.add_get("/", _handle_index)
+    app.router.add_get("/healthz", _handle_healthz)
     app.router.add_get("/ws", _handle_ws)
     app.router.add_post("/api/mic", _handle_mic)
     app.router.add_post("/api/asr", _handle_switch_asr)

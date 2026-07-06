@@ -18,6 +18,14 @@ from pathlib import Path
 
 TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.log")).resolve()
 
+
+def session_id() -> str:
+    """会话短 id。并发部署时由池管理器注入 `XIAOGE_SESSION_ID` 区分各进程的
+    runs/recordings 目录与日志;未注入(PC/测试形态)时回退到 pid 后 4 位。"""
+    sid = os.getenv("XIAOGE_SESSION_ID", "").strip()
+    return sid or f"p{os.getpid() % 10000:04d}"
+
+
 _log_queue: queue.Queue[str | None] = queue.Queue(maxsize=1000)
 _log_thread: threading.Thread | None = None
 _log_thread_lock = threading.Lock()
@@ -108,9 +116,14 @@ def ms(value: float | None) -> str:
 
 
 def append_turn_log(line: str) -> None:
-    """追加一行带毫秒时间戳的 turn 指标日志(非阻塞:入队,后台线程写盘)。"""
+    """追加一行带毫秒时间戳的 turn 指标日志(非阻塞:入队,后台线程写盘)。
+
+    并发部署下,设了 `XIAOGE_SESSION_ID` 则在时间戳后加 `[sid]` 前缀,便于多进程日志
+    汇总归因;未设(PC/测试形态)时格式与原先逐字节一致。"""
     now = time.time()
     ts = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(now))}.{int((now % 1) * 1000):03d}"
+    sid = os.getenv("XIAOGE_SESSION_ID", "").strip()
+    prefix = f"[{sid}] " if sid else ""
     _ensure_log_thread()
     with contextlib.suppress(queue.Full):
-        _log_queue.put_nowait(f"{ts} {line}\n")
+        _log_queue.put_nowait(f"{ts} {prefix}{line}\n")
