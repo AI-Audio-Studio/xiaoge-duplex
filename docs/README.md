@@ -17,7 +17,7 @@
 | 判停 & STT（turn-taking / STT） | **[design/turn-stt/TURN_RULES.md](design/turn-stt/TURN_RULES.md)（判停规则速查）** · [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
-| 服务器并发改造 | **[design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（v4 唯一现行版:决策总账 D-01~23/配置总表/20 条 checklist）** · [IMPLEMENTATION_PLAN.md](design/concurrency/IMPLEMENTATION_PLAN.md)（实施前评审筹备材料,方案版待评审） · [评审往返存档 A~W](design/concurrency/CONCURRENCY_REVIEW_ARCHIVE.md)（只读）;开工须实施前评审+负责人批准双门 |
+| 服务器并发改造 | **[design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（v4 唯一现行版:决策总账 D-01~23/配置总表/20 条 checklist）** · [IMPLEMENTATION_PLAN.md](design/concurrency/IMPLEMENTATION_PLAN.md)（实施前评审筹备材料,已评审 W1~W4 落文） · [IMPL_REVIEW_KICKOFF.md](design/concurrency/IMPL_REVIEW_KICKOFF.md)（**实施前评审召集·进行中**） · [评审往返存档 A~W](design/concurrency/CONCURRENCY_REVIEW_ARCHIVE.md)（只读）;开工须实施前评审+负责人批准双门 |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |
