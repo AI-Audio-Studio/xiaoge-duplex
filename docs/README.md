@@ -23,6 +23,7 @@
 | 文档 | 说明 |
 | --- | --- |
 | [reports/RESOURCE_REPORT.md](reports/RESOURCE_REPORT.md) | 资源消耗实测报告（总体 + 分模块 + 最低配置 + 降耗路径） |
+| [reports/CONCURRENCY_PROBE_REPORT.md](reports/CONCURRENCY_PROBE_REPORT.md) | 外部容量摸底第一轮（N=1/2/4 打真机；远端下界 >4，不否决 A1 规划 9~10 路） |
 
 ## 协作规范 · [project/](project/)
 | 文档 | 说明 |
