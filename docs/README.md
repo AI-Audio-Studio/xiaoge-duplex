@@ -17,7 +17,7 @@
 | 判停 & STT（turn-taking / STT） | **[design/turn-stt/TURN_RULES.md](design/turn-stt/TURN_RULES.md)（判停规则速查）** · [design/turn-stt/TURN_STT_DESIGN.md](design/turn-stt/TURN_STT_DESIGN.md) · [TURN_STT_DESIGN_REVIEW.md](design/turn-stt/TURN_STT_DESIGN_REVIEW.md) · [TURN_STT_REFACTOR.md](design/turn-stt/TURN_STT_REFACTOR.md) |
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
-| 服务器并发改造 | [design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（分析与设计 **v3 定稿**;Q5 录音已全链闭环[附 P],近期部署组合 full+opus+audit;开工须实施前评审+负责人批准双门;附录 A~P 含全部评审往返与拍板） |
+| 服务器并发改造 | **[design/concurrency/CONCURRENCY_DESIGN.md](design/concurrency/CONCURRENCY_DESIGN.md)（v4 开发指导版,待评审组确认:决策总账 D-01~22/配置总表/19 条 checklist）** · [评审往返存档 A~U](design/concurrency/CONCURRENCY_REVIEW_ARCHIVE.md)（只读）;开工须实施前评审+负责人批准双门 |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |
