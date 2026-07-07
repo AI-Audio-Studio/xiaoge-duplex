@@ -1,0 +1,37 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="端云结合的全双工自然语音交互:云端、双向全双工、端侧语音设备">
+  <!-- 云:云端 -->
+  <g fill="#7FCFA6">
+    <circle cx="25.5" cy="15.5" r="5"/>
+    <circle cx="32.5" cy="12" r="6.8"/>
+    <circle cx="39" cy="16" r="4.8"/>
+    <rect x="21" y="15.5" width="19" height="6.2" rx="3.1"/>
+  </g>
+  <circle cx="30.5" cy="11.5" r="2.4" fill="#B9E8CE"/>
+
+  <!-- 全双工:一上一下两条平行箭头(同时双向) -->
+  <g stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M28 32.4 V24" stroke="#59BE8E"/>
+    <path d="M25.2 26.7 L28 23.6 L30.8 26.7" stroke="#59BE8E"/>
+    <path d="M36 24 V32.4" stroke="#59BE8E"/>
+    <path d="M33.2 29.7 L36 32.8 L38.8 29.7" stroke="#59BE8E"/>
+  </g>
+
+  <!-- 声波:端侧在收/发语音 -->
+  <g stroke="#8AD3B0" stroke-width="2" stroke-linecap="round" fill="none">
+    <path d="M18.5 42.5 a6.5 6.5 0 0 0 0 9.5"/>
+    <path d="M15 39.5 a11 11 0 0 0 0 15.5"/>
+    <path d="M45.5 42.5 a6.5 6.5 0 0 1 0 9.5"/>
+    <path d="M49 39.5 a11 11 0 0 1 0 15.5"/>
+  </g>
+
+  <!-- 端:语音终端设备 -->
+  <rect x="23.5" y="34" width="17" height="25.5" rx="3.6" fill="#EAF7F0" stroke="#4FB485" stroke-width="2.2"/>
+  <rect x="26" y="37.5" width="12" height="15.5" rx="1.6" fill="#CFEDDD"/>
+  <g stroke="#2F9268" stroke-width="1.8" stroke-linecap="round">
+    <path d="M28.5 46.8 V44"/>
+    <path d="M31 48 V42.5"/>
+    <path d="M33.5 46.8 V44"/>
+    <path d="M35.7 46 V44.8"/>
+  </g>
+  <circle cx="32" cy="56.4" r="1.15" fill="#4FB485"/>
+</svg>
