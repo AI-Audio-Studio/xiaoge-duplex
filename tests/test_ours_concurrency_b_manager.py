@@ -1,19 +1,59 @@
 """行为锁定测试:并发改造 PR-B 进程池管理器(v4 §7/§4.2)。
 
 覆盖:spawn→ready→alloc→release→recycle 状态机、繁忙返 None、healthz 连败判亡回收、
-SPAWNING 冷启动不被误杀(spawn_timeout 才判失败)、录音入队转码、env 注入表、就绪告警。
-I/O 全用假实现,无真进程、无云依赖。
+SPAWNING 冷启动不被误杀、B-2 kill 锁外、B-3 死后入队、B-4 死后同端口重起、B-4b SIGKILL 兜底、
+env 注入表、就绪告警。多数用假 I/O(时序);另有**真端口/真进程集成用例**(default_kill 真杀、
+recycle 同端口重 bind)堵"假 I/O 逃过"——无云依赖。
 """
 
 from __future__ import annotations
 
+import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "examples" / "voice_agents"
 sys.path.insert(0, str(_AGENT_DIR))
 
-from poolmgr.manager import PoolIO, PoolManager, PoolTuning, default_agent_env  # noqa: E402
+from poolmgr.manager import (  # noqa: E402
+    PoolIO,
+    PoolManager,
+    PoolTuning,
+    default_agent_env,
+    default_kill,
+)
+
+
+def _wait_until(pred, timeout: float = 12.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _free_port() -> int:
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+# 极小假 agent:绑端口 + 应答 /healthz{ready:true};SIGTERM 即退(无模型,秒起)。
+_FAKE_AGENT = (
+    "import sys,json\n"
+    "from http.server import HTTPServer,BaseHTTPRequestHandler\n"
+    "class H(BaseHTTPRequestHandler):\n"
+    " def do_GET(s):\n"
+    "  s.send_response(200);s.send_header('Content-Type','application/json');s.end_headers()\n"
+    "  s.wfile.write(json.dumps({'ready':True}).encode())\n"
+    " def log_message(s,*a):pass\n"
+    "HTTPServer(('127.0.0.1',int(sys.argv[1])),H).serve_forever()\n"
+)
 
 
 class _FakeHandle:
@@ -157,8 +197,7 @@ def test_ready_below_threshold_alert() -> None:
 
 
 def test_release_defers_kill_off_lock_b2(tmp_path: Path) -> None:
-    """B-2:kill 的 wait 不得在锁内阻塞——release 立即返回、池即时补位、status 不冻结,
-    kill 推迟到 reaper 执行。"""
+    """B-2:kill(含 wait)不得在锁内阻塞——release 立即返回、status 不冻结;kill 推迟到 reaper。"""
     captured: list = []
     m, spawned, ready, _ = _make(size=1, reap=captured.append)  # 捕获 reaper work,不执行
     m.start()
@@ -167,10 +206,40 @@ def test_release_defers_kill_off_lock_b2(tmp_path: Path) -> None:
     a = m.alloc()
     assert m.release(a["session_id"], "done") is True
     assert spawned[0].killed is False  # kill 尚未发生(未在锁内阻塞)
-    assert len(spawned) == 2  # 池已即时补位
     assert m.status()["size"] == 1  # status 未被 kill 的 wait 冻结
-    captured[0]()  # 执行 reaper → kill 真正发生
-    assert spawned[0].killed is True
+    assert len(spawned) == 1  # B-4:同端口重起推迟到 reaper(kill 确认死后),此刻未补位
+    captured[0]()  # 执行 reaper → kill → 同端口重起
+    assert spawned[0].killed is True and len(spawned) == 2
+    m.stop()
+
+
+def test_recycle_spawns_after_kill_b4(tmp_path: Path) -> None:
+    """B-4:同端口重起必须在 kill 确认死之后(旧进程收尾释放端口后),不得立即 spawn。"""
+    order: list[str] = []
+
+    def _kill(h: _FakeHandle) -> None:
+        h.killed = True
+        order.append("kill")
+
+    spawned2: list[_FakeHandle] = []
+
+    def _spawn(pid: str, port: int) -> _FakeHandle:
+        order.append(f"spawn:{port}")
+        h = _FakeHandle(pid, port)
+        spawned2.append(h)
+        return h
+
+    m = PoolManager(
+        size=1,
+        io=PoolIO(spawn=_spawn, healthz=lambda p: True, kill=_kill, reap=lambda w: w()),
+        tuning=PoolTuning(base_port=19100, poll_interval_s=3600, clock=_Clock()),
+    )
+    m.start()  # order: ["spawn:19100"]
+    m.poll_once()
+    a = m.alloc()
+    order.clear()  # 只看 recycle 期
+    m.release(a["session_id"], "done")
+    assert order == ["kill", "spawn:19100"]  # 先杀(端口释放)后同端口重起
     m.stop()
 
 
@@ -203,6 +272,61 @@ def test_kill_before_enqueue_b3(tmp_path: Path) -> None:
     m.release(sid, "done")
     assert order == ["kill", "enqueue"]  # 先杀后转码
     m.stop()
+
+
+def test_default_kill_sigkill_fallback() -> None:
+    """B-4b:terminate 后 5s 仍未退出 → 走 SIGKILL 兜底(否则端口永占、slot 永久死)。"""
+
+    class _Stubborn:
+        def __init__(self) -> None:
+            self.terminated = self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True  # 模拟优雅关闭卡住,不退出
+
+        def wait(self, timeout: float | None = None) -> None:
+            if not self.killed:
+                raise subprocess.TimeoutExpired("agent", timeout or 0)  # terminate 后仍不退
+
+        def kill(self) -> None:
+            self.killed = True
+
+    h = _Stubborn()
+    default_kill(h)
+    assert h.terminated and h.killed  # 先 SIGTERM、超时后 SIGKILL
+
+
+def test_default_kill_terminates_real_process() -> None:
+    """真进程:default_kill 必须真把它杀死(假 handle 逃过的路径,用真 subprocess 兜底)。"""
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    assert proc.poll() is None  # 活着
+    default_kill(proc)
+    assert proc.poll() is not None  # 已死
+
+
+def test_recycle_rebinds_same_port_real_process() -> None:
+    """**真端口 + 真进程集成**(堵"假 I/O 逃过"):recycle 后新进程在旧进程死后于**同端口**
+    成功 bind 并 ready——B-4 修复的端到端证明(立即同端口 spawn 会 EADDRINUSE)。"""
+    port = _free_port()
+    m = PoolManager(
+        size=1,
+        io=PoolIO(
+            spawn=lambda pid, p: subprocess.Popen([sys.executable, "-c", _FAKE_AGENT, str(p)])
+        ),
+        tuning=PoolTuning(base_port=port, poll_interval_s=0.2),  # 真 healthz/kill,后台轮询
+    )
+    try:
+        m.start()
+        assert _wait_until(lambda: m.status()["ready"] == 1), "初始进程未就绪"
+        a = m.alloc()
+        assert a is not None and a["port"] == port
+        assert m.release(a["session_id"], "done") is True
+        # reaper 线程:kill 旧进程(确认死、释放端口)→ 同端口重起 → 后台轮询转 ready
+        assert _wait_until(lambda: m.status()["ready"] == 1, timeout=15), (
+            "同端口重起未就绪(疑 B-4 抢端口)"
+        )
+    finally:
+        m.stop()
 
 
 def test_env_injection_table() -> None:

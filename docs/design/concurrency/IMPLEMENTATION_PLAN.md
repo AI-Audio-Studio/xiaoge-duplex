@@ -504,87 +504,101 @@ _request_graceful_exit"这条,是我实现时靠"标记+早返回"结构天然�
 > 评审组二签(PR-A2 应答):A2-2 无环 + 115 绿实测确认、A2-4 口径落文准确、A2-1/A2-3 跟进
 > 方案合理;**PR-A2 应答全部通过,确认可合入**。评审组只读,未改任何工程代码。
 
-## PR-B(进程池管理器 + 控制 API + 转码器,v4 §7 / D-13/D-21/D-22)· 评审组结论(2026-07-07)
+## PR-B(进程池管理器 + 控制 API + 转码器,v4 §7 / D-13/D-21/D-22)· 评审组结论(合并稿,2026-07-07)
 
-- **标的**:分支 `feat/concurrency-b-poolmgr`——`poolmgr/`(control_api 56 / manager 279 /
-  transcoder 186,均 <500)+ 3 测试文件(~360 行);待合入。
-- **裁定:有条件通过**——状态机 / 控制 API / 转码器**核心正确、门禁全绿**(实测),
-  §7.2 env 表(含 M3)与 D-21/D-22/P-5 落实到位;但有 **3 个实测发现的集成/并发缺陷
-  (B-1~B-3),测试未覆盖**,B-1 建议合入前修、B-2/B-3 最迟 PR-C 集成前修。
+> 本节合并 PR-B 全部往返(初评 → 设计者修复 → 复核 → B-4 硬证据)为一份完整意见,便于
+> 设计者一处审视。评审组全程只读、实测取证,未改任何工程代码。
 
-### 评审组独立核实(实测/看码取证)
+**标的**:分支 `feat/concurrency-b-poolmgr`——`poolmgr/`(control_api / manager / transcoder,
+均 <500 行)+ 专项单测。
 
-- **门禁(重跑)**:`test_ours_*` **136 passed**、`ruff` 全绿、行数门禁 exit 0;poolmgr 四文件
-  均入 ourcode.txt(lint 域)。
-- **§7.2 env 注入表正确**:`default_agent_env` = `WEB_AUDIO=1` / **`WEB_UI_HOST=127.0.0.1`(M3)** /
-  `WEB_UI_PORT` / `XIAOGE_KWS_ENABLE_NATIVE=0`(D-06) / `XIAOGE_SESSION_ID=proc_id`(#1/#4) /
-  `RECORD_MODE=full`+`CODEC=opus`+`TIMELINE_LEVEL=audit`(D-14) / 独立 `TURN_METRICS_LOG`——
-  与 v4 §7.2 逐项一致,且被 `test_env_injection_table` 锁定。
-- **控制 API(P-2/M3)**:/alloc·/release·/status 齐;`serve()` **对非 loopback host 抛错**(M3
-  硬保证);/release 校验 session_id。
-- **状态机(§4.2)**:SPAWNING→READY→ASSIGNED→RECYCLING 正确;**SPAWNING 用
-  `spawn_timeout` 而非 `fail_limit`**——冷启动 ~10s 不会被连败误杀(设计细节到位,测试锁定)。
-- **转码器(D-13/D-21/D-22/P-5)**:池侧独立组件、agent 只写 WAV;**D-21 分档校验**(FLAC 采样数
-  逐一相等 / Opus 时长差 ≤70ms,实测 opus 往返校验通过);**D-22** workers≤2 + `os.nice(10)`;
-  **失败保底留 WAV**(校验失败删产物留源、异常留源——"绝不丢审计数据"成立);**P-5** 启动
-  扫描遗留。
-- **A1-F1(b) 在池侧被消解**:`_recycle` 用**外部 kill(terminate)**回收进程,**不依赖 agent
-  自退**——A1-F1"进程退出供池回收"在此有兜底(但见 B-3:与录音收尾的时序)。
+**一句话裁定**:**B-1/B-2/B-3 已修并实测确认闭环;B-4(含 B-4b)为合入前必修阻塞项**;
+修 B-4 + 补真端口用例后即可合入。核心质量(状态机/控制 API/转码器/§7.2/D-21·22/P-5)达标。
 
-### 实测发现的缺陷(测试未覆盖;fake kill/transcoder 使其逃过单测)
+### 一、达标项(实测/看码确认,非采信)
 
-- **B-1(中,建议合入前修)转码后 manifest 索引悬空(W2 未真落地)**。**实测证据**:
-  `TestRecorder._render_and_write` 写的 `audio_manifest.json` 存 `"file":"user.wav"`(全后缀,
-  test_recorder.py:345/356/367);`transcode_file(user.wav,'opus')` 删 `user.wav`、产 `user.opus`
-  且校验通过,但 **poolmgr 全程不改 manifest** → 复现:`man['tracks'][0]['file']=='user.wav'`
-  而 `user.wav` 已删、**dangling=True**。W2("audio_manifest/timeline 引用后缀无关、转码不破坏
-  索引")在筹备评审已"落文",但 A2 manifest 实际存了全 `.wav` 名、B 转码器又不回写——
-  两 PR 之间的契约缺口,**转码一跑审计索引即断**。修:转码器按**目录原子**完成后回写
-  manifest 的 file 后缀(注意:现 `enqueue_dir` 按**单文件**入队,目录级回写需完成度跟踪),
-  或 manifest 改存轨名/无后缀由消费端解析。
-- **B-2(中)`default_kill` 的 `wait(timeout=5)` 在持 `self._lock` 时阻塞**。`release()`→
-  `_recycle()`→`_kill_fn()`=`terminate()+wait(5)`,全程持 RLock;`poll_once` 回收同理。故
-  **一次 release 可冻结 alloc/status 最长 5s**——并发部署下会话结束会卡住新会话分配。修:
-  kill+wait 移出锁(或异步 reap)。单测用即时 fake kill,未触及此路。
-- **B-3(低~中)`release()` 先入队录音、后 kill,与录音收尾竞态**。TestRecorder 有 2s 周期
-  写线程 + aclose 终写;release 先 `_enqueue_recordings` 再 kill(5s 优雅窗内 recorder 仍在
-  flush),转码 worker 可能在 recorder 仍存活/仍在写时处理 `user.wav`(甚至转码删 wav 后
-  recorder 又周期重写 → stale `.opus` + 复活 `.wav` 并存)。修(与 B-2 合并):kill 并**确认
-  进程死**后再入队。
+- **门禁(评审组重跑)**:`test_ours_*` **140 passed**、ruff 全绿、行数门禁 exit 0。
+- **§7.2 env 注入表**:`default_agent_env` 逐项与 v4 §7.2 一致——`WEB_AUDIO=1` /
+  **`WEB_UI_HOST=127.0.0.1`(M3)** / `WEB_UI_PORT` / `XIAOGE_KWS_ENABLE_NATIVE=0`(D-06) /
+  `XIAOGE_SESSION_ID=proc_id`(#1/#4) / `RECORD_MODE=full`+`CODEC=opus`+`TIMELINE_LEVEL=audit`
+  (D-14) / 独立 `TURN_METRICS_LOG`;被 `test_env_injection_table` 锁定。
+- **控制 API(P-2/M3)**:/alloc·/release·/status 齐;`serve()` 对非 loopback host **抛错**;
+  /release 校验 session_id。
+- **状态机(§4.2)**:SPAWNING→READY→ASSIGNED→RECYCLING 正确;SPAWNING 用 `spawn_timeout`
+  而非 `fail_limit`(冷启动 ~10s 不被连败误杀)。
+- **转码器(D-13/D-21/D-22/P-5)**:池侧独立、agent 只写 WAV;D-21 分档校验(FLAC 采样数逐一
+  相等 / Opus 时长差 ≤70ms,实测 opus 往返通过);D-22 workers≤2 + `os.nice`;失败保底留 WAV;
+  P-5 启动扫描遗留。
+- **A1-F1(b) 在池侧消解**:`_recycle` 用外部 kill 回收,不依赖 agent 自退。
 
-### 结论
+### 二、缺陷全生命周期(B-1~B-4)
 
-核心质量高(状态机/API/转码器 + §7.2 + D-21/22/P-5 + 136 绿实测);**B-1 是 PR-B 自身交付物
-(转码器 + 录音索引契约)的功能缺陷、转码一跑即现,建议合入前修**;B-2/B-3 是并发/时序
-缺陷,最迟 PR-C 把 poolmgr 接上网关驱动前修。三者均**测试未覆盖**(fake I/O 逃过),建议
-补:transcode+manifest 往返用例、release 阻塞 alloc 的并发用例、enqueue/kill 时序用例。
+| # | 问题(证据) | 状态 | 修法 / 必修方案 |
+| --- | --- | --- | --- |
+| **B-1** | 转码 `.wav`→`.opus` 删源,但 `audio_manifest.json` `file` 仍指 `.wav` → 审计索引悬空(**实测复现**:transcode 后 `tracks[0].file=='user.wav'` 而文件已删) | ✅ **已修·实测确认** | 转码器改**整目录入队** + 转完 `rewrite_manifest` 递归重映射 `file`(兼容不分段/分段);**实测**:`transcode_dir` 后 manifest 引用全变 `.opus`、磁盘存在、零悬空 |
+| **B-2** | `default_kill` 的 `wait(5)` 在持 `self._lock` 时阻塞 → 一次 release 冻结 alloc/status 达 5s | ✅ **已修** | `_recycle` 持锁只 pop;kill(terminate+wait)移入可注入 reaper 锁外执行(捕获式 reaper 测试锁定"release 返回时 kill 未发生") |
+| **B-3** | `release()` 先入队录音、后 kill → 转码器碰仍在 flush 的 wav | ✅ **已修** | 入队移入 `_reap_work`,**先 kill 确认死(录音收尾完)再入队**;调用序测试断言 `["kill","enqueue"]` |
+| **B-4** | **B-2 修复引入**:`_recycle` 同端口**立即** `_spawn_one` + 旧进程异步 kill;新进程 ~1s bind 端口(`web_ui_agent __main__:340 start_web_server_thread` 早于 `:354 cli.run_app`),旧进程优雅收尾数秒仍占端口 → 抢端口失败 | ⛔ **合入前必修(阻塞)** | 见"三、B-4 必修方案" |
 
-> 评审组签署(PR-B):§7.2 表(含 M3)与 D-21/22/P-5 实测到位、136 绿;B-1(manifest 悬空,
-> 已复现)建议合入前修,B-2(锁内 5s 阻塞)/B-3(入队先于 kill 竞态)最迟 PR-C 前修;均测试
-> 未覆盖,建议补测。评审组只读,未改任何工程代码。
+**B-4 两腿硬证据(2026-07-07 实测)**:
+1. **bind 冲突**:同款 `aiohttp.web.TCPSite`(`server.py:308`,无 `reuse_port`)对活跃 listener
+   占用端口 bind → `OSError errno 10048`(EADDRINUSE)——同端口互斥,实证。
+2. **旧进程占端口时长**:`cli.py:1566` 为 SIGTERM 注册 `_handle_exit`→`_ExitCli`→**优雅收尾**;
+   故 `terminate()` 触发优雅关闭,旧进程收尾数秒内持续占端口——正是新进程 ~1s bind 撞入窗口。
+- **后果**:每次 recycle 大概率使"即时补位"的新进程 bind 失败 → web 线程异常 → `/healthz`
+  不就绪 → slot 挂到 `spawn_timeout`(30s)才再回收重起;直接压低并发池可用数,**抵消 B-2
+  即时补位本意**,命中池管理器**核心职责 recycle 在真实运行下的正确性**。
+- **B-4b(同源,更严重)**:`default_kill` 无 **SIGKILL 兜底**(`terminate`+`wait(5)`,超时被吞)。
+  优雅关闭 >5s/卡住 → 旧进程仍活占端口 → 同端口新进程**永久无法 bind、slot 永久死亡**。
 
-### 设计者应答(PR-B,2026-07-07)
+### 三、B-4 必修方案(localized,`_recycle`/`_reap_work`/`default_kill`)
 
-**"有条件通过"收到。** B-1~B-3 都是真缺陷——我的假 I/O 单测(即时 fake kill / fake
-transcoder)恰好把它们放过了,评审组用**实测复现**逐个抓出(manifest 悬空、锁内 5s 阻塞、
-入队先于 kill 的竞态),扎实。**三者我都在本轮修了**(B-2/B-3 与 B-1 同在 `_recycle`/
-`release`/转码器一条线上,合并修更干净,不拖到 PR-C),并补了评审点名的三类用例:
+1. `_recycle` 持锁只 pop + 调度 reaper——**移除锁内 `_spawn_one`**;
+2. `_reap_work`(锁外):`kill`(确认死)→ 短暂持锁 `_spawn_one(port)` → `_enqueue_recordings`
+   ——**旧进程确认死、端口释放后**才于同端口重起。一举同时满足 B-2(kill 锁外)、B-3(收尾后
+   入队)、B-4(无端口抢占);代价:slot 在 recycle 期空缺 ~kill+冷启("同端口即时补位"本不可得,
+   若要即时须 spare 端口池,端口数 > 进程数);
+3. `default_kill` 补 **SIGKILL 兜底**:`terminate()`→`wait(5)`→仍活则 `kill()`(消除 B-4b)。
 
-- **B-1(修,含补测)转码后 manifest 不再悬空**。根因是 A2 的 manifest 存了全 `.wav` 名、
-  B 转码器又不回写——两 PR 契约缺口。修法**同时解决评审提的"目录级完成度跟踪":转码器
-  改为按目录整体入队**(`enqueue_dir`/`scan_leftovers` 一目录=一工作单元、单 worker 处理),
-  转完一次性 `rewrite_manifest`——**递归重映射** `file` 引用(兼容不分段 tracks/duplex 与
-  分段 segments[].tracks/duplex),换后缀且引用的文件真实存在。顺带消除了"多 worker 并发
-  改同一 manifest"的竞态(整目录单 worker)。补测:`transcode_dir` 往返(wav 删/opus 产/
-  manifest→.opus/无悬空)、分段 manifest 递归重映射。
-- **B-2(修,含补测)kill 的 wait 移出锁**。`_recycle` 改为:持锁只做 pop + **同端口立即
-  重启**(池即时补位),kill(terminate+wait)交**可注入 reaper**(默认守护线程)在**锁外**
-  执行——一次 release 不再冻结 alloc/status。补测:注入"捕获式 reaper",断言 release 返回后
-  kill 尚未发生、池已补位、`status()` 不冻结,执行捕获的 work 后 kill 才发生。
-- **B-3(修,含补测)入队推迟到 kill 确认死后**。录音入队从 `release`(kill 前)移入 reaper
-  的 `_reap_work`:**先 `kill`(terminate+wait 等进程真死→录音收尾完成)、再 `_enqueue_recordings`**
-  ——转码器不会碰仍在被 recorder flush 的 wav。补测:fake kill/transcoder 记录调用序,断言
-  `["kill","enqueue"]`。
+### 四、必补测(堵住"假 I/O 逃过")
 
-**门禁**:全量 **140 单测全绿**(136+4),lint-ours/format/行数门禁过(transcoder 233 /
-manager 294,均 <500)。B-1~B-3 均从"假 I/O 逃过"变为"有专项用例锁定"。建议复核后合入。
+B-1~B-4 连续被 fake I/O(即时 fake kill / fake spawn / fake transcoder)放过——单测验的是
+**时序逻辑**,不起真进程、不 bind 真端口、不跑真转码。必补**真端口/真进程集成用例**:
+- recycle 后新进程在旧进程死之前不 READY(或断言"kill 确认死→spawn"下同端口 bind 成功);
+- kill 超时走 SIGKILL 的用例;
+- (已补)`transcode_dir` 往返 + manifest 无悬空——保持。
+
+### 五、最终裁定
+
+- **B-1 / B-2 / B-3:修复确认通过**(B-1 实测、B-2/B-3 时序测试锁定)。
+- **B-4(含 B-4b):合入前必修阻塞项**——两腿实测坐实,命中 recycle 核心正确性;按"三"修
+  + "四"补真端口测,复核通过后即可合入。
+- 其余(状态机/API/转码器/§7.2/D-21·22/P-5/140 绿)达标。
+
+> 评审组签署(PR-B 合并稿):三修确认 + B-4/B-4b 实测坐实并升级为合入前必修阻塞,附
+> localized 必修方案与真端口必补测。评审组只读,未改任何工程代码。
+
+### 设计者应答(PR-B · B-4,2026-07-07)
+
+**B-4/B-4b 认——是我 B-2 修复引入的新缺陷,评审组两腿实测(EADDRINUSE errno 10048 +
+SIGTERM 优雅收尾数秒占端口)坐实,阻塞级判定成立。已按"三、必修方案"全修:**
+
+- **B-4(端口抢占)**:`_recycle` 移除锁内 `_spawn_one`——持锁只 pop + 调度 reaper;`_reap_work`
+  锁外**先 kill 确认死(端口释放)→ 再同端口 `_spawn_one` → 再入队**。一举同时满足 B-2(kill
+  锁外)/ B-3(死后入队)/ B-4(死后重起不抢端口)。**代价如评审所述**:slot 在 recycle 期空缺
+  ~kill+冷启,"即时同端口补位"本不可得(要即时须 spare 端口池、端口数>进程数)——接受此代价,
+  正确性优先;若后续要即时补位,作为 spare-port 优化另议。
+- **B-4b(无强杀兜底)**:`default_kill` 补 SIGKILL——`terminate()`→`wait(5)`→仍活则 `kill()`+
+  `wait(5)`,消除"优雅关闭卡住→端口永占→slot 永久死"。
+
+**必补测(堵"假 I/O 逃过",评审组§四)——已加真端口/真进程集成用例**:
+- `test_recycle_rebinds_same_port_real_process`:**真 subprocess**(极小假 agent 绑端口应答
+  /healthz,秒起)+ 真 `default_healthz`/`default_kill` + 后台轮询——alloc→release→断言
+  **新进程在旧进程死后于同端口成功 bind 并 ready**(B-4 端到端证明:立即同端口 spawn 会
+  EADDRINUSE);
+- `test_default_kill_terminates_real_process`:真 `python sleep` 进程被 default_kill 真杀死;
+- `test_default_kill_sigkill_fallback`:terminate 后卡住 → 走 SIGKILL(B-4b);
+- `test_recycle_spawns_after_kill_b4`:调用序断言 `["kill","spawn:port]"`(死后才重起)。
+
+**门禁**:全量 **144 单测全绿**(140+4),lint/format/行数门禁过。测试文件 docstring 已更正
+(不再声称"无真进程")。B-1~B-4/B-4b 均已修复 + 专项(含真端口/真进程)用例锁定,建议复核合入。

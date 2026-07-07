@@ -145,19 +145,22 @@ class PoolManager:
         return p
 
     def _recycle(self, p: PoolProcess, reason: str, *, enqueue_session: str | None = None) -> None:
-        """持锁调用:pop + **同端口立即重启**(池即时补位);kill(+可选录音入队)交 reaper 线程
-        (**不在锁内阻塞** kill 的 wait,B-2;kill 确认进程死后才入队转码,免与录音收尾竞态 B-3)。"""
+        """持锁调用:仅 pop + 调度 reaper。**不在锁内、也不立即同端口 spawn**(B-4:旧进程优雅
+        收尾数秒仍占端口,立即同端口 spawn 会 EADDRINUSE)。reaper 锁外:kill 确认死(端口释放)→
+        同端口重起 → 入队转码(依次满足 B-2 kill 锁外 / B-4 死后重起 / B-3 死后入队)。"""
         logger.info("recycle proc=%s port=%d reason=%s", p.proc_id, p.port, reason)
         p.state = RECYCLING
         self._procs.pop(p.proc_id, None)
-        handle = p.handle
-        self._spawn_one(p.port)  # 立即补位,不等旧进程死
-        self._reap(lambda: self._reap_work(handle, enqueue_session))
+        self._reap(lambda: self._reap_work(p.handle, p.port, enqueue_session))
 
-    def _reap_work(self, handle: Any, enqueue_session: str | None) -> None:
-        """回收(锁外执行):先 kill 并等进程真死(录音收尾完成),再入队转码。"""
+    def _reap_work(self, handle: Any, port: int, enqueue_session: str | None) -> None:
+        """回收(锁外执行):kill 并确认进程真死(端口释放、录音收尾完成)→ **死后**同端口重起 →
+        入队转码。slot 在此期空缺 ~kill+冷启(即时同端口补位不可得,除非端口数 > 进程数)。"""
         with contextlib.suppress(Exception):
-            self._kill_fn(handle)  # terminate + wait:确认死
+            self._kill_fn(handle)  # terminate → wait → SIGKILL 兜底:确认死、端口释放
+        with self._lock:
+            if not self._stop.is_set():
+                self._spawn_one(port)  # B-4:确认死后才同端口重起,避免抢端口
         if enqueue_session is not None:
             self._enqueue_recordings(enqueue_session)  # B-3:确认死后再转码
 
@@ -286,9 +289,17 @@ def default_healthz(port: int, *, timeout: float = 1.0) -> bool:
 
 
 def default_kill(handle: Any) -> None:
+    """terminate(SIGTERM,触发优雅收尾)→ 等 5s;仍未退出 → **SIGKILL 兜底**(B-4b:优雅关闭
+    卡住/>5s 时确保进程死、端口释放,否则同端口 slot 永久无法 bind)。"""
     if handle is None:
         return
     with contextlib.suppress(Exception):
         handle.terminate()
-        with contextlib.suppress(Exception):
-            handle.wait(timeout=5)
+    try:
+        handle.wait(timeout=5)
+        return  # 优雅收尾完成
+    except Exception:
+        pass
+    with contextlib.suppress(Exception):  # 未按时退出 → 强杀
+        handle.kill()
+        handle.wait(timeout=5)
