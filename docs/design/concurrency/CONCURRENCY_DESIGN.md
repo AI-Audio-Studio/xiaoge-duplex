@@ -196,7 +196,7 @@ nginx 方案(cookie map + auth_request + 动态 upstream)复杂度不低于自�
 | `XIAOGE_SESSION_ID`(名实施定;目录 id 与日志 id 的数据源,W4) | 未设(回退 pid 后 4 位) | 池管理器生成的会话短 id | 小改 1/4 |
 | `XIAOGE_TIMELINE_LEVEL`(名实施定) | `off` | **`audit`** | D-11/D-14 |
 | `TURN_METRICS_LOG` | 单文件 | 每进程独立路径 | |
-| asr/tts 管理接口开关(名实施定) | 显示 | **隐藏** | D-19 |
+| `XIAOGE_ADMIN_ROUTES`(M5,已实施) | 显示(默认 1,PC 形态不变) | **`0`(隐藏:不注册 asr/tts→404 + tab 不注入)** | D-19 |
 
 部署项另含:**NTP 同步**;timeline/录音清单时间戳 **UTC 存储**、展示层转换(R5)。
 

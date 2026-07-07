@@ -29,6 +29,7 @@ from app.web_audio import WebSocketAudioInput
 from common.runtime import append_turn_log
 
 from webpanel.state import (
+    ADMIN_ROUTES,
     BUSY_HTML,
     BUSY_MESSAGE,
     SSL_CERT,
@@ -40,12 +41,16 @@ from webpanel.state import (
 
 logger = logging.getLogger("web-ui-agent")
 
-# 页面加载一次进内存;<!--BACKEND_TABS--> 由注册表生成(加后端自动出 tab)。
-_INDEX_HTML = (
-    (Path(__file__).resolve().parent / "static" / "index.html")
-    .read_text(encoding="utf-8")
-    .replace("<!--BACKEND_TABS-->", backend_tabs_html())
-)
+
+def _build_index_html(admin_routes: bool) -> str:
+    """读 static/index.html 注入后端 tab(注册表生成,加后端自动出 tab)。
+    M5/D-19:`admin_routes` 关则 `<!--BACKEND_TABS-->` **不注入**——开关同控路由注册与 tab。"""
+    html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(encoding="utf-8")
+    return html.replace("<!--BACKEND_TABS-->", backend_tabs_html() if admin_routes else "")
+
+
+# 页面加载一次进内存(依模块 ADMIN_ROUTES 定态)。
+_INDEX_HTML = _build_index_html(ADMIN_ROUTES)
 
 
 async def _send_busy_and_close(ws: aiohttp.web.WebSocketResponse) -> None:
@@ -281,19 +286,29 @@ async def _handle_switch_tts(request: aiohttp.web.Request) -> aiohttp.web.Respon
     return aiohttp.web.json_response({"backend": backend, "provider": provider})
 
 
-async def _run_web_server(port: int) -> None:
-    panel.web_loop = asyncio.get_running_loop()
-    panel.connection_lock = asyncio.Lock()
-
+def build_web_app(
+    *, admin_routes: bool = ADMIN_ROUTES, web_audio: bool = WEB_AUDIO
+) -> aiohttp.web.Application:
+    """装配面板路由。M5/D-19:`admin_routes` 关(默认)时**不注册** /api/asr·/api/tts,命中即
+    404(隐藏 ≠ 仅前端无 tab);/api/mic 属产品功能始终在。与启动/TLS 解耦,便于单测路由集合。"""
     app = aiohttp.web.Application()
     app.router.add_get("/", _handle_index)
     app.router.add_get("/healthz", _handle_healthz)
     app.router.add_get("/ws", _handle_ws)
     app.router.add_post("/api/mic", _handle_mic)
-    app.router.add_post("/api/asr", _handle_switch_asr)
-    app.router.add_post("/api/tts", _handle_switch_tts)
-    if WEB_AUDIO:
+    if admin_routes:  # M5:隐藏态不注册 → aiohttp 默认 404
+        app.router.add_post("/api/asr", _handle_switch_asr)
+        app.router.add_post("/api/tts", _handle_switch_tts)
+    if web_audio:
         app.router.add_get("/ws/audio", _handle_ws_audio)
+    return app
+
+
+async def _run_web_server(port: int) -> None:
+    panel.web_loop = asyncio.get_running_loop()
+    panel.connection_lock = asyncio.Lock()
+
+    app = build_web_app()
 
     ssl_ctx = None
     if SSL_CERT and SSL_KEY:

@@ -944,16 +944,24 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 | 13 | K3 解耦两条 | ✅ | a2(record_settings 默认=现状·非重采样轨逐字节) |
 | 14 | 三开关默认值=现状 | ✅ | a2(`RecordSettings.from_env` 默认) |
 | 15 | 分段+目录id/healthz/断开退出/日志sid | ✅ | a1(#1 session_id·#2 healthz·#3 X-XG-Session shutdown·#4 log 前缀)+ a2(segment_seconds) |
-| 16 | **M5 asr/tts 隐藏 404** | ❌ | **未实现**:`webpanel/server.py:293-294` 无条件注册 /api/asr·/api/tts;需 env 门控(默认隐藏→404)+ tab 注入联动。**开独立跟进(PR-D 收尾或小改 PR)** |
+| 16 | **M5 asr/tts 隐藏 404** | ✅ | **已实现**:`webpanel.state.ADMIN_ROUTES`(`XIAOGE_ADMIN_ROUTES` **默认显示=PC 形态不变**)门控 `build_web_app`——关时**不注册** /api/asr·/api/tts(命中 404)+ tab 不注入;**服务器由池 `default_agent_env` 注 `XIAOGE_ADMIN_ROUTES=0` 隐藏**(M3 式不依赖默认);网关注释同步;测 `test_ours_concurrency_m5_admin_routes`(路由集 + 真 HTTP 404)+ b_manager 注入表 |
 | 17 | D-23 WEB_UI_PORT 默认8787 | ✅ | a1(#6 默认 8787) |
 | 18 | R5 时钟/UTC/单调性 | 🚀 | 时间戳 UTC=录音/timeline 代码;**NTP 同步·单调性抽查 → 部署验收** |
 | 19 | R7 监控七项告警 | 🚀 | **接入 + 告警阈值 → 部署验收** |
 | 20 | Q5 合规 | ⛔ | 保留期/访问控制正式结论 → **上线前置门**(临时策略:仅落盘不外发·目录权限最小化) |
 
-**小结(按主状态计,合计=20,不重复)**:11 条纯 ✅ + 3 条 ✅(带 soak/部署尾:#7 M3、#10 N2、
+**小结(按主状态计,合计=20,不重复)**:12 条纯 ✅ + 3 条 ✅(带 soak/部署尾:#7 M3、#10 N2、
 #12 M4)+ 1 条纯 🧪 soak(#6 B4)+ 3 条纯 🚀 部署验收(#11 R4、#18 R5、#19 R7)+ 1 条 ⛔ 前置门
-(#20 Q5)+ **1 条 ❌(#16 M5,真缺口,已开跟进)** = 20。编码可测项已全绿;M5 是唯一未实现的功能项,
-须在 上线 前补齐(不影响本 harness 增量合入)。soak/部署验收/前置门按既定顺序,两坎(目标机 N、Q5)未过不上线。
+(#20 Q5)= 20。**#16 M5 已实现(2026-07-07,由 ❌ 转 ✅)**——编码可测项 **20/20 全绿无 ❌**。
+剩余仅 soak(2 项尾)/部署验收(3+尾)/前置门(Q5)——非编码项,按既定顺序;两坎(目标机 N、Q5)未过不上线。
+
+> **M5 补记(2026-07-07)**:PR-D 收尾第一优先项已实现。`webpanel/server.py` 抽 `build_web_app(admin_routes,
+> web_audio)`——`ADMIN_ROUTES`(env `XIAOGE_ADMIN_ROUTES`)关时**不注册** /api/asr·/api/tts(命中 aiohttp
+> 默认 404)且 `<!--BACKEND_TABS-->` 不注入(开关同控路由 + tab,D-19)。**关键:代码默认=显示(PC/测试
+> 形态不变,遵 §7.2 口径)**,服务器形态由池 `default_agent_env` 注 `XIAOGE_ADMIN_ROUTES=0` 隐藏(M3 式
+> 显式不依赖默认、防 shell 环境泄漏);网关 `main.py` 白名单注释同步为"隐藏由 agent 侧门控、池注入 0→404"。
+> 新增 `test_ours_concurrency_m5_admin_routes`(5 例:门控关无 asr/tts·门控开有·代码默认显示·**tab
+> 门控**·隐藏态真 HTTP 404)+ b_manager 注入表加 `XIAOGE_ADMIN_ROUTES=0` 断言。分支 `feat/concurrency-m5-admin-routes`。
 
 ### 评审组确认(PD-1 应答 + M5 缺口,2026-07-07)
 
@@ -1031,3 +1039,77 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 > 评审组签署(先合入裁定):PR-D 集成增量为纯测试/文档、零生产逻辑,达标且正交于 M5——
 > **评审组同意先合入**(合入/上线授权归负责人);上线五门(M5/soak/部署验收/A1-F1/两前置门)
 > 未过不上线,M5 建议合入后第一优先。评审组只读,未改任何工程代码。
+
+### 评审组确认(M5 实现,2026-07-07)——§12.2 唯一 ❌ 转 ✅ 达标,余一条低危补测
+
+分支 `feat/concurrency-m5-admin-routes`。看码 + 实测/实跑逐条核实(评审要求不降):
+
+- **路由门控 = 真 404(非仅前端)**:`build_web_app(admin_routes)` 门控关时**不注册**
+  `/api/asr`·`/api/tts`。**实测**:`test_hidden_admin_route_returns_404_over_http` 用真
+  TestClient POST → **404**;`test_admin_routes_hidden_when_gated_off` 断言路由集无 asr/tts、
+  `/api/mic` 与基础路由仍在。满足 T1"隐藏态直接 404 而非仅前端无入口"。✓
+- **tab 注入同门控(评审组实测坐实)**:`_INDEX_HTML` 用 `backend_tabs_html() if ADMIN_ROUTES
+  else ""`。**评审组独立实测**:`XIAOGE_ADMIN_ROUTES=0` 时页面**不含** `backend_tabs_html()`
+  输出(页长 20535 vs 开时 20933,tabs-in-page=False);=1 时含。满足 T1"同控路由注册与 tab 注入"。
+  ✓(**唯一低危缺口**:tab 门控**无单测**——代码正确经实测确认,但未锁定,见下建议。)
+- **代码默认=显示(PC/测试形态不变)**:`ADMIN_ROUTES = env_bool("XIAOGE_ADMIN_ROUTES", True)`;
+  `test_code_default_shows_admin_routes` 锁定。服务器形态由池 `default_agent_env` **显式注入
+  `XIAOGE_ADMIN_ROUTES=0`**(M3 式不依赖默认,`b_manager::test_env_injection_table` 断言 `=="0"`)。✓
+- **/api/mic 始终保留**(产品功能,D-19)✓;**网关注释纠偏落实**(`main.py`:改为"隐藏由 agent 侧
+  XIAOGE_ADMIN_ROUTES 门控、池注入 0→404,网关取回 agent 404 原样回"——与代码一致,不再失真)✓。
+- **文档同步合规**:v4 §7.2 env 表把占位行改为 `XIAOGE_ADMIN_ROUTES(M5,已实施)`——属实现细节
+  同步(命名+已实施),**D-19 决策(§2/§8.4)未改**,符合"决策变更先改 §2"的维护规则。§12.2 台账
+  item 16 ❌→✅。✓
+- **门禁(评审组重跑)**:并发 **101 绿**、ruff 全绿、行数门禁 exit 0。
+
+**低危建议(非阻塞,补测)**:tab 门控现无单测(路由 404 有真测、tab 侧仅评审组 ad-hoc 实测)。
+T1 要求路由 + tab 双验;建议补一条断言——`ADMIN_ROUTES=0` 下 `_INDEX_HTML`(或 build 出的 `/`
+响应)**不含 `backend_tabs_html()` 输出**。机制已由评审组实测证明正确,故为护栏补强、非缺陷。
+
+**裁定**:M5/D-19 **达标闭环**——路由真 404 + tab 隐藏(实测)+ mic 保留 + PC 默认不变 + 池显式
+注入 + 网关注释纠偏,§12.2 编码可测项 **20/20 无 ❌**。建议合入(补 tab 单测可随本 PR 或紧随)。
+上线仍锁:soak、部署验收(M3/R4/R5/R7)、A1-F1、两前置门(目标机 N、Q5)。
+
+> 评审组签署(M5):路由真 404 有真测、tab 门控经评审组实测坐实(页长 20535 vs 20933)、池显式
+> 注入 0 有断言、网关注释纠偏属实、文档同步合规;101 绿。**M5 达标可合入**;余 tab 门控补测
+> (低危护栏)。评审组只读,未改任何工程代码。
+
+### 设计者应答(M5 tab 门控补测,2026-07-07)
+
+**采纳,随本 PR 补齐(不留紧随尾巴)。tab 门控现已有单测锁定,T1 路由 + tab 双验闭环。**
+
+- **补测**:`webpanel/server.py` 抽 `_build_index_html(admin_routes)`(原 `_INDEX_HTML` 内联 replace
+  提为可测函数,模块仍在 import 时以 `ADMIN_ROUTES` 定态调用一次、性能不变)。新增
+  `test_tab_injection_gated_by_admin_routes`:`admin_routes=True` → 页面**含** `backend_tabs_html()`
+  输出;`=False` → **不含**;两态占位 `<!--BACKEND_TABS-->` 均已替换无残留。把评审组 ad-hoc 页长
+  实测(20535 vs 20933)固化为断言,不再依赖人工核。
+- **门禁**:M5 5 例全绿、并发用例 102 绿、lint-ours/format/行数门禁过;纯补测 + 一处等价重构
+  (提函数),无行为改动。**M5/D-19 路由 + tab 双验闭环,§12.2 item 16 ✅ 稳固。**
+
+### 评审组裁定(M5 低危补测 + 可否前进,2026-07-07)——**同意合入 M5,编码阶段收官**
+
+`2b53b30` 看码 + 实跑核实(评审要求不降):
+- **tab 门控补测已落**:`_INDEX_HTML` 抽为可测函数 `_build_index_html(admin_routes)`,模块 import
+  时以 `ADMIN_ROUTES` 定态调用一次(`_handle_index` 仍返模块 `_INDEX_HTML`,真请求得门控页——
+  **行为/性能等价**,非改逻辑);`test_tab_injection_gated_by_admin_routes` **判别性**:on→页面含
+  `backend_tabs_html()`、off→不含、两态占位无残留。把评审组此前 ad-hoc 实测(页长 20535 vs 20933)
+  固化为断言。T1"路由 + tab 双验"闭环。
+- **无回归**:代码默认仍 True=显示,PC/测试形态不变;并发 **102 绿**、ruff/行数门禁过。
+
+**claim 核对**:"M5(至 2b53b30)已获达标评审 + 低危补齐、待批准合入"——**属实**。
+
+**裁定:同意合入 M5**(评审组"可合入"意见;实际合入/授权归负责人)。M5 是产品拍板访问控制
+(D-19)的落地,含生产逻辑(路由/ tab 门控 + 池注入),但范围清晰、PC 形态不变、路由 404 + tab
+双测覆盖、门禁绿——达标。**合入后 §12.2 编码可测项 20/20 无 ❌,四编码 PR + M5 收口,编码阶段
+结束。**
+
+**可以往前走,但"前"是非编码的验证/部署阶段,上线门一门未减:**
+- 🧪 **soak 浸泡**(4 路×2h + RSS/句柄/磁盘/转码积压采样,落 docs/reports)
+- 🚀 **部署验收**:M3 外网 nmap 不可达、R4 systemd 自拉、R5 NTP/UTC 时间戳、R7 监控七项告警
+- **A1-F1**:#3 优雅退出在 console 实形态核实(池侧 kill 已兜底,非阻塞)
+- ⛔ **两前置门(硬)**:目标机 N=8/10 摸底 + B5 资源复测(定产能 N)、Q5 合规(保留期/访问控制)
+  ——**两坎未过不上线、不对外承诺产能 N**。
+
+> 评审组签署(M5 + 前进):tab 门控补测判别性落地、重构行为等价、102 绿——M5 达标可合入,claim
+> 属实;编码阶段随 M5/PR-D 增量合入收官,其后转 soak/部署验收/前置门(非编码),两硬门未过不上线。
+> 评审组只读,未改任何工程代码。

@@ -34,8 +34,8 @@ logger = logging.getLogger("gateway")
 
 COOKIE = "xg_aff"  # 亲和 cookie
 ACCESS_COOKIE = "xg_access"  # 准入凭证 cookie(D-18)
-# §6.2 ①:白名单转发 mic/asr/tts。D-19/M5(asr/tts 服务器形态默认隐藏→404)属 agent 侧路由门控,
-# **尚未实现**(PLAN §12.2 台账 M5 / 跟进 task);落地前 asr/tts 经此照常反代、由 agent 服务(非 404)。
+# §6.2 ①:白名单转发 mic/asr/tts。asr/tts 隐藏由 agent 侧 XIAOGE_ADMIN_ROUTES 门控(M5/D-19:
+# 池管理器服务器形态注入 0 → 不注册 → 404;本地默认显示);网关照常反代、取回 agent 的 404 原样回。
 _API_WHITELIST = {"mic", "asr", "tts"}
 _SWEEP_INTERVAL_S = 2.0
 
