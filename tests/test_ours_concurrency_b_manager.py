@@ -43,10 +43,19 @@ def _free_port() -> int:
     return port
 
 
-# 极小假 agent:绑端口 + 应答 /healthz{ready:true};SIGTERM 即退(无模型,秒起)。
+# 极小假 agent:绑端口 + 应答 /healthz{ready:true}(无模型,秒起)。SIGTERM 后**延迟 ~1.5s
+# 才退**(仿真 agent cli.py 优雅收尾数秒持端口;仅 POSIX 生效)——使"立即同端口 spawn"的旧
+# bug 能被端到端用例稳定判红(回归护栏,评审组 §四建议)。Windows terminate 硬杀不走 handler,
+# 即刻死、测试仍正向通过。
 _FAKE_AGENT = (
-    "import sys,json\n"
+    "import sys,json,signal,time\n"
     "from http.server import HTTPServer,BaseHTTPRequestHandler\n"
+    "def _bye(*a):\n"
+    " time.sleep(1.5); sys.exit(0)\n"
+    "try:\n"
+    " signal.signal(signal.SIGTERM,_bye)\n"
+    "except Exception:\n"
+    " pass\n"
     "class H(BaseHTTPRequestHandler):\n"
     " def do_GET(s):\n"
     "  s.send_response(200);s.send_header('Content-Type','application/json');s.end_headers()\n"
