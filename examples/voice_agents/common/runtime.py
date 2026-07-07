@@ -21,7 +21,11 @@ TURN_METRICS_LOG = Path(os.getenv("TURN_METRICS_LOG", "qwen_voice_turn_metrics.l
 
 def session_id() -> str:
     """会话短 id。并发部署时由池管理器注入 `XIAOGE_SESSION_ID` 区分各进程的
-    runs/recordings 目录与日志;未注入(PC/测试形态)时回退到 pid 后 4 位。"""
+    runs/recordings 目录与日志;未注入(PC/测试形态)时回退到 pid 后 4 位。
+
+    注:pid 后 4 位理论上可撞(同秒、pid 模 10000 同余),但**仅 PC/单进程形态才走此
+    回退**——并发部署由池管理器必注入唯一 `XIAOGE_SESSION_ID`,不经此路,故无跨进程
+    撞名风险(评审 PR-A1 可选项)。"""
     sid = os.getenv("XIAOGE_SESSION_ID", "").strip()
     return sid or f"p{os.getpid() % 10000:04d}"
 

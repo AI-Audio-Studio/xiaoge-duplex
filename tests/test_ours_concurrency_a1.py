@@ -103,6 +103,23 @@ def test_healthz_reports_not_ready_without_loop(monkeypatch: pytest.MonkeyPatch)
     assert body == {"ready": False, "agent_loop_running": False}
 
 
+def test_healthz_reports_ready_with_loop_and_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+
+    from app.session_state import runtime as app_runtime
+    from webpanel import server
+
+    class _RunningLoop:
+        def is_running(self) -> bool:
+            return True
+
+    monkeypatch.setattr(app_runtime, "agent_loop", _RunningLoop())
+    monkeypatch.setattr(app_runtime, "session", object())
+    resp = asyncio.run(server._handle_healthz(None))
+    body = json.loads(resp.body.decode())
+    assert body == {"ready": True, "agent_loop_running": True}
+
+
 # ── #3 X-XG-Session 断开的优雅退出:无 ctx / 无标记时天然不触发 ───────────────
 def test_graceful_exit_inert_without_ctx(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.session_state import runtime as app_runtime
