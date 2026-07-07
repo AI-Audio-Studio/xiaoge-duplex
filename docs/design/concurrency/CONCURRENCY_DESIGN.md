@@ -206,8 +206,11 @@ nginx 方案(cookie map + auth_request + 动态 upstream)复杂度不低于自�
 
 ## 8. agent 侧改动规格(六处外围小改,主链零改动)
 
-> 实施须先过双重门。验收总口径:PC/测试形态行为**逐字节不变**;三开关默认值=现状
-> (`WEB_UI_PORT` 默认值按 D-23 例外:8765→8787)。
+> 实施须先过双重门。验收总口径:PC/测试形态行为不变;三开关默认值=现状
+> (`WEB_UI_PORT` 默认值按 D-23 例外:8765→8787)。**"不变"的可测口径(A2-4 勘误)**:
+> **非重采样轨 + manifest 逐字节一致**;**重采样轨允许 ≤2 LSB 差**——这是 `rtc.AudioResampler`
+> (LiveKit 原生 HIGH 重采样)既有的非 bitwise 可复现性(旧代码自比亦 ±2 LSB),与本改造无关,
+> 裸 bytewise 比对会误报,集成评审按此口径。
 
 1. `runs/`/`recordings/` 目录名加进程/会话短 id(防同秒撞名);
 2. 新增 `GET /healthz` 轻路由(返回 agent loop/会话就绪状态);
@@ -335,7 +338,7 @@ busy **三者叠加**——池备用容量、转码限流、繁忙页应答共�
 - [ ] M4:池 size=N+1~2;就绪数告警;心跳活性(聆听静默不误杀;断开进宽限窗)
 
 **agent 六处小改**
-- [ ] K3 解耦两条:录音开关分支不携带任何 timeline/KPI 测试产物;PC/测试形态行为逐字节不变
+- [ ] K3 解耦两条:录音开关分支不携带任何 timeline/KPI 测试产物;PC/测试形态行为不变(可测口径见 §8 头注 A2-4:非重采样轨+manifest 逐字节,重采样轨 ≤2 LSB 属 rtc.AudioResampler 既有非确定性)
 - [ ] 三开关默认值=现状(`RECORD_MODE`/`RECORD_CODEC`/`TIMELINE_LEVEL`);audit 档除 timeline.jsonl 外零产物
 - [ ] 按小时分段滚动生效;目录 id / healthz / 断开退出(仅网关标记连接)/ 日志 session_id 全部落地
 - [ ] M5:asr/tts 默认隐藏开关同时控制路由注册与页面 tab 注入;隐藏态 `/api/asr`、`/api/tts` 直接 404(而非仅前端无入口)

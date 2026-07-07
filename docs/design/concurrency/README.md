@@ -54,13 +54,17 @@ KICKOFF 是拿前两者过第一门**。读设计看 DESIGN;查"为什么这么�
   (头号风险 FunASR 18~20 流未验,须目标机门禁验证)。
 - **评审门**:**第一门(实施前评审)已过**,建议"两段放行"——**编码放行 PR-A1/A2/B**;
   **上线产能锁在目标机 N 摸底 + Q5 合规两道前置门后**。第二门 = 项目负责人批准(开工授权)。
-- **实施**:已开工。**PR-A1**(agent 六处小改 1/2/3/4/6)编码完成、**评审通过 + 可选小改
-  已采纳**(记录见 IMPLEMENTATION_PLAN.md "实施评审记录");在分支
-  `feat/concurrency-a1-agent-smallfixes`(`a2750a1`)**待负责人批准合入**;99 单测全绿
-  (12 A1+87 存量)/lint/行数门禁过。两个集成期须验证项 A1-F1(#3 console 退出效力——已查:
-  console 与 proc 共用 shutdown 路径,drain 录音收尾成立;仅"进程退出供池回收"待兜底
-  SIGTERM,PR-C/D 实测)/ A1-F2(#3 依赖 PR-C 宽限窗)已记入 PR-C/D 清单。
-- **代码**:**main 仍零改动**(PR-A1 在分支未合入);上线仍锁两道前置门(目标机 N + Q5)。
+- **实施**:已开工(评审记录见 IMPLEMENTATION_PLAN.md "实施评审记录")。
+  - **PR-A1**(agent 小改 1/2/3/4/6):评审通过 + 可选小改已采纳,**已合入 main**
+    (PR #26,main HEAD `f22be47`)。集成期须验证 A1-F1(#3 console 退出效力——已查:
+    console 与 proc 共用 shutdown 路径、drain 录音收尾成立;仅"进程退出供池回收"待
+    SIGTERM 兜底,PR-C/D 实测)/ A1-F2(#3 依赖 PR-C 宽限窗)记入 PR-C/D 清单。
+  - **PR-A2**(录音/审计产物子系统 #5:RECORD_MODE/TIMELINE_LEVEL/按小时分段):**评审
+    通过**,在分支 `feat/concurrency-a2-record-audit`(`750feed`)**待合入**;115 单测全绿、
+    K3 逐字节不变逐路径核过;3 个低危项(A2-1 setup_taps 463 行近 500 上限 / A2-2 / A2-3)
+    非阻塞。
+- **代码**:**PR-A1 已入 main**;PR-A2 在分支待合入。上线仍锁两道前置门(目标机 N + Q5)。
+  下一步:PR-B(池管理器 + 转码器)。
 
 ## 4. 维护规则（改文档时照此走）
 

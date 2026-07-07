@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.record_settings import audit_allows
+
 logger = logging.getLogger("event-timeline")
 
 
@@ -136,11 +138,8 @@ class EventTimeline:
     ) -> None:
         """在事件循环线程调用:只构造字典 + 非阻塞入队,绝不阻塞、绝不抛出。"""
         try:
-            if self._level == "audit":
-                from app.record_settings import audit_allows
-
-                if not audit_allows(type):
-                    return  # audit 档只落白名单事件(轮次/打断/错误/生命周期)
+            if self._level == "audit" and not audit_allows(type):
+                return  # audit 档只落白名单事件(轮次/打断/错误/生命周期)
             self._seq += 1  # emit 只在单线程事件循环上调用,无需加锁
             event = {
                 "eventId": f"evt_{self._seq:06d}",
