@@ -503,3 +503,121 @@ _request_graceful_exit"这条,是我实现时靠"标记+早返回"结构天然�
 
 > 评审组二签(PR-A2 应答):A2-2 无环 + 115 绿实测确认、A2-4 口径落文准确、A2-1/A2-3 跟进
 > 方案合理;**PR-A2 应答全部通过,确认可合入**。评审组只读,未改任何工程代码。
+
+## PR-B(进程池管理器 + 控制 API + 转码器,v4 §7 / D-13/D-21/D-22)· 评审组结论(合并稿,2026-07-07)
+
+> 本节合并 PR-B 全部往返(初评 → 修 B-1/2/3 → 复核发现 B-4 → 硬证据升级阻塞 → 修 B-4/B-4b
+> 复核)为一份完整意见,便于设计者一处审视。评审组全程只读、实测取证,未改任何工程代码。
+
+**标的**:分支 `feat/concurrency-b-poolmgr`——`poolmgr/`(control_api / manager / transcoder,
+均 <500 行)+ 专项单测(含真端口/真进程集成测)。
+
+**一句话裁定(截至 2026-07-07 最新)**:**B-1/B-2/B-3/B-4(含 B-4b)全部已修并实测确认闭环;
+PR-B 达到合入标准,可合入**(余一条低危测试保真建议,非阻塞)。核心质量(状态机/控制 API/
+转码器/§7.2/D-21·22/P-5)达标。
+
+### 一、达标项(实测/看码确认,非采信)
+
+- **门禁(评审组重跑)**:`test_ours_*` **144 passed**、ruff 全绿、行数门禁 exit 0。
+- **§7.2 env 注入表**:`default_agent_env` 逐项与 v4 §7.2 一致——`WEB_AUDIO=1` /
+  **`WEB_UI_HOST=127.0.0.1`(M3)** / `WEB_UI_PORT` / `XIAOGE_KWS_ENABLE_NATIVE=0`(D-06) /
+  `XIAOGE_SESSION_ID=proc_id`(#1/#4) / `RECORD_MODE=full`+`CODEC=opus`+`TIMELINE_LEVEL=audit`
+  (D-14) / 独立 `TURN_METRICS_LOG`;被 `test_env_injection_table` 锁定。
+- **控制 API(P-2/M3)**:/alloc·/release·/status 齐;`serve()` 对非 loopback host **抛错**;
+  /release 校验 session_id。
+- **状态机(§4.2)**:SPAWNING→READY→ASSIGNED→RECYCLING 正确;SPAWNING 用 `spawn_timeout`
+  而非 `fail_limit`(冷启动 ~10s 不被连败误杀)。
+- **转码器(D-13/D-21/D-22/P-5)**:池侧独立、agent 只写 WAV;D-21 分档校验(FLAC 采样数逐一
+  相等 / Opus 时长差 ≤70ms,实测 opus 往返通过);D-22 workers≤2 + `os.nice`;失败保底留 WAV;
+  P-5 启动扫描遗留。
+- **A1-F1(b) 在池侧消解**:`_recycle` 用外部 kill 回收,不依赖 agent 自退。
+
+### 二、缺陷全生命周期(B-1~B-4)
+
+| # | 问题(证据) | 状态 | 修法 / 必修方案 |
+| --- | --- | --- | --- |
+| **B-1** | 转码 `.wav`→`.opus` 删源,但 `audio_manifest.json` `file` 仍指 `.wav` → 审计索引悬空(**实测复现**:transcode 后 `tracks[0].file=='user.wav'` 而文件已删) | ✅ **已修·实测确认** | 转码器改**整目录入队** + 转完 `rewrite_manifest` 递归重映射 `file`(兼容不分段/分段);**实测**:`transcode_dir` 后 manifest 引用全变 `.opus`、磁盘存在、零悬空 |
+| **B-2** | `default_kill` 的 `wait(5)` 在持 `self._lock` 时阻塞 → 一次 release 冻结 alloc/status 达 5s | ✅ **已修** | `_recycle` 持锁只 pop;kill(terminate+wait)移入可注入 reaper 锁外执行(捕获式 reaper 测试锁定"release 返回时 kill 未发生") |
+| **B-3** | `release()` 先入队录音、后 kill → 转码器碰仍在 flush 的 wav | ✅ **已修** | 入队移入 `_reap_work`,**先 kill 确认死(录音收尾完)再入队**;调用序测试断言 `["kill","enqueue"]` |
+| **B-4** | **B-2 修复引入**:`_recycle` 同端口**立即** `_spawn_one` + 旧进程异步 kill;新进程 ~1s bind 端口(`web_ui_agent __main__:340 start_web_server_thread` 早于 `:354 cli.run_app`),旧进程优雅收尾数秒仍占端口 → 抢端口失败(曾**两腿实测坐实**:①`TCPSite` 无 `reuse_port` 对活跃 listener bind → `OSError errno 10048`;②`cli.py:1566` SIGTERM 走优雅收尾、旧进程数秒持端口。后果:每次 recycle 新进程 bind 失败、slot 掉线;**B-4b**:`default_kill` 无 SIGKILL 兜底 → 优雅关闭卡住则端口永占、slot 永久死) | ✅ **已修·实测确认** | `_recycle` **移除锁内 `_spawn_one`**、仅 pop+调度 reaper;`_reap_work` 锁外 **kill 确认死(端口释放)→ 同端口重起 → 入队**(一举满足 B-2 锁外/B-3 死后入队/B-4 死后重起);`default_kill` 补 **SIGKILL 兜底**(terminate→wait5→仍活则 kill→wait5)。代价:slot recycle 期空缺 ~kill+冷启(同端口即时补位本不可得) |
+
+### 三、B-4/B-4b 修复的实测验证(评审组重跑)
+
+- **`test_recycle_rebinds_same_port_real_process`(真进程+真端口,端到端)**:真 subprocess 起
+  `HTTPServer` 占端口 P → alloc → release → 断言 reaper kill 确认死后**同端口重起并 15s 内
+  再 ready** → 通过(即"死后重起不抢端口")。
+- **`test_default_kill_terminates_real_process`**:真 `sleep 30` 子进程,`default_kill` 后
+  `proc.poll()` 非 None(确已死)——通过。
+- **`test_default_kill_sigkill_fallback`**:terminate 后 wait 抛 `TimeoutExpired` 的假 handle,
+  断言走 `kill()`(SIGKILL 兜底)——通过。
+- **代码复核**:`_reap_work` 的 `_spawn_one` 严格在 `_kill_fn(handle)` 返回**之后**执行,而
+  `default_kill` 内 `wait`/`kill` 确认进程真死才返回 → spawn-after-death 顺序由代码结构保证
+  (非时序侥幸)。
+
+### 四、测试保真护栏(评审组§四建议 → **已采纳并实测确认**)
+
+原端到端用例的 `_FAKE_AGENT`(`serve_forever` 无信号处理、SIGTERM 即死)只**正向证明**"死后
+重起",端口释放太快、对旧"立即同端口 spawn"未必稳定判红,作回归护栏偏弱。**设计者已强化**
+(提交 `8ff8620`):`_FAKE_AGENT` 装 SIGTERM handler、收到后 `sleep(1.5)` 再退(仿真 agent
+优雅收尾数秒持端口)。**评审组核实**:POSIX 下——旧 bug(立即同端口 spawn)会在旧进程仍持端口
+的 1.5s 窗口 bind → EADDRINUSE → 用例稳定**判红**;现修复("kill 确认死后才 spawn",
+`default_kill.wait` 于 ~1.5s<5s 等到子进程退出、不触 SIGKILL)→ 用例**绿**——护栏由此具备
+判别力。**限制(已诚实标注)**:Windows `terminate` 硬杀不走 handler、fake agent 即死,故该
+判别力**仅 POSIX 生效**(部署/CI 目标为 Linux,覆盖到位;本机 Windows 上该用例保持正向通过)。
+修复本身与持端口时长无关(spawn 严格在确认死之后),此为护栏强化。**该建议已闭环。**
+
+### 五、最终裁定(全闭环,无遗留项)
+
+- **B-1 / B-2 / B-3 / B-4(含 B-4b):全部修复确认通过**——B-1 转码后 manifest 无悬空(实测)、
+  B-2 kill 锁外、B-3 kill 先于入队、B-4 死后同端口重起(真端口用例)、B-4b SIGKILL 兜底
+  (真进程用例);spawn-after-death 由代码结构保证。
+- **§四测试护栏建议已采纳**(fake agent SIGTERM 后持端口 1.5s,POSIX 下稳定判旧 bug 红)——
+  无遗留评审项。
+- 其余(状态机/API/转码器/§7.2/D-21·22/P-5/**144 绿**)达标。
+- **PR-B 全部评审项闭环,可合入。**
+
+> 评审组签署(PR-B 合并稿·全闭环):B-1~B-4(含 B-4b)全部实测/看码确认修复;真端口·真进程
+> 集成测坐实"死后同端口重起"+ SIGKILL 兜底真杀;§四护栏建议已采纳(1.5s 持端口,POSIX 判别力
+> 确认、Windows 侧诚实标注为正向通过)。**PR-B 无遗留评审项,可合入。** 评审组只读,未改任何
+> 工程代码。
+
+### 设计者应答(PR-B · B-4,2026-07-07)
+
+**B-4/B-4b 认——是我 B-2 修复引入的新缺陷,评审组两腿实测(EADDRINUSE errno 10048 +
+SIGTERM 优雅收尾数秒占端口)坐实,阻塞级判定成立。已按"三、必修方案"全修:**
+
+- **B-4(端口抢占)**:`_recycle` 移除锁内 `_spawn_one`——持锁只 pop + 调度 reaper;`_reap_work`
+  锁外**先 kill 确认死(端口释放)→ 再同端口 `_spawn_one` → 再入队**。一举同时满足 B-2(kill
+  锁外)/ B-3(死后入队)/ B-4(死后重起不抢端口)。**代价如评审所述**:slot 在 recycle 期空缺
+  ~kill+冷启,"即时同端口补位"本不可得(要即时须 spare 端口池、端口数>进程数)——接受此代价,
+  正确性优先;若后续要即时补位,作为 spare-port 优化另议。
+- **B-4b(无强杀兜底)**:`default_kill` 补 SIGKILL——`terminate()`→`wait(5)`→仍活则 `kill()`+
+  `wait(5)`,消除"优雅关闭卡住→端口永占→slot 永久死"。
+
+**必补测(堵"假 I/O 逃过",评审组§四)——已加真端口/真进程集成用例**:
+- `test_recycle_rebinds_same_port_real_process`:**真 subprocess**(极小假 agent 绑端口应答
+  /healthz,秒起)+ 真 `default_healthz`/`default_kill` + 后台轮询——alloc→release→断言
+  **新进程在旧进程死后于同端口成功 bind 并 ready**(B-4 端到端证明:立即同端口 spawn 会
+  EADDRINUSE);
+- `test_default_kill_terminates_real_process`:真 `python sleep` 进程被 default_kill 真杀死;
+- `test_default_kill_sigkill_fallback`:terminate 后卡住 → 走 SIGKILL(B-4b);
+- `test_recycle_spawns_after_kill_b4`:调用序断言 `["kill","spawn:port]"`(死后才重起)。
+
+**门禁**:全量 **144 单测全绿**(140+4),lint/format/行数门禁过。测试文件 docstring 已更正
+(不再声称"无真进程")。B-1~B-4/B-4b 均已修复 + 专项(含真端口/真进程)用例锁定,建议复核合入。
+
+### 设计者应答(PR-B · 闭环 + §四护栏,2026-07-07)
+
+**"PR-B 可合入"收到,B-1~B-4/B-4b 全部闭环。** §四低危护栏建议**说得准且我已采纳**——原
+`_FAKE_AGENT`(`serve_forever` 无信号处理、SIGTERM 即死)只**正向证明**了"死后重起",但端口
+释放太快,对旧"立即同端口 spawn"未必稳定判红,作回归护栏偏弱。
+
+**已强化(随本 PR 一并带上)**:`_FAKE_AGENT` 装 SIGTERM handler,**收到后 `sleep(1.5)` 再退**
+(仿真 agent cli.py 优雅收尾数秒持端口;仅 POSIX 生效)。效果:若有人回退到"立即同端口
+spawn",新进程会在旧进程仍持端口的 1.5s 窗口内 bind → EADDRINUSE → **用例稳定判红**;而
+现修复("kill 确认死后才 spawn")下,`default_kill` 的 `wait` 等到子进程退出(~1.5s<5s 不触
+SIGKILL)才 spawn,用例仍绿。Windows 侧 `terminate` 硬杀不走 handler、即刻死,测试保持正向
+通过、不变慢。修复本身与持端口时长无关(spawn 严格在确认死之后),故此纯属护栏强化。
+
+**门禁**:全量 **144 单测全绿**,lint/format/行数门禁过。至此 PR-B 三组件 + B-1~B-4/B-4b
+修复 + 真端口/真进程(强化)回归护栏齐备,建议合入。
