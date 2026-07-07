@@ -841,3 +841,35 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 > 评审组签署(PR-C 整体·闭环):B-C-2 修复实测判别(真 upstream 失败→释放不锁死)、N-1 sweep
 > 兜底、N-3 R6 补测、N-2 合理入 PR-D;177 绿。**PR-C 无遗留评审项,可合入。** 评审组只读,
 > 未改任何工程代码。
+
+## PR-D(集成回归 + 浸泡 + 部署文档)· 实施记录
+
+**PR-C 已合入 main(PR#30,c3fe77e)。PR-D 分支 `feat/concurrency-d-integration`。**
+
+### 首个增量:全链集成 harness(已交付,待评审)
+
+单组件测(c_main/c_proxy)用 in-process 假 agent 覆盖了路由/宽限窗单点逻辑;PR-D 补的是**跨组件、
+真进程**的一环:**真池管理器(spawn 假 agent 子进程)→ 真控制 API → 真网关 → 真 WS/HTTP 客户端**。
+
+- `tests/_fake_agent_server.py`(83 行):池管理器像真 agent 一样 spawn 的假 agent 子进程,暴露
+  `/healthz`(池探活 + `pid`/`audio_total`)/`/ws/audio`(身份帧+回声)/`/ws`/`/api/mic`;**零云/模型
+  依赖**(不复活已暂停的音频注入课题),生命周期由池管理器 kill 回收。
+- `tests/test_ours_concurrency_d_integration.py`(5 用例,真子进程,~10s):
+  1. **全链往返**:GET/ 分配→种 cookie→/ws/audio 身份帧+回声→/api/mic 反代(跨网关+池+agent)。
+  2. **宽限窗跨真进程(R1)**:断开→`_agent_healthz` 证上游仍被网关持有(`audio_conns==1`、`pid` 不变);
+     窗内重连 REATTACH→回声正常且 **`audio_total==1`**(agent 全程只被连一次、同进程);超时→网关
+     sweep release→池**同端口回收换新进程**(`pid` 变)。end-to-end 坐实 T2/D-16/D-07 收尾。
+  3. **N+1 繁忙**:占满座位后新浏览器 GET/ → 池 503 → 网关繁忙页。
+  4. **断开→回收→槽复用**:断开→sweep release→池回收→`status.ready` 复位→可再分配。
+  5. **批量断开**:N=3 路同断→全部 release→池同端口全回收复位(`ready==n`)。
+- **门禁**:94 并发用例绿(90→+4;另批量+1)、lint-ours/format/行数门禁过。**踩坑**:aiohttp 默认
+  cookie jar 拒收 IP 主机(127.0.0.1)cookie,浏览器会话须用 `CookieJar(unsafe=True)` 才携亲和 cookie。
+
+### 待办(本增量之后)
+
+- **浸泡 harness(§7)**:4 路 × 2h 长循环 + 进程树 RSS/句柄/磁盘增速/转码积压采样脚本(长跑,落
+  `docs/reports/`);N2 转码并发 ≤2 已在 `b_transcoder` 单测坐实,浸泡再观测在线路 KPI 无扰动。
+- **N-2 真浏览器**:双标签页快速刷新误判回归(需真浏览器时序,非子进程可复现)。
+- **A1-F1**:#3 优雅退出在 console/ThreadJobExecutor 实际形态的效力核实(已有池侧 kill 兜底,非阻塞)。
+- **部署文档 + 部署验收项**:M3 内网 nmap、R4 systemd 拉起、R5 时钟/时间戳、R7 七项告警(§6 表标 PR-D)。
+- **上线前置门(不随本 PR)**:目标机 N=8/10 摸底 + B5 复测、Q5 合规——两坎未过不上线/不承诺产能 N。
