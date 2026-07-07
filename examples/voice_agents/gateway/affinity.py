@@ -15,7 +15,8 @@ import hashlib
 import hmac
 import threading
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 IDLE, ACTIVE, PENDING_DISCONNECT, CLOSED = "idle", "active", "pending_disconnect", "closed"
@@ -57,7 +58,9 @@ class Session:
     state: str = IDLE
     upstream: Any = None  # 网关持有的内部上游连接(T2:ACTIVE+PENDING 期不断)
     grace_deadline: float = 0.0
-    audio_conns: int = 0  # 当前活跃 /ws/audio 连接数(双标签页检测,R3)
+    # 活跃 /ws/audio 连接的 conn_id 集合(双标签页检测 R3 = 非空即拒;C-1:唯有登记过 conn_id
+    # 的连接才能 disconnect,被拒连接拿不到 conn_id → 无法误递减错杀真会话)。
+    audio_conns: set[str] = field(default_factory=set)
 
 
 class AffinityTable:
@@ -94,30 +97,34 @@ class AffinityTable:
             return None
         return s
 
-    def on_audio_connect(self, session_id: str) -> tuple[str, Session | None]:
-        """/ws/audio 连接。返回 (结果, session):
-        FRESH(IDLE→ACTIVE,新建上游)/ REATTACH(PENDING→ACTIVE,接回既有上游 T2)/
-        REJECT_BUSY(已有活跃音频=双标签页 R3)/ REJECT_GONE(会话亡)。"""
+    def on_audio_connect(self, session_id: str) -> tuple[str, Session | None, str | None]:
+        """/ws/audio 连接。返回 (结果, session, conn_id):
+        FRESH(IDLE→ACTIVE,新建上游)/ REATTACH(PENDING→ACTIVE,接回既有上游 T2)——**均带
+        conn_id**,proxy 须在该连接关闭时以此 conn_id 调 on_audio_disconnect;
+        REJECT_BUSY(已有活跃音频=双标签页 R3)/ REJECT_GONE(会话亡)——**conn_id=None**,被拒
+        连接不得回调 disconnect(C-1:即便误调,None 不在集合、天然无操作,不会错杀真会话)。"""
         with self._lock:
             s = self._sessions.get(session_id)
             if s is None or s.state == CLOSED:
-                return CONNECT_REJECT_GONE, None
-            if s.audio_conns > 0:
-                return CONNECT_REJECT_BUSY, s
+                return CONNECT_REJECT_GONE, None, None
+            if s.audio_conns:  # 已有活跃音频连接 = 双标签页
+                return CONNECT_REJECT_BUSY, s, None
             reattach = s.state == PENDING_DISCONNECT
+            conn_id = uuid.uuid4().hex
             s.state = ACTIVE
-            s.audio_conns += 1
+            s.audio_conns.add(conn_id)
             s.grace_deadline = 0.0
-            return (CONNECT_REATTACH if reattach else CONNECT_FRESH), s
+            return (CONNECT_REATTACH if reattach else CONNECT_FRESH), s, conn_id
 
-    def on_audio_disconnect(self, session_id: str) -> None:
-        """/ws/audio 断开:最后一条音频连接断 → ACTIVE 转 PENDING_DISCONNECT(宽限窗计时)。"""
+    def on_audio_disconnect(self, session_id: str, conn_id: str | None) -> None:
+        """/ws/audio 断开(仅对 on_audio_connect 登记过的 conn_id 生效,C-1 结构守卫):
+        最后一条音频连接断 → ACTIVE 转 PENDING_DISCONNECT(宽限窗计时)。"""
         with self._lock:
             s = self._sessions.get(session_id)
-            if s is None:
-                return
-            s.audio_conns = max(0, s.audio_conns - 1)
-            if s.audio_conns == 0 and s.state == ACTIVE:
+            if s is None or conn_id is None or conn_id not in s.audio_conns:
+                return  # 未登记(含被拒连接的 None、重复断开)→ 天然无操作
+            s.audio_conns.discard(conn_id)
+            if not s.audio_conns and s.state == ACTIVE:
                 s.state = PENDING_DISCONNECT
                 s.grace_deadline = self._clock() + self._grace
 

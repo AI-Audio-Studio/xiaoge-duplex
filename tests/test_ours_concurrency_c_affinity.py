@@ -94,9 +94,9 @@ def test_connect_fresh_then_disconnect_pending() -> None:
     t, clk = _table()
     t.register("s1", "p1", 19100)
     assert t.get("s1").state == af.IDLE
-    res, s = t.on_audio_connect("s1")
-    assert res == af.CONNECT_FRESH and s.state == af.ACTIVE and s.audio_conns == 1
-    t.on_audio_disconnect("s1")
+    res, s, cid = t.on_audio_connect("s1")
+    assert res == af.CONNECT_FRESH and s.state == af.ACTIVE and len(s.audio_conns) == 1
+    t.on_audio_disconnect("s1", cid)
     assert t.get("s1").state == af.PENDING_DISCONNECT
     assert t.get("s1").grace_deadline == 10.0  # now(0)+grace(10)
 
@@ -104,10 +104,10 @@ def test_connect_fresh_then_disconnect_pending() -> None:
 def test_reconnect_within_grace_reattaches() -> None:
     t, clk = _table()
     t.register("s1", "p1", 19100)
-    t.on_audio_connect("s1")
-    t.on_audio_disconnect("s1")  # → PENDING, deadline=10
+    _, _, cid = t.on_audio_connect("s1")
+    t.on_audio_disconnect("s1", cid)  # → PENDING, deadline=10
     clk.t = 5.0  # 窗内
-    res, s = t.on_audio_connect("s1")
+    res, s, _ = t.on_audio_connect("s1")
     assert res == af.CONNECT_REATTACH and s.state == af.ACTIVE  # 接回既有上游(T2)
     assert t.sweep_expired() == []  # 已回 ACTIVE,不再过期
 
@@ -115,8 +115,8 @@ def test_reconnect_within_grace_reattaches() -> None:
 def test_grace_timeout_closes() -> None:
     t, clk = _table()
     t.register("s1", "p1", 19100)
-    t.on_audio_connect("s1")
-    t.on_audio_disconnect("s1")  # deadline=10
+    _, _, cid = t.on_audio_connect("s1")
+    t.on_audio_disconnect("s1", cid)  # deadline=10
     clk.t = 9.9
     assert t.sweep_expired() == []  # 未到点
     clk.t = 10.0
@@ -124,7 +124,7 @@ def test_grace_timeout_closes() -> None:
     assert len(expired) == 1 and expired[0].session_id == "s1"
     assert t.get("s1") is None  # 移出表
     # 超时后再连 → 会话已亡
-    res, _ = t.on_audio_connect("s1")
+    res, _, _ = t.on_audio_connect("s1")
     assert res == af.CONNECT_REJECT_GONE
 
 
@@ -132,8 +132,26 @@ def test_double_tab_rejected() -> None:
     t, _ = _table()
     t.register("s1", "p1", 19100)
     t.on_audio_connect("s1")  # 第一条音频连接
-    res, s = t.on_audio_connect("s1")  # 同 cookie 再连 = 双标签页
-    assert res == af.CONNECT_REJECT_BUSY and s.state == af.ACTIVE  # 不透传、不改状态
+    res, s, cid = t.on_audio_connect("s1")  # 同 cookie 再连 = 双标签页
+    assert (
+        res == af.CONNECT_REJECT_BUSY and cid is None and s.state == af.ACTIVE
+    )  # 不透传、无 conn_id
+
+
+def test_c1_rejected_double_tab_close_does_not_kill_session() -> None:
+    """C-1:被拒双标签页连接(conn_id=None)关闭时**即便误调** disconnect,也不得把正在通话的
+    真会话降到 PENDING(错杀第一标签页)。结构守卫:conn_id 不在集合 → 天然无操作。"""
+    t, _ = _table()
+    t.register("s1", "p1", 19100)
+    res1, _, cid1 = t.on_audio_connect("s1")  # 第一标签页:接受
+    res2, _, cid2 = t.on_audio_connect("s1")  # 第二标签页:被拒
+    assert res1 == af.CONNECT_FRESH and res2 == af.CONNECT_REJECT_BUSY and cid2 is None
+    t.on_audio_disconnect("s1", cid2)  # 被拒连接关闭(cid=None)→ 无操作
+    assert t.get("s1").state == af.ACTIVE and len(t.get("s1").audio_conns) == 1  # 真会话仍 ACTIVE
+    t.on_audio_disconnect("s1", cid1)  # 只有真连接关闭才转 PENDING
+    assert t.get("s1").state == af.PENDING_DISCONNECT
+    t.on_audio_disconnect("s1", cid1)  # 重复断开幂等(cid 已移除)→ 无操作
+    assert t.get("s1").state == af.PENDING_DISCONNECT
 
 
 def test_resolve_and_close() -> None:

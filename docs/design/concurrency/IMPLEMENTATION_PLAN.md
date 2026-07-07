@@ -621,3 +621,76 @@ SIGKILL)才 spawn,用例仍绿。Windows 侧 `terminate` 硬杀不走 handler、
 
 **门禁**:全量 **144 单测全绿**,lint/format/行数门禁过。至此 PR-B 三组件 + B-1~B-4/B-4b
 修复 + 真端口/真进程(强化)回归护栏齐备,建议合入。
+
+## PR-C(网关,v4 §6)· 评审组结论(**阶段性:3/5 模块**,2026-07-07)
+
+> 分支 `feat/concurrency-c-gateway`,已推 origin。当前 **3/5 模块**:`gateway/config.py`(§3.5)、
+> `affinity.py`(P-4 cookie + P-3/T2/D-16/R3 状态机)、`pool_client.py`(P-2)。**未到:`proxy.py`
+> (HTTP 反代 + WS 双向透传 + 宽限窗上游持有)、`main.py`(装配/TLS/sweep 循环)**。故本节为
+> **已交付 3 模块的阶段性评审,非 PR-C 合入裁定**。评审组全程只读、实测取证,未改工程代码。
+
+### 一、已交付 3 模块——质量达标(实测/看码取证)
+
+- **门禁(评审组重跑)**:`test_ours_*` **159 passed**、ruff 全绿、行数门禁 exit 0;4 个 gateway
+  文件 + 2 测试文件已入 ourcode.txt(与 diff 一致)。
+- **config.py(§3.5)**:`XG_GRACE_SECONDS=12`(D-16)、`XG_ACCESS_CODE`(Q6)、`XG_HMAC_SECRET`
+  空→`secrets.token_hex(16)` 随机(R4 重启失效)、`XG_MSG_RATE`/`XG_MAX_FRAME_BYTES`(R6)、
+  `pool_api`——与 §3.5 逐项一致;`listen_host` 默认 `0.0.0.0`(对外网关本体,正确;内部进程
+  127.0.0.1 由 poolmgr 注入,M3 归属清楚)。
+- **affinity.py(P-4/P-3/T2/D-16/R3)**:HMAC-SHA256 cookie、**常数时间比对**(`hmac.compare_digest`)、
+  篡改/换密钥拒绝(测试锁定);状态机 IDLE→ACTIVE→PENDING_DISCONNECT(注入时钟宽限窗)→
+  REATTACH/CLOSED,双标签页 REJECT_BUSY 不改原状态——**测试均以注入时钟走真边界**(9.9 未过、
+  10.0 过期、窗内重连 REATTACH、超时 CLOSED→再连 REJECT_GONE),非空壳。
+- **pool_client.py(P-2)**:/alloc·/release·/status 与 poolmgr control_api 对齐;**错误吞成安全
+  默认**经**真不可达地址**(`127.0.0.1:1`,非 mock)实测——alloc→None/release→False/status→{}。
+- **范围核实**:`qwen_gateway_console_agent.py` 虽在 ourcode.txt,但 `git` 证其为 **main 既有文件**
+  (初始提交起),**不在 PR-C diff**——非本 PR 引入,无涉。
+
+### 二、须在 proxy.py/main.py(剩余 2/5)落实或验证的项
+
+- **C-1(契约硬约束,须 proxy.py 遵守)**:`affinity.on_audio_disconnect` **无条件**递减
+  `audio_conns`,且无"仅对已接受连接生效"的守卫。若 proxy.py 对一条 **REJECT_BUSY(双标签页
+  被拒)** 的连接在其关闭时**也调 on_audio_disconnect**,会把真会话的 `audio_conns` 从 1 降到 0
+  → **误转 PENDING_DISCONNECT、错杀正在通话的第一标签页**。**必须**:proxy.py 只对
+  `on_audio_connect` 返回 FRESH/REATTACH(已接受)的连接配对调用 on_audio_disconnect;REJECT_*
+  连接直接关、不得回调 disconnect。建议加一条专项用例(拒绝的双标签页关闭 → 原会话仍 ACTIVE)。
+- **T2/D-16 真行为未覆盖**:affinity 只给**状态决策**(FRESH/REATTACH/…),`Session.upstream`
+  字段全程未被读写——"网关持有上游、重连帧续接"的**真实现在 proxy.py**,当前不可验证(阶段性
+  正常,但 T2 的实质须待 proxy.py + 真 WS 集成测)。
+- **sweep 驱动缺失**:`sweep_expired()` 是被动方法,需 main.py 起周期 sweep 循环(类 poolmgr
+  poll)才会真触发宽限窗超时回收;当前无驱动。
+- **R1/R3/D1/Q6/R6 集成验收**(§6 映射均属 PR-C/D):真 WS 断开→窗内重连延续/超时新会话、
+  双标签页提示页、关闭码 4001/409、准入口令、限流——须待 proxy.py/main.py + harness 真链路。
+
+### 三、阶段性裁定
+
+- 已交付 3 模块(config/affinity/pool_client)**质量达标、测试非空壳、门禁 159 绿**,无阻塞级缺陷。
+- **C-1 为剩余 proxy.py 的必守契约**(现无守卫,极易错→错杀会话),须落实 + 专项用例。
+- **不构成 PR-C 合入裁定**:待 proxy.py/main.py 交付 + R1/R3/D1/Q6/R6 真链路集成测齐备后整体复核。
+
+> 评审组签署(PR-C 阶段性·3/5):config/affinity/pool_client 达标(HMAC 常数时间、状态机注入
+> 时钟真边界、pool_client 真不可达安全默认均实测);C-1(on_audio_disconnect 无条件递减)列为
+> proxy.py 必守契约 + 必补测;T2 真上游持有/sweep 驱动/集成验收待剩余 2/5。评审组只读,未改
+> 任何工程代码。
+
+### 设计者应答(PR-C 阶段性·3/5 + C-1,2026-07-07)
+
+**阶段性达标收到**(config/affinity/pool_client、159 绿、注入时钟真边界、真不可达安全默认)。
+**C-1 抓得极准且我做了比"proxy 纪律 + 补测"更硬的处置——改成结构守卫,让 footgun 从
+"靠 proxy 自律"变成"想错都错不了":**
+
+- `on_audio_connect` 现返回 **(结果, session, conn_id)**:FRESH/REATTACH 带唯一 conn_id;
+  **REJECT_BUSY/REJECT_GONE 的 conn_id=None**。`Session.audio_conns` 由计数改为 **conn_id 集合**。
+- `on_audio_disconnect(session_id, conn_id)`:**仅当 conn_id 在集合内才生效**;被拒连接的
+  None(或重复断开的旧 id)天然无操作。故即便 proxy.py 对一条被拒双标签页连接误调
+  disconnect,也**不会把正在通话的真会话降到 PENDING**——评审担心的"错杀第一标签页"在
+  affinity 层被结构性堵死,不依赖 proxy 自律。
+- 补测:`test_c1_rejected_double_tab_close_does_not_kill_session`(被拒连接关闭→真会话仍
+  ACTIVE;真连接关闭才转 PENDING;**重复断开幂等**)。9→10 条 affinity 单测,全量 160 绿。
+
+**其余观察接受、归属正确**(proxy.py/main.py 的活):T2"网关持有上游 + 重连帧续接"的真
+实现、`Session.upstream` 的真读写、sweep 周期驱动(main.py 起类 poll 循环)、R1/R3/D1/Q6/R6
+真链路集成——都待剩余 2/5 模块 + **真 WS 集成测**(承前几轮教训:这类组件必配真 I/O 测)。
+proxy.py 将从一开始就用上述安全 API(conn_id 配对),不留 C-1 隐患。
+
+**门禁**:160 单测全绿,lint/format/行数门禁过。继续 proxy.py + main.py。
