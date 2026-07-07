@@ -1,0 +1,59 @@
+<svg viewBox="0 0 198 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="端云结合的全双工自然语音交互:端侧机器人(脸=屏幕,显示插话打断),云端动态判停(沙漏)、意图识别(灯泡)、回复规划(清单),全双工双向">
+  <!-- ================= 端:机器人头(脸=屏幕,插话打断) ================= -->
+  <!-- 天线 -->
+  <path d="M28 17 V11" stroke="#4FB485" stroke-width="2.4" stroke-linecap="round"/>
+  <circle cx="28" cy="9.2" r="2" fill="#4FB485"/>
+  <!-- 两侧传感/耳 -->
+  <rect x="9.5" y="27" width="4" height="8" rx="2" fill="#E9F7F0" stroke="#4FB485" stroke-width="2"/>
+  <rect x="42.5" y="27" width="4" height="8" rx="2" fill="#E9F7F0" stroke="#4FB485" stroke-width="2"/>
+  <!-- 头 -->
+  <rect x="13" y="17" width="30" height="30" rx="7" fill="#E9F7F0" stroke="#4FB485" stroke-width="2.4"/>
+  <!-- 脸=屏幕 -->
+  <rect x="17" y="21" width="22" height="22" rx="3" fill="#CFEDDD"/>
+  <!-- 屏内:两个交叠气泡 = 插话打断 -->
+  <rect x="19.5" y="23.5" width="12" height="8" rx="2.6" fill="#EAF7F0" stroke="#5FB68C" stroke-width="1.4"/>
+  <g fill="#5FB68C"><circle cx="22.5" cy="27.5" r=".8"/><circle cx="25.5" cy="27.5" r=".8"/><circle cx="28.5" cy="27.5" r=".8"/></g>
+  <rect x="24.5" y="30.5" width="12.5" height="8.5" rx="2.6" fill="#3E9E77"/>
+  <path d="M33.5 38.6 L35.1 41 L31.1 39 Z" fill="#3E9E77"/>
+  <g fill="#EAF7F0"><circle cx="27.9" cy="34.8" r=".8"/><circle cx="30.9" cy="34.8" r=".8"/><circle cx="33.9" cy="34.8" r=".8"/></g>
+
+  <!-- ================= 全双工:双向箭头 ================= -->
+  <g stroke="#59BE8E" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M49 32 H95"/><path d="M91 29 L95 32 L91 35"/>
+    <path d="M95 43 H51"/><path d="M55 40 L51 43 L55 46"/>
+  </g>
+
+  <!-- ================= 云:云端能力 ================= -->
+  <g fill="#BFE6CF">
+    <circle cx="112" cy="27" r="12"/>
+    <circle cx="136" cy="20" r="18"/>
+    <circle cx="158" cy="25" r="14"/>
+    <circle cx="176" cy="29" r="10"/>
+    <rect x="99" y="28" width="82" height="13" rx="6.5"/>
+  </g>
+
+  <!-- 动态判停:沙漏(下移) -->
+  <g stroke="#2F9268" stroke-linecap="round">
+    <path d="M105.5 20.5 H118.5" stroke-width="2.4"/>
+    <path d="M105.5 35.5 H118.5" stroke-width="2.4"/>
+  </g>
+  <path d="M107 21 L117 21 L112 28 Z" fill="#2F9268"/>
+  <path d="M112 28 L107 35 L117 35 Z" fill="#2F9268"/>
+
+  <!-- 意图识别:灯泡(下移) -->
+  <circle cx="139" cy="25" r="6" fill="#EAF7F0" stroke="#2F9268" stroke-width="2"/>
+  <path d="M137 25.4 L138.7 27.4 L140.5 24.9" fill="none" stroke="#2F9268" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g stroke="#2F9268" stroke-width="2" stroke-linecap="round">
+    <path d="M136.4 32 H141.6"/><path d="M137.6 34.4 H140.4"/>
+  </g>
+
+  <!-- 回复规划:清单(下移) -->
+  <g stroke="#2F9268" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M155.5 23 l1.3 1.3 l2.5 -2.7" stroke-width="1.8"/>
+    <path d="M155.5 27 l1.3 1.3 l2.5 -2.7" stroke-width="1.8"/>
+    <path d="M155.5 31 l1.3 1.3 l2.5 -2.7" stroke-width="1.8"/>
+    <path d="M162 22.6 H175" stroke-width="2"/>
+    <path d="M162 26.6 H175" stroke-width="2"/>
+    <path d="M162 30.6 H172" stroke-width="2"/>
+  </g>
+</svg>

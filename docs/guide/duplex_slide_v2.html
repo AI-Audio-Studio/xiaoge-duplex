@@ -1,0 +1,175 @@
+<title>全双工自然语音交互引擎 · 一页概览(白底·对话版)</title>
+<style>
+  :root{
+    --line:#E6E9F0;
+    --ink:#16202E; --muted:#5A6678;
+    --user:#C9791A;  --user-bg:#FFF2DC; --user-bd:#EEBE79; --user-tx:#7A4712;
+    --ai:#0E96AB;    --ai-bg:#E6F7FA;   --ai-bd:#8FD5DF;   --ai-tx:#0B4A54;
+    --ok:#159A66;
+    --mono:ui-monospace,"SF Mono","Cascadia Code",Consolas,"Roboto Mono",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",
+           "Hiragino Sans GB","Source Han Sans SC","Noto Sans CJK SC","Segoe UI",sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#E9ECF1;color:var(--ink);font-family:var(--sans);
+       min-height:100vh;display:grid;place-items:center;padding:24px}
+
+  .slide{
+    container-type:inline-size;
+    width:min(96vw,1200px); aspect-ratio:16/9;
+    background:
+      radial-gradient(120% 140% at 90% 10%, rgba(14,150,171,.05), transparent 55%),
+      radial-gradient(120% 140% at 4% 98%, rgba(201,121,26,.05), transparent 50%),
+      #FFFFFF;
+    border:1px solid var(--line); border-radius:16px; overflow:hidden;
+    display:grid; grid-template-rows:auto 1fr auto;
+    box-shadow:0 18px 50px rgba(20,32,54,.12);
+  }
+  .pad{padding:4.4cqw 5cqw}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:1em}
+  .eyebrow{font-family:var(--mono);font-size:1.25cqw;letter-spacing:.32em;
+           text-transform:uppercase;color:var(--ai)}
+  .kicker{font-family:var(--mono);font-size:1.05cqw;letter-spacing:.14em;color:var(--muted)}
+
+  main{display:grid;grid-template-columns:0.86fr 1.14fr;gap:3.4cqw;align-items:center;
+       padding:0 5cqw}
+  h1{margin:0 0 1.6cqw;font-size:5cqw;line-height:1.04;font-weight:850;
+     letter-spacing:-.01em;text-wrap:balance}
+  h1 .hi{color:var(--ai)}
+  .lede{margin:0 0 3cqw;font-size:1.7cqw;line-height:1.55;color:var(--muted);max-width:32ch}
+  .lede b{color:var(--ink);font-weight:700}
+  .vals{list-style:none;margin:0;padding:0;display:grid;gap:1.4cqw}
+  .vals li{display:grid;grid-template-columns:auto 1fr;gap:1.2cqw;align-items:start}
+  .dot{width:1.5cqw;height:1.5cqw;margin-top:.5cqw;border-radius:50%;
+       background:conic-gradient(from 210deg,var(--ai),var(--user));flex:none}
+  .vt{font-size:1.7cqw;font-weight:750}
+  .vd{font-size:1.32cqw;color:var(--muted);line-height:1.4}
+
+  /* ---------- 对话图 ---------- */
+  .scene{position:relative;height:100%;min-height:0;display:flex;flex-direction:column;
+         justify-content:center;gap:1.4cqw;padding:.5cqw 0}
+  .row{display:flex;align-items:flex-end;gap:1.1cqw}
+  .row.ai{justify-content:flex-start}
+  .row.user{justify-content:flex-end}
+  .av{width:4.4cqw;height:4.4cqw;border-radius:26%;display:grid;place-items:center;
+      flex:none;border:1px solid}
+  .av svg{width:2.5cqw;height:2.5cqw}
+  .av.u{border-color:var(--user-bd);background:var(--user-bg)}
+  .av.a{border-color:var(--ai-bd);background:var(--ai-bg)}
+  .bubble{max-width:74%;padding:1.5cqw 1.9cqw;font-size:1.62cqw;line-height:1.5;
+          position:relative;border:1px solid}
+  .bubble .who{display:block;font-family:var(--mono);font-size:.95cqw;letter-spacing:.14em;
+               margin-bottom:.5cqw}
+  .ai .bubble{background:var(--ai-bg);border-color:var(--ai-bd);color:var(--ai-tx);
+              border-radius:16px 16px 16px 5px}
+  .ai .bubble .who{color:var(--ai)}
+  .user .bubble{background:var(--user-bg);border-color:var(--user-bd);color:var(--user-tx);
+                border-radius:16px 16px 5px 16px}
+  .user .bubble .who{color:var(--user)}
+  .frag{opacity:.55;text-decoration:line-through;text-decoration-color:rgba(11,74,84,.5)}
+
+  .cutin{margin-top:-2.6cqw;z-index:3;position:relative}
+  .barge{position:absolute;left:50%;top:-1.1cqw;transform:translateX(-50%);z-index:4;
+         font-family:var(--mono);font-size:1.02cqw;letter-spacing:.06em;color:#fff;
+         font-weight:700;background:var(--user);border-radius:999px;padding:.5cqw 1.1cqw;
+         box-shadow:0 4px 14px rgba(201,121,26,.32);white-space:nowrap;
+         animation:pop 2.6s ease-in-out infinite}
+  @keyframes pop{0%,100%{transform:translateX(-50%) scale(1)}
+                 8%{transform:translateX(-50%) scale(1.08)}}
+  .ok{color:var(--ok);font-weight:750}
+
+  .legend{display:flex;align-items:center;gap:.9cqw;margin-top:1.4cqw;
+          font-family:var(--mono);font-size:1.02cqw;letter-spacing:.05em;color:var(--muted);
+          justify-content:center}
+  .legend b{color:var(--ink);font-weight:700}
+  .legend .s{color:var(--ai)}
+
+  footer{display:flex;align-items:center;gap:2.4cqw;padding:2.2cqw 5cqw;
+         border-top:1px solid var(--line);background:#F6F8FB;font-size:1.28cqw}
+  .cmp{display:flex;align-items:center;gap:1cqw;color:var(--muted)}
+  .cmp .old{text-decoration:line-through;text-decoration-color:rgba(90,102,120,.55)}
+  .cmp .new{color:var(--ink);font-weight:700}
+  .arrow{color:var(--ai)}
+  .status{margin-left:auto;display:flex;align-items:center;gap:.8cqw;
+          font-family:var(--mono);font-size:1.05cqw;letter-spacing:.08em;color:var(--muted)}
+  .live{width:.8cqw;height:.8cqw;border-radius:50%;background:var(--ok);
+        box-shadow:0 0 0 0 rgba(21,154,102,.5);animation:pulse 2s infinite}
+  @keyframes pulse{70%{box-shadow:0 0 0 .7cqw rgba(21,154,102,0)}100%{box-shadow:0 0 0 0 rgba(21,154,102,0)}}
+
+  @media (prefers-reduced-motion:reduce){.barge,.live{animation:none!important}}
+</style>
+
+<div class="slide">
+  <div class="pad" style="padding-bottom:0">
+    <header>
+      <span class="eyebrow">小歌 · 语音交互引擎</span>
+      <span class="kicker">FULL-DUPLEX VOICE</span>
+    </header>
+  </div>
+
+  <main>
+    <div class="copy">
+      <h1><span class="hi">全双工</span>自然<br>语音交互</h1>
+      <p class="lede">像打电话一样——<b>边说边听、随时打断</b>,告别"你问一句、它答一句"的机械感。</p>
+      <ul class="vals">
+        <li><span class="dot"></span><div><div class="vt">自然如真人</div>
+          <div class="vd">话说一半也能插话,小歌当即改口,不用等它说完</div></div></li>
+        <li><span class="dot"></span><div><div class="vt">实时低延迟</div>
+          <div class="vd">听、想、说同时进行,响应即时、对话顺畅</div></div></li>
+        <li><span class="dot"></span><div><div class="vt">一引擎 · 多端接入</div>
+          <div class="vd">网页 / 硬件设备 / 工业系统统一接入,已部署真机验证</div></div></li>
+      </ul>
+    </div>
+
+    <div class="scene" role="img"
+         aria-label="对话演示:小歌正在播报预订,用户中途插话改时间,小歌立即改口确认——表示可随时打断的全双工交互">
+      <div class="row ai">
+        <div class="av a">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#0E96AB" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 12h2M18 12h2M7.5 8v8M16.5 8v8M11 5v14M13 5v14"/></svg>
+        </div>
+        <div class="bubble"><span class="who">小歌</span>
+          好的,正在为您预订明天上午十点的会议室,<span class="frag">并且已同步到日历——</span>
+        </div>
+      </div>
+
+      <div class="cutin">
+        <span class="barge">⚡ 用户插话打断</span>
+        <div class="row user">
+          <div class="bubble"><span class="who">用户</span>等一下,改到今天下午三点。</div>
+          <div class="av u">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#C9791A" stroke-width="1.6"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="row ai">
+        <div class="av a">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#0E96AB" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 12h2M18 12h2M7.5 8v8M16.5 8v8M11 5v14M13 5v14"/></svg>
+        </div>
+        <div class="bubble"><span class="who">小歌</span>
+          没问题,已改为<span class="ok">今天下午三点 ✓</span>
+        </div>
+      </div>
+
+      <div class="legend">
+        <span class="s">①</span> 小歌在说 &nbsp; <span class="s">②</span> 用户随时插话 &nbsp;
+        <span class="s">③</span> <b>小歌即时改口</b>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="cmp">
+      <span class="old">传统助手:问 → 等 → 答(对讲机式)</span>
+      <span class="arrow">➜</span>
+      <span class="new">小歌:全双工 · 自然对话</span>
+    </div>
+    <div class="status"><span class="live"></span>已部署上线 · 真机验证</div>
+  </footer>
+</div>
