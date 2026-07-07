@@ -65,6 +65,18 @@ class RecordSettings:
         """full=写 user/assistant/duplex 三文件;single=仅 duplex(mono 轨不写)。"""
         return self.record_mode != "single"
 
+    @property
+    def segment_seconds(self) -> float | None:
+        """full/single 档:按小时分段(P-6,默认 3600s;`XIAOGE_RECORD_SEGMENT_SECONDS` 可覆盖,
+        ≤0 关分段)。legacy/off 档:None=不分段(现状,逐字节不变)。"""
+        if self.record_mode not in {"full", "single"}:
+            return None
+        try:
+            v = float(os.getenv("XIAOGE_RECORD_SEGMENT_SECONDS", "3600").strip())
+        except ValueError:
+            v = 3600.0
+        return v if v > 0 else None
+
     def target_dir(self, repo_root: Path) -> Path:
         """录音/审计产物落盘目录。debug=runs/(测试资产,与现状同);其余=recordings/(生产)。
         目录名带 session_id 后缀(#1),防同秒多进程撞名。**每会话应只调一次并复用**。"""

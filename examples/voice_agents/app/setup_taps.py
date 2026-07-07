@@ -349,11 +349,18 @@ def setup_mute_gate(session: Any) -> None:
         session.input.audio = runtime.mute_gate
 
 
-def _install_test_recorder(ctx: JobContext, w: SessionWiring, rec_dir: Any, *, mono: bool) -> None:
+def _install_test_recorder(
+    ctx: JobContext,
+    w: SessionWiring,
+    rec_dir: Any,
+    *,
+    mono: bool,
+    segment_seconds: float | None = None,
+) -> None:
     """装 TestRecorder 到指定目录;失败绝不阻塞启动。"""
     from test_recorder import TestRecorder
 
-    recorder = TestRecorder(rec_dir, write_mono_tracks=mono)
+    recorder = TestRecorder(rec_dir, write_mono_tracks=mono, segment_seconds=segment_seconds)
     recorder.install(w.session)
     runtime.test_recorder = recorder  # 暴露给 /api/mic 做暂停/继续
     recorder.set_paused(bool(getattr(w.stt_engine, "muted", False)))  # 与当前静音状态对齐
@@ -372,8 +379,14 @@ def setup_recording(ctx: JobContext, w: SessionWiring) -> None:
         return
     if mode in {"full", "single"}:
         try:
-            _install_test_recorder(ctx, w, w.record_dir, mono=settings.writes_mono_tracks)
-            _log(f"RECORDER mode={mode} dir={w.record_dir}")
+            _install_test_recorder(
+                ctx,
+                w,
+                w.record_dir,
+                mono=settings.writes_mono_tracks,
+                segment_seconds=settings.segment_seconds,
+            )
+            _log(f"RECORDER mode={mode} dir={w.record_dir} seg={settings.segment_seconds}")
         except Exception as exc:  # 录音初始化失败绝不阻塞启动
             logger.warning("recorder disabled: %s", exc)
         return

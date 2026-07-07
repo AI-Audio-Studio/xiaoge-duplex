@@ -150,3 +150,54 @@ def test_full_writes_three_files(tmp_path: Path) -> None:
     for f in ("user.wav", "assistant.wav", "duplex.wav"):
         assert (tmp_path / f).exists(), f
     assert manifest["tracks"][0]["file"] == "user.wav"
+
+
+# ── P-6 分段:不分段 manifest 结构不变;分段产 .<seq> 文件 + 拼接时长等价 ─────
+def _seg_lists(gap_us: int) -> tuple[list, list]:
+    """两段用户音频:一段在 t=0,一段在 t=gap_us(制造跨桶)。"""
+    user = [
+        (0, np.ones(1600, dtype=np.int16) * 100, 16000),
+        (gap_us, np.ones(1600, dtype=np.int16) * 100, 16000),
+    ]
+    asst = [(0, np.ones(1600, dtype=np.int16) * 50, 16000)]
+    return user, asst
+
+
+def test_no_segmentation_keeps_legacy_manifest(tmp_path: Path) -> None:
+    from test_recorder import TestRecorder
+
+    rec = TestRecorder(tmp_path, segment_seconds=None)  # 不分段=现状
+    user, asst = _seg_lists(gap_us=100_000)
+    rec._render_and_write(user, asst)
+    m = json.loads((tmp_path / "audio_manifest.json").read_text(encoding="utf-8"))
+    assert "tracks" in m and "duplex" in m and "segments" not in m  # 结构不变
+    assert (tmp_path / "duplex.wav").exists()
+    assert not (tmp_path / "duplex.0.wav").exists()
+
+
+def test_segmentation_produces_seq_files(tmp_path: Path) -> None:
+    from test_recorder import TestRecorder
+
+    # 段长 1s;两段相隔 2s → 落在桶 0 与桶 2
+    rec = TestRecorder(tmp_path, segment_seconds=1.0)
+    user, asst = _seg_lists(gap_us=2_000_000)
+    rec._render_and_write(user, asst)
+    m = json.loads((tmp_path / "audio_manifest.json").read_text(encoding="utf-8"))
+    assert "segments" in m and len(m["segments"]) == 2
+    seqs = sorted(s["seq"] for s in m["segments"])
+    assert seqs == [0, 2]
+    for k in seqs:
+        assert (tmp_path / f"duplex.{k}.wav").exists()
+    assert not (tmp_path / "duplex.wav").exists()  # 分段模式不产无后缀文件
+
+
+def test_segmentation_total_frames_match_unsegmented(tmp_path: Path) -> None:
+    """分段各段总时长 ≈ 不分段整段(误差 ≤ 帧级);此处两段各含 1600 帧,合计应 = 3200。"""
+    from test_recorder import TestRecorder
+
+    rec = TestRecorder(tmp_path, segment_seconds=1.0)
+    user, asst = _seg_lists(gap_us=2_000_000)
+    rec._render_and_write(user, asst)
+    m = json.loads((tmp_path / "audio_manifest.json").read_text(encoding="utf-8"))
+    user_frames = sum(seg["tracks"][0]["frameCount"] for seg in m["segments"])
+    assert user_frames == 3200  # 两段用户音各 1600 帧,分段不丢样本
