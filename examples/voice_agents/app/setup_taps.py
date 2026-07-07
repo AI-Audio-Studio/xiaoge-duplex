@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_recorder import AudioRecorder
-from common.runtime import append_turn_log as _log, ms as _ms
+from common.runtime import append_turn_log as _log, ms as _ms, session_id
 from common.text_rules import (
     LEADING_PUNCT_RE,
     is_overlap_ack,
@@ -260,7 +260,11 @@ def setup_test_instrumentation(ctx: JobContext, session: Any) -> tuple[Any, Any]
     try:
         from event_timeline import EventTimeline, install_debug_log, remove_debug_log
 
-        run_dir = Path(__file__).resolve().parents[3] / "runs" / time.strftime("%Y%m%d_%H%M%S")
+        run_dir = (
+            Path(__file__).resolve().parents[3]
+            / "runs"
+            / f"{time.strftime('%Y%m%d_%H%M%S')}_{session_id()}"
+        )
         timeline = EventTimeline(run_dir)
         timeline.attach(session)
         ctx.add_shutdown_callback(timeline.aclose)

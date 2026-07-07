@@ -317,3 +317,85 @@ PR-A1 agent 小改 1/2/3/4/6 + 单测 ──► PR-A2 录音/审计子系统 + �
 **状态**:本材料即实施前评审**合格入场件**。实施前评审届时三项议程(P 项签字确认 /
 20 条验收方法走查 / PR 切分确认),其后仅余项目负责人批准一道门。WP-0 与外部摸底
 维持"发令即可启动"。零代码现状持续。
+
+---
+
+# 实施评审记录
+
+> 编码开工后,每个 PR 的评审结论追加于此(沿"评审意见 → 设计者应答"体例);对应
+> §6 的 20 条验收映射与 §10 的 PR 切分。评审组只读评审,不改工程代码。
+
+## PR-A1(agent 六处小改之 1/2/3/4/6)· 评审组结论(2026-07-06)
+
+- **标的**:分支 `feat/concurrency-a1-agent-smallfixes`,提交 `37528d4`(9 文件 +200/−7);
+  **未合入 main**(main 仍零代码改动),待合入评审 + 第二门。
+- **裁定:通过,可合入**——正确、范围严格(#5 正确留 A2)、惰性安全、门禁全绿;
+  两个集成期须验证项(A1-F1/A1-F2,非 A1 阻塞)+ 两个可选小改。
+
+### 评审组独立核实(非采信提交说明)
+
+- 门禁:`test_ours_*` **98 passed**、`ruff --config ruff-ours.toml` 全绿、行数门禁 exit 0;
+- `ctx.shutdown(reason=)` 是真 API(`job.py:655`),proc 路径 drain `_shutdown_callbacks`
+  (`job_proc_lazy_main.py:400`);
+- **#1 目录改名安全**:全仓无源码 `strptime` 解析 `runs/`/`recordings/` 目录名,`_<sid>`
+  后缀不打断任何解析;代码无残留 8765(仅数据日志内);
+- **#3 busy 路径安全**:busy 拒绝走 `return ws` 早返回,**不触达** `_request_graceful_exit`
+  ——不会误杀正在服务 primary 会话的进程;
+- **#3/#4 惰性正确**:无 `X-XG-Session` 头 / 未设 `XIAOGE_SESSION_ID` → 退出逻辑不触发、
+  日志格式逐字节不变(PC/测试/摸底全不受影响)。
+
+### 逐项对规格(§5 表)
+
+#1 目录加 id ✓(env→pid 回退)/ #2 /healthz ✓(纯 GET、就绪读、无副作用)/
+#3 断开退出 ✓(跨循环 marshal 正确、busy 不触发、惰性安全)/ #4 日志前缀 ✓(env 门控、
+未设字节不变——日志是被解析契约,故比 #1 更保守,正确)/ #6 端口 8787 ✓(D-23,override 生效)。
+
+### 集成期须验证项(记入 PR-C/D 清单,非 A1 阻塞)
+
+- **A1-F1(中)**:#3"优雅退出"在**实际运行形态(console/ThreadJobExecutor)**下的效力
+  未验证——只确认 proc 路径 drain shutdown 回调,console 路径是否 (a) 跑
+  `add_shutdown_callback`(录音收尾)、(b) 真正终止进程供池回收,**未确认**;单测只覆盖
+  "marshal 到 ctx.shutdown"。PR-C/D 集成须实测;若 console 不 drain/不退出,#3 需显式
+  finalize+exit 兜底。
+- **A1-F2(低,交代依赖)**:#3 触发在 `/ws/audio` 断开,**仅当 PR-C 网关按 T2/D-16 在
+  宽限窗内持有上游连接**时才语义正确(刷新时 agent 侧不断开、仅真结束才断)。列为 PR-C
+  显式断言(与 R1 三断言合并):agent 侧断开 == 真会话结束,非刷新。
+
+### 可选小改(不阻塞)
+
+- healthz 单测仅覆盖 `ready=False`,建议补 `ready=True` 用例;
+- `os.getpid() % 10000` pid 回退理论碰撞(PC 形态、同秒、PID 模同余)——生产必注入
+  `XIAOGE_SESSION_ID` 不走此路,概率可忽略;一句注释或放宽模数即可。
+
+> 评审组签署(PR-A1):门禁独立复核全绿、busy 路径不误杀、惰性安全成立;#3 console
+> 退出效力(A1-F1)按计划本属 PR-C/D 集成验收,不阻塞 A1 独立合入。建议合入。
+> 评审组只读,未改任何工程代码。
+
+### 设计者应答(PR-A1,2026-07-07)
+
+**裁定"通过、可合入"收到。** 独立复核(门禁、ctx.shutdown 真 API、#1 无 strptime 解析、
+#3 busy 早返回不误杀、惰性两态)全部认可——尤其"busy 走 return ws 不触达
+_request_graceful_exit"这条,是我实现时靠"标记+早返回"结构天然保证、评审替我验证到位的
+安全性。两个可选小改**已落入分支**(见下),两个集成期须验证项接受为 PR-C/D 清单项。
+
+**可选小改(已做,合入前一并带上)**:
+- healthz 单测补 `ready=True` 用例(agent_loop 运行 + session 非空)→ 现 **12 passed**;
+- `session_id()` pid 回退加注释:仅 PC/单进程形态走此路,并发部署池管理器必注入唯一
+  `XIAOGE_SESSION_ID`,无跨进程撞名(未放宽模数,因生产不经此路,注释足矣)。
+
+**A1-F1 补充调查(把"未确认"收窄为"有定论 + 有兜底方案")**:
+- 顺代码确认:`job_thread_executor` 的线程 target = `job_proc_lazy_main.thread_main`
+  (job_thread_executor.py:131-142),**console 与 proc 走同一 job 主逻辑**。故
+  `ctx.shutdown()` 在 console 下**同样 drain `_shutdown_callbacks`**——#3 的 (a)"跑
+  add_shutdown_callback(录音收尾)"**成立**,不是无操作。
+- 残留仅 (b)"是否终止**进程**供池回收":console 进程外层还有 cli.py 的
+  `while True` 会话循环,job 结束未必令进程退出。**兜底方案已明确**(PR-C/D 落):#3 在
+  `ctx.shutdown()` 后补一记**向自身发 SIGTERM**——正是 cli.py `_on_worker_shutdown`
+  (cli.py:1548)自己触发 console 退出的同一手法,`_handle_exit`→`_ExitCli` 优雅收尾。
+  PR-C/D 集成实测:标记连接断开 → 进程确实退出且池补位;若 (b) 如预期需兜底,则加这一
+  记 SIGTERM(≤3 行),不改 A1 已过结论。
+- **A1-F2**:接受为 PR-C 显式断言(与 R1 三断言合并):agent 侧 `/ws/audio` 断开 == 真
+  会话结束(网关宽限窗内刷新不断上游),否则 #3 误杀刷新中的会话。
+
+**结论**:PR-A1 加两处可选小改后仍 **12+87=99 单测全绿 / lint / 行数门禁通过**;A1-F1
+从"未确认"变为"(a)已确认成立、(b)有 cli.py 同款兜底待 PR-C/D 实测",建议按评审意见合入。

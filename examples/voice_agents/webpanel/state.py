@@ -18,7 +18,7 @@ from common.config_utils import env_bool
 if TYPE_CHECKING:
     import aiohttp.web
 
-WEB_PORT = int(os.getenv("WEB_UI_PORT", "8765"))
+WEB_PORT = int(os.getenv("WEB_UI_PORT", "8787"))  # 本地直启/测试统一 8787(D-23)
 WEB_HOST = os.getenv("WEB_UI_HOST", "localhost")
 WEB_AUDIO: bool = env_bool("WEB_AUDIO", False)
 SSL_CERT: str = os.getenv("WEB_SSL_CERT", "")

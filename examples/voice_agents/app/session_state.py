@@ -26,6 +26,7 @@ VOICE_WELCOME = "连接成功，欢迎使用小歌，请开始说话。"
 class AppRuntime:
     # 循环/会话
     agent_loop: asyncio.AbstractEventLoop | None = None
+    job_ctx: Any = None  # JobContext;供网关标记会话断开时 ctx.shutdown() 优雅退出
     session: Any = None  # AgentSession;供聆听助手/欢迎语在 agent 循环里 say
     # 面板可切换后端(upstream 装配才有;流式主STT 时为 None=面板 ASR 切换不可用)
     switchable_stt: Any = None
