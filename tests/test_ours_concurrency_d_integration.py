@@ -279,3 +279,48 @@ def test_batch_disconnect_all_released_and_recovered() -> None:
             assert recovered, f"pool did not recover all {n} slots: {st.mgr.status()}"
 
     asyncio.run(_main())
+
+
+# ── ⑥ D1:真回收后旧 cookie 失效(409/4001)→ 规则1 单入口重分配(PD-1)────────────
+def test_d1_recycled_cookie_rejected_then_reallocates() -> None:
+    async def _main() -> None:
+        async with _stack(size=1, grace=0.4) as st:
+            async with _browser() as br:
+                await br.get(f"{st.gw}/")  # 旧 cookie C1(会话 S1)
+                ws = await br.ws_connect(f"{st.gw}/ws/audio")
+                await ws.receive()
+                await ws.close()  # → PENDING(0.4)→ sweep release → 池回收(S1 移出表)
+                ok = await _await(lambda: st.mgr.status()["ready"] >= 1, timeout=12)
+                assert ok, "pool did not recycle a fresh ready proc"
+                # 旧 cookie 已失效:/api/* → 409、/ws/audio → 4001(D1 关闭码语义)
+                async with br.post(f"{st.gw}/api/mic", json={}) as r:
+                    assert r.status == 409
+                ws2 = await br.ws_connect(f"{st.gw}/ws/audio")
+                m = await ws2.receive()
+                assert m.type == aiohttp.WSMsgType.CLOSE and ws2.close_code == 4001
+                await ws2.close()
+                # 旧 cookie GET / → 规则1 单入口重分配新会话(前端整页刷新后走此路)
+                r3 = await br.get(f"{st.gw}/")
+                assert r3.status == 200
+
+    asyncio.run(_main())
+
+
+# ── ⑦ R1(c):协议客户端即断即杀跨真进程——不享宽限窗(PD-1)──────────────────────
+def test_r1c_protocol_client_immediate_kill_cross_process() -> None:
+    async def _main() -> None:
+        async with _stack(size=1, grace=15.0) as st:  # 大宽限窗:证协议端不受其约束
+            hz0 = await _agent_healthz(st.base)
+            pid0 = hz0["pid"]
+            async with aiohttp.ClientSession() as proto:  # 无 cookie = 协议客户端
+                ws = await proto.ws_connect(f"{st.gw}/ws/audio")
+                assert (await ws.receive()).data.startswith("agent:")
+                await ws.send_bytes(b"p")
+                assert (await ws.receive()).data == b"echo:p"
+                await ws.close()  # D-07:deadline=now → sweep 立即回收(远早于 15s 宽限窗)
+            recycled = await _await(
+                lambda: (p := _sync_pid(st.base)) is not None and p != pid0, timeout=10
+            )
+            assert recycled, "protocol client did not trigger immediate recycle (D-07)"
+
+    asyncio.run(_main())

@@ -873,3 +873,83 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 - **A1-F1**:#3 优雅退出在 console/ThreadJobExecutor 实际形态的效力核实(已有池侧 kill 兜底,非阻塞)。
 - **部署文档 + 部署验收项**:M3 内网 nmap、R4 systemd 拉起、R5 时钟/时间戳、R7 七项告警(§6 表标 PR-D)。
 - **上线前置门(不随本 PR)**:目标机 N=8/10 摸底 + B5 复测、Q5 合规——两坎未过不上线/不承诺产能 N。
+
+### 评审组结论(PR-D 集成 harness 增量,2026-07-07)
+
+**已交付增量达标、真跨进程实测坐实;但 PR-D 作为末个编码 PR,§12.2 20 条 checklist 缺
+统一 done/pending 台账,三项(B4-full/D1-集成/R1c-跨进程)未明确归属——须补台账,非阻塞增量本身。**
+
+**一、增量实测确认(看码 + 重跑)**:
+- 门禁:`test_ours_*` **182 passed**(并发 95)、ruff 全绿、行数门禁 exit 0;harness/用例入 ourcode.txt。
+- **harness 真度**:`_stack` 拉起**真 PoolManager(spawn 假 agent 子进程)+ 真 control API + 真网关
+  app + 真 sweep 循环**,仅 agent 内部(模型)以子进程 stub——被测组件(池调度/回收、控制 API、
+  网关路由、proxy WS 泵 + 宽限窗持有)全真、跨真进程真 WS。
+- **case2(T2/D-16/D-07 跨真进程)最硬**:断开后 **agent 自身 /healthz 报 `audio_conns==1`
+  (网关真持上游)、`pid` 不变**;窗内重连 **`audio_total==1`**(agent 全程只被连一次);超时→
+  sweep release→池同端口回收 **`pid` 变**。这是短于真浏览器的最强验证。其余 4 例(全链往返/
+  N+1 繁忙/回收槽复用/批量断开)均真子进程。`CookieJar(unsafe=True)` 踩坑标注诚实。
+- 待办(soak/N-2/A1-F1/部署验收 M3·R4·R5·R7/上线前置门)**诚实列出**,无过度声称。
+
+**二、checklist 台账缺口(PD-1,低~中,须补)**:PR-D 是末个编码 PR,§12.2 是实施前评审的
+验收契约,但当前无"20 条 → 已覆盖/待办"的统一映射,三项未明确归属、也不在待办:
+- **B4(千次 healthz 探测→0 重启→真实会话无扰动)**:健康→不回收已隐式覆盖(`poll_once` 多次
+  保持 READY),死亡→回收显式(b_manager);**但"千次 + 真实会话 KPI 无扰动"未测**——宜显式
+  归入 soak 待办。
+- **D1(进程被杀/回收→旧 cookie 解析失败→4001/409→前端刷新→重分配)**:机制已覆盖(affinity
+  `resolve` 对 CLOSED/gone 同样返 None→4001,c_main 单测);**但"真回收后旧 cookie→4001→GET/
+  重分配"的集成走查缺**——harness 已在,补一个小集成用例即可(低成本)。
+- **R1(c) 协议客户端即断即杀**:c_main 单测覆盖,**跨进程集成未覆盖**。
+- 建议:PR-D 收尾前补一张 §12.2 done/pending 台账(每条 → 覆盖它的测试文件/用例 或 明确
+  待办归属),使末 PR 不漏项;并补 D1 小集成用例(harness 现成)。
+
+**三、裁定**:集成 harness 增量**真、强、绿,达标可合入**;PR-D 距"完成"仍差 soak/部署文档/
+部署验收 + A1-F1 + 上述 checklist 台账(PD-1)。两道上线前置门(目标机 N=8/10 摸底+B5、Q5 合规)
+不变、未过不上线。
+
+> 评审组签署(PR-D 增量):真跨进程集成 harness 达标(case2 以 agent 自身 healthz 坐实 T2 上游
+> 持有 + 同进程 reattach + 超时换 pid,182 绿);PD-1——末 PR 须补 §12.2 done/pending 台账,
+> B4-full 归 soak、D1 补集成用例、R1c 跨进程待补。评审组只读,未改任何工程代码。
+
+### 设计者应答(PD-1,2026-07-07):§12.2 done/pending 台账 + D1/R1c 补测
+
+**采纳。两处集成用例已补(harness 现成);B4-full 归 soak;并按要求给出 §12.2 20 条统一台账。
+建台账过程发现一处真缺口:M5(asr/tts 隐藏)未实现——诚实标 ✗ 并已开独立跟进。**
+
+**D1 / R1c 已补(真跨进程)**:
+- `test_d1_recycled_cookie_rejected_then_reallocates`:断开→宽限窗超时→sweep release→池同端口
+  回收(会话移出表);旧 cookie **/api/mic → 409、/ws/audio → 4001**,再 **GET/ → 200 重分配**
+  (规则1 单入口)。end-to-end 坐实 D1 关闭码 + 重分配。
+- `test_r1c_protocol_client_immediate_kill_cross_process`:协议客户端(无 cookie)连真 agent→断开,
+  在 **grace=15s** 下**~秒级**即回收换 pid(远早于宽限窗)——证协议端 D-07 即断即杀跨真进程。
+- 门禁:并发 **97 绿**(+D1+R1c);d_integration 共 7 例。
+
+**§12.2 实施前评审 checklist(20 条)· done/pending 台账**
+
+图例:✅ 已测覆盖 · 🧪 浸泡(soak)待办 · 🚀 部署验收待办 · ⛔ 上线前置门 · ❌ 未实现须补
+
+| # | 条目 | 状态 | 覆盖 / 归属 |
+|---|---|---|---|
+| 1 | R1 宽限窗三断言 | ✅ | c_affinity(状态机三态)+ c_proxy(持有/reattach)+ **d_integration case2**(跨进程:持有·同进程reattach·超时换pid)+ **R1c**(协议端即断即杀跨进程) |
+| 2 | R3 双标签页 | ✅ | c_affinity `test_double_tab` + c_main `test_root_double_tab_page` |
+| 3 | D1 关闭码/重分配单入口 | ✅ | c_main(4001/409·规则1单入口)+ **d_integration D1**(真回收后旧cookie→409/4001→重分配) |
+| 4 | Q6 准入 | ✅ | c_main `test_access_gate_blocks_without_code` |
+| 5 | R6 安全四条 | ✅ | c_main(白名单404·cookie HttpOnly/SameSite)+ c_proxy(令牌桶·超帧断连) |
+| 6 | B4 healthz 千次专项 | 🧪 | b_manager(健康→不回收/死亡→回收);**千次探测 + 真实会话 KPI 无扰动 → soak** |
+| 7 | M3 内网绑定 | ✅ / 🚀 | b_control_api(serve 强制 loopback)+ default_agent_env `WEB_UI_HOST=127.0.0.1`;**外网 nmap 不可达 → 部署验收** |
+| 8 | R2 转码归属 | ✅ | b_transcoder + b_manager(转码在池侧·per-dir 队列·崩溃不阻塞 alloc/在线) |
+| 9 | N1 分档校验 | ✅ | b_transcoder(D-21:FLAC 采样数逐一 / Opus 时长差≤0.07s;失败留 WAV 不删源) |
+| 10 | N2 限流 + 批量断开 | ✅ / 🧪 | b_transcoder(≤2 worker·os.nice);批量断开释放 → d_integration case5;**在线路 KPI 无扰动 → soak** |
+| 11 | R4 故障模型 | 🚀 | HMAC key 随机·重启失效=config 语义(§6.3);**systemd 自拉·崩溃全断语义 → 部署验收** |
+| 12 | M4 就绪告警/心跳 | ✅ / 🚀 | b_manager(`ready_below_threshold`·SPAWNING spawn_timeout vs READY fail_limit);**size N+1~2 部署配置·聆听静默不误杀=agent 存量运行时** |
+| 13 | K3 解耦两条 | ✅ | a2(record_settings 默认=现状·非重采样轨逐字节) |
+| 14 | 三开关默认值=现状 | ✅ | a2(`RecordSettings.from_env` 默认) |
+| 15 | 分段+目录id/healthz/断开退出/日志sid | ✅ | a1(#1 session_id·#2 healthz·#3 X-XG-Session shutdown·#4 log 前缀)+ a2(segment_seconds) |
+| 16 | **M5 asr/tts 隐藏 404** | ❌ | **未实现**:`webpanel/server.py:293-294` 无条件注册 /api/asr·/api/tts;需 env 门控(默认隐藏→404)+ tab 注入联动。**开独立跟进(PR-D 收尾或小改 PR)** |
+| 17 | D-23 WEB_UI_PORT 默认8787 | ✅ | a1(#6 默认 8787) |
+| 18 | R5 时钟/UTC/单调性 | 🚀 | 时间戳 UTC=录音/timeline 代码;**NTP 同步·单调性抽查 → 部署验收** |
+| 19 | R7 监控七项告警 | 🚀 | **接入 + 告警阈值 → 部署验收** |
+| 20 | Q5 合规 | ⛔ | 保留期/访问控制正式结论 → **上线前置门**(临时策略:仅落盘不外发·目录权限最小化) |
+
+**小结**:14 条 ✅(其中 3 条另有部署验收尾巴)、2 条 🧪 soak、4 条 🚀 部署验收、1 条 ⛔ 前置门、
+**1 条 ❌(M5,真缺口,已开跟进)**。编码可测项已全绿;M5 是唯一未实现的功能项,须在 上线 前补齐
+(不影响本 harness 增量合入)。soak/部署验收/前置门按既定顺序,两坎(目标机 N、Q5)未过不上线。
