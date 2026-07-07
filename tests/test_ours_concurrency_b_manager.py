@@ -346,4 +346,5 @@ def test_env_injection_table() -> None:
     assert env["XIAOGE_SESSION_ID"] == "abc123"
     assert env["XIAOGE_RECORD_MODE"] == "full" and env["XIAOGE_RECORD_CODEC"] == "opus"
     assert env["XIAOGE_TIMELINE_LEVEL"] == "audit"  # D-14 近期组合
+    assert env["XIAOGE_ADMIN_ROUTES"] == "0"  # M5/D-19 显式隐藏 asr/tts
     assert "abc123" in env["TURN_METRICS_LOG"]

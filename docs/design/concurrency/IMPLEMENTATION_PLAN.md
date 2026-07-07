@@ -944,16 +944,24 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 | 13 | K3 解耦两条 | ✅ | a2(record_settings 默认=现状·非重采样轨逐字节) |
 | 14 | 三开关默认值=现状 | ✅ | a2(`RecordSettings.from_env` 默认) |
 | 15 | 分段+目录id/healthz/断开退出/日志sid | ✅ | a1(#1 session_id·#2 healthz·#3 X-XG-Session shutdown·#4 log 前缀)+ a2(segment_seconds) |
-| 16 | **M5 asr/tts 隐藏 404** | ❌ | **未实现**:`webpanel/server.py:293-294` 无条件注册 /api/asr·/api/tts;需 env 门控(默认隐藏→404)+ tab 注入联动。**开独立跟进(PR-D 收尾或小改 PR)** |
+| 16 | **M5 asr/tts 隐藏 404** | ✅ | **已实现**:`webpanel.state.ADMIN_ROUTES`(`XIAOGE_ADMIN_ROUTES` **默认显示=PC 形态不变**)门控 `build_web_app`——关时**不注册** /api/asr·/api/tts(命中 404)+ tab 不注入;**服务器由池 `default_agent_env` 注 `XIAOGE_ADMIN_ROUTES=0` 隐藏**(M3 式不依赖默认);网关注释同步;测 `test_ours_concurrency_m5_admin_routes`(路由集 + 真 HTTP 404)+ b_manager 注入表 |
 | 17 | D-23 WEB_UI_PORT 默认8787 | ✅ | a1(#6 默认 8787) |
 | 18 | R5 时钟/UTC/单调性 | 🚀 | 时间戳 UTC=录音/timeline 代码;**NTP 同步·单调性抽查 → 部署验收** |
 | 19 | R7 监控七项告警 | 🚀 | **接入 + 告警阈值 → 部署验收** |
 | 20 | Q5 合规 | ⛔ | 保留期/访问控制正式结论 → **上线前置门**(临时策略:仅落盘不外发·目录权限最小化) |
 
-**小结(按主状态计,合计=20,不重复)**:11 条纯 ✅ + 3 条 ✅(带 soak/部署尾:#7 M3、#10 N2、
+**小结(按主状态计,合计=20,不重复)**:12 条纯 ✅ + 3 条 ✅(带 soak/部署尾:#7 M3、#10 N2、
 #12 M4)+ 1 条纯 🧪 soak(#6 B4)+ 3 条纯 🚀 部署验收(#11 R4、#18 R5、#19 R7)+ 1 条 ⛔ 前置门
-(#20 Q5)+ **1 条 ❌(#16 M5,真缺口,已开跟进)** = 20。编码可测项已全绿;M5 是唯一未实现的功能项,
-须在 上线 前补齐(不影响本 harness 增量合入)。soak/部署验收/前置门按既定顺序,两坎(目标机 N、Q5)未过不上线。
+(#20 Q5)= 20。**#16 M5 已实现(2026-07-07,由 ❌ 转 ✅)**——编码可测项 **20/20 全绿无 ❌**。
+剩余仅 soak(2 项尾)/部署验收(3+尾)/前置门(Q5)——非编码项,按既定顺序;两坎(目标机 N、Q5)未过不上线。
+
+> **M5 补记(2026-07-07)**:PR-D 收尾第一优先项已实现。`webpanel/server.py` 抽 `build_web_app(admin_routes,
+> web_audio)`——`ADMIN_ROUTES`(env `XIAOGE_ADMIN_ROUTES`)关时**不注册** /api/asr·/api/tts(命中 aiohttp
+> 默认 404)且 `<!--BACKEND_TABS-->` 不注入(开关同控路由 + tab,D-19)。**关键:代码默认=显示(PC/测试
+> 形态不变,遵 §7.2 口径)**,服务器形态由池 `default_agent_env` 注 `XIAOGE_ADMIN_ROUTES=0` 隐藏(M3 式
+> 显式不依赖默认、防 shell 环境泄漏);网关 `main.py` 白名单注释同步为"隐藏由 agent 侧门控、池注入 0→404"。
+> 新增 `test_ours_concurrency_m5_admin_routes`(4 例:门控关无 asr/tts·门控开有·代码默认显示·隐藏态真
+> HTTP 404)+ b_manager 注入表加 `XIAOGE_ADMIN_ROUTES=0` 断言。分支 `feat/concurrency-m5-admin-routes`。
 
 ### 评审组确认(PD-1 应答 + M5 缺口,2026-07-07)
 

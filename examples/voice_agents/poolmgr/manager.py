@@ -42,6 +42,7 @@ def default_agent_env(
         "XIAOGE_RECORD_MODE": "full",  # D-14:近期部署组合
         "XIAOGE_RECORD_CODEC": "opus",
         "XIAOGE_TIMELINE_LEVEL": "audit",
+        "XIAOGE_ADMIN_ROUTES": "0",  # M5/D-19:asr/tts 显式隐藏(不依赖代码默认,防 shell 环境泄漏)
     }
     if metrics_dir is not None:
         env["TURN_METRICS_LOG"] = str(metrics_dir / f"turn_metrics_{proc_id}.log")

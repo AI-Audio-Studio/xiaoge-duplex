@@ -21,6 +21,9 @@ if TYPE_CHECKING:
 WEB_PORT = int(os.getenv("WEB_UI_PORT", "8787"))  # 本地直启/测试统一 8787(D-23)
 WEB_HOST = os.getenv("WEB_UI_HOST", "localhost")
 WEB_AUDIO: bool = env_bool("WEB_AUDIO", False)
+# M5 / D-19:asr/tts 管理路由(后端热切换)开关。**代码默认=显示(PC/测试形态不变)**;服务器形态
+# 由池管理器注入 `XIAOGE_ADMIN_ROUTES=0` 隐藏——关时不注册即 404、tab 也不注入。/api/mic 不受约束。
+ADMIN_ROUTES: bool = env_bool("XIAOGE_ADMIN_ROUTES", True)
 SSL_CERT: str = os.getenv("WEB_SSL_CERT", "")
 SSL_KEY: str = os.getenv("WEB_SSL_KEY", "")
 
