@@ -13,6 +13,8 @@ examples/voice_agents/app/listening_host.py
 examples/voice_agents/app/web_audio.py
 examples/voice_agents/app/record_settings.py
 examples/voice_agents/app/setup_taps.py
+examples/voice_agents/poolmgr/__init__.py
+examples/voice_agents/poolmgr/transcoder.py
 examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
 examples/voice_agents/webpanel/state.py
@@ -68,4 +70,5 @@ tests/test_ours_env_loading.py
 tests/test_ours_cosyvoice_recovery.py
 tests/test_ours_concurrency_a1.py
 tests/test_ours_concurrency_a2.py
+tests/test_ours_concurrency_b_transcoder.py
 scripts/check_line_counts.py
