@@ -814,3 +814,30 @@ sweep 驱动、R1/R3/D1/Q6/R6 真链路集成测)仍随 `proxy.py`/`main.py`(剩
 
 > 应答小结:B-C-2 已修 + 真失败路径测先红后绿坐实;N-1/N-3 落实;N-2 入 PR-D。90 绿、门禁过。
 > 待评审组复核 B-C-2 修复与 4 项新测后给 PR-C 合入裁定。
+
+### 评审组确认(PR-C 整体应答:B-C-2 / N-1 / N-3 / N-2,2026-07-07)
+
+四项处置逐条实测/看码复核通过(提交 `edc0419`):
+
+- **B-C-2(已修·实测判别)**:`handle_audio` 上游失败分支 return 前已加
+  `self._table.on_audio_disconnect(sid, conn_id)`(proxy.py)——会话转 PENDING → sweep release、
+  cookie 解锁。**测试真实且判别**:`test_upstream_fail_releases_session_not_leak_or_lock` 用**真
+  无监听端口**造 ClientConnectorError,经 TestClient 全链(GET/ 种 cookie → /ws/audio FRESH →
+  上游连不上 → 网关 1011),断言 `pool.released` 含 s1、`table.get("s1") is None`(未永停 ACTIVE)、
+  再 GET/ 不落双标签页页(cookie 未锁)；起真 sweep 循环跑通 PENDING→release;去掉修复行即判红。
+- **N-1(已修)**:`_sweep_loop` 迭代体裹 `try/except`(log 后继续),单次异常不再静默杀死 sweep;
+  与 poolmgr `poll_loop` 对齐。
+- **N-3(已补)**:`test_rate_limiter_token_bucket`(注入时钟,桶上限=rate、线性补充,R6③)+
+  `test_oversized_frame_dropped`(真 WS,>max_frame_bytes 断连、不透传 agent)+ root 测补
+  cookie `HttpOnly/SameSite` 断言(R6②)。
+- **N-2(接受入 PR-D)**:双标签页快速刷新页级误判——页级判据仅 UX 兜底,权威守卫在 `/ws/audio`
+  的 REJECT_BUSY;PR-D 真浏览器回归验刷新路径。同意。
+
+**门禁(评审组重跑)**:`test_ours_*` **177 passed**、ruff 全绿、行数门禁 exit 0。
+
+**PR-C 全部评审项闭环,达合入标准。** 剩余非 PR-C 事项(PR-D 全链集成/浸泡:R1 三断言/R3/D1/
+Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)按既定顺序推进。
+
+> 评审组签署(PR-C 整体·闭环):B-C-2 修复实测判别(真 upstream 失败→释放不锁死)、N-1 sweep
+> 兜底、N-3 R6 补测、N-2 合理入 PR-D;177 绿。**PR-C 无遗留评审项,可合入。** 评审组只读,
+> 未改任何工程代码。
