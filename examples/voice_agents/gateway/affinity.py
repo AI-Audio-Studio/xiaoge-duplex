@@ -58,6 +58,8 @@ class Session:
     state: str = IDLE
     upstream: Any = None  # 网关持有的内部上游连接(T2:ACTIVE+PENDING 期不断)
     grace_deadline: float = 0.0
+    # 浏览器会话(有 cookie)享宽限窗;协议客户端(无 cookie,规则3)即断即杀,不入宽限窗(D-07)。
+    browser: bool = True
     # 活跃 /ws/audio 连接的 conn_id 集合(双标签页检测 R3 = 非空即拒;C-1:唯有登记过 conn_id
     # 的连接才能 disconnect,被拒连接拿不到 conn_id → 无法误递减错杀真会话)。
     audio_conns: set[str] = field(default_factory=set)
@@ -73,9 +75,11 @@ class AffinityTable:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.RLock()
 
-    def register(self, session_id: str, proc_id: str, port: int) -> Session:
-        """池 alloc 后登记新会话(IDLE)。"""
-        s = Session(session_id=session_id, proc_id=proc_id, port=port, state=IDLE)
+    def register(
+        self, session_id: str, proc_id: str, port: int, *, browser: bool = True
+    ) -> Session:
+        """池 alloc 后登记新会话(IDLE)。browser=False 为协议客户端(规则3):断开即杀不入宽限窗。"""
+        s = Session(session_id=session_id, proc_id=proc_id, port=port, state=IDLE, browser=browser)
         with self._lock:
             self._sessions[session_id] = s
         return s
@@ -118,15 +122,18 @@ class AffinityTable:
 
     def on_audio_disconnect(self, session_id: str, conn_id: str | None) -> None:
         """/ws/audio 断开(仅对 on_audio_connect 登记过的 conn_id 生效,C-1 结构守卫):
-        最后一条音频连接断 → ACTIVE 转 PENDING_DISCONNECT(宽限窗计时)。"""
+        最后一条音频连接断 → 转 PENDING_DISCONNECT。浏览器会话 deadline=now+T(宽限窗);
+        协议客户端 deadline=now(无宽限窗,D-07:下一 sweep tick 即被回收 release+关上游,与浏
+        览器超时走同一路径——不在网关请求 finally 里做清理,避免连接取消打断收尾)。"""
         with self._lock:
             s = self._sessions.get(session_id)
             if s is None or conn_id is None or conn_id not in s.audio_conns:
                 return  # 未登记(含被拒连接的 None、重复断开)→ 天然无操作
             s.audio_conns.discard(conn_id)
-            if not s.audio_conns and s.state == ACTIVE:
-                s.state = PENDING_DISCONNECT
-                s.grace_deadline = self._clock() + self._grace
+            if s.audio_conns or s.state != ACTIVE:
+                return
+            s.state = PENDING_DISCONNECT
+            s.grace_deadline = self._clock() + (self._grace if s.browser else 0.0)
 
     def sweep_expired(self) -> list[Session]:
         """宽限窗超时的 PENDING → CLOSED 并移出表,返回需网关 release+关上游的会话。"""

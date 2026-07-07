@@ -22,6 +22,7 @@ examples/voice_agents/gateway/config.py
 examples/voice_agents/gateway/affinity.py
 examples/voice_agents/gateway/pool_client.py
 examples/voice_agents/gateway/proxy.py
+examples/voice_agents/gateway/main.py
 examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
 examples/voice_agents/webpanel/state.py
@@ -83,4 +84,5 @@ tests/test_ours_concurrency_b_control_api.py
 tests/test_ours_concurrency_c_affinity.py
 tests/test_ours_concurrency_c_poolclient.py
 tests/test_ours_concurrency_c_proxy.py
+tests/test_ours_concurrency_c_main.py
 scripts/check_line_counts.py

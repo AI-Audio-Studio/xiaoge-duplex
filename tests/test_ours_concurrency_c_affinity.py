@@ -154,6 +154,25 @@ def test_c1_rejected_double_tab_close_does_not_kill_session() -> None:
     assert t.get("s1").state == af.PENDING_DISCONNECT
 
 
+def test_protocol_client_no_grace_window() -> None:
+    """D-07:协议客户端(browser=False)音频断开**不享宽限窗**——deadline=now,下一次 sweep
+    即被回收(与浏览器超时同路径,收尾统一由 sweep 驱动);浏览器会话则 deadline=now+T。"""
+    t, clk = _table()  # grace=10
+    t.register("proto", "p1", 19100, browser=False)  # 协议客户端
+    _, _, cid = t.on_audio_connect("proto")
+    t.on_audio_disconnect("proto", cid)
+    s = t.get("proto")
+    assert s.state == af.PENDING_DISCONNECT and s.grace_deadline == 0.0  # 无宽限:deadline=now
+    assert [x.session_id for x in t.sweep_expired()] == ["proto"]  # 同刻即被回收
+    assert t.get("proto") is None
+    # 对照:浏览器会话享宽限窗,deadline=now+T,同刻不过期
+    t.register("web", "p2", 19200, browser=True)
+    _, _, cid2 = t.on_audio_connect("web")
+    t.on_audio_disconnect("web", cid2)
+    assert t.get("web").state == af.PENDING_DISCONNECT and t.get("web").grace_deadline == 10.0
+    assert t.sweep_expired() == []
+
+
 def test_resolve_and_close() -> None:
     t, _ = _table()
     t.register("s1", "p1", 19100)

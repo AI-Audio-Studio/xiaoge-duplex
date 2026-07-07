@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,25 @@ logger = logging.getLogger("gateway-proxy")
 
 # 反代 HTTP 不转发的逐跳头。
 _HOP_HEADERS = {"host", "content-length", "transfer-encoding", "connection", "keep-alive"}
+
+
+class _RateLimiter:
+    """令牌桶:每连接消息速率上限(R6 ③)。clock 可注入以便确定性测试。"""
+
+    def __init__(self, rate_per_s: float, clock: Any = time.monotonic) -> None:
+        self._rate = max(1.0, float(rate_per_s))
+        self._clock = clock
+        self._tokens = self._rate
+        self._last = clock()
+
+    def allow(self) -> bool:
+        now = self._clock()
+        self._tokens = min(self._rate, self._tokens + (now - self._last) * self._rate)
+        self._last = now
+        if self._tokens < 1.0:
+            return False
+        self._tokens -= 1.0
+        return True
 
 
 @dataclass
@@ -85,9 +105,13 @@ class Proxy:
     ) -> None:
         """客户端→上游(随本连接生灭)。连接结束**不关上游**,只解绑当前客户端 + 触发宽限窗。"""
         io = self._io.get(sid)
+        limiter = _RateLimiter(self._cfg.msg_rate_per_s)  # R6 ③:每连接消息速率上限
         try:
             async for msg in client_ws:
                 if io is None or io.closing:
+                    break
+                if not limiter.allow():  # 速率超限 → 断开该连接(宽限窗接管重连)
+                    logger.warning("msg rate exceeded sid=%s", sid)
                     break
                 if msg.type == aiohttp.WSMsgType.BINARY:
                     if len(msg.data) > self._cfg.max_frame_bytes:  # R6:超限帧 → 断开该连接
@@ -134,7 +158,37 @@ class Proxy:
         with contextlib.suppress(Exception):
             await io.upstream.close()
 
-    # ── HTTP 反代(GET /ws 状态、POST /api/*)──────────────────────────────────
+    async def handle_ws_state(
+        self, client_ws: aiohttp.web.WebSocketResponse, session: af.Session
+    ) -> None:
+        """反代 /ws 状态通道:简单双向泵(**无宽限窗**——状态通道无独立于页面的复用语义,
+        任一端断即收)。"""
+        sess = await self._client()
+        try:
+            up = await sess.ws_connect(f"http://127.0.0.1:{session.port}/ws", heartbeat=30)
+        except Exception:
+            await client_ws.close(code=1011, message=b"upstream unavailable")
+            return
+
+        async def _pump(src: Any, dst: Any) -> None:
+            with contextlib.suppress(Exception):
+                async for m in src:
+                    if m.type == aiohttp.WSMsgType.TEXT:
+                        await dst.send_str(m.data)
+                    elif m.type == aiohttp.WSMsgType.BINARY:
+                        await dst.send_bytes(m.data)
+                    elif m.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSE):
+                        break
+
+        c2u = asyncio.create_task(_pump(client_ws, up))
+        u2c = asyncio.create_task(_pump(up, client_ws))
+        await asyncio.wait({c2u, u2c}, return_when=asyncio.FIRST_COMPLETED)
+        for t in (c2u, u2c):
+            t.cancel()
+        with contextlib.suppress(Exception):
+            await up.close()
+
+    # ── HTTP 反代(POST /api/*)─────────────────────────────────────────────────
     async def proxy_http(
         self, request: aiohttp.web.Request, session: af.Session
     ) -> aiohttp.web.Response:
