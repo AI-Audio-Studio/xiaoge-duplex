@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.record_settings import audit_allows
+
 logger = logging.getLogger("event-timeline")
 
 
@@ -92,7 +94,9 @@ def _as_dict(metrics: Any) -> dict[str, Any]:
 class EventTimeline:
     """订阅 session 事件 + emit() 自定义事件,后台线程写 <run_dir>/timeline.jsonl。"""
 
-    def __init__(self, run_dir: Path, *, queue_size: int = 10_000) -> None:
+    def __init__(self, run_dir: Path, *, level: str = "debug", queue_size: int = 10_000) -> None:
+        # level: "debug"=全事件(现状);"audit"=轮次级白名单(含对话文本,不落高频调试事件)。
+        self._level = level
         self._dir = Path(run_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path = self._dir / "timeline.jsonl"
@@ -134,6 +138,8 @@ class EventTimeline:
     ) -> None:
         """在事件循环线程调用:只构造字典 + 非阻塞入队,绝不阻塞、绝不抛出。"""
         try:
+            if self._level == "audit" and not audit_allows(type):
+                return  # audit 档只落白名单事件(轮次/打断/错误/生命周期)
             self._seq += 1  # emit 只在单线程事件循环上调用,无需加锁
             event = {
                 "eventId": f"evt_{self._seq:06d}",
@@ -150,8 +156,8 @@ class EventTimeline:
         except Exception:
             pass
 
-    def attach(self, session: Any) -> None:
-        """挂到 AgentSession 的框架事件上(与现有日志处理器并存,纯增量、各自 try/except)。"""
+    def _attach_high_freq(self, session: Any) -> None:
+        """debug 档才订阅的高频事件(状态翻转 + asr.interim/final);audit 档跳过。"""
 
         @session.on("agent_state_changed")
         def _on_agent_state(ev: Any) -> None:
@@ -186,6 +192,14 @@ class EventTimeline:
                 )
             except Exception:
                 pass
+
+    def attach(self, session: Any) -> None:
+        """挂到 AgentSession 的框架事件上(与现有日志处理器并存,纯增量、各自 try/except)。
+
+        audit 档**按档跳过高频订阅**(agent/user 状态翻转、asr.interim/final)=零成本,
+        只订阅轮次级 conversation_item_added(turn.*,白名单内)。"""
+        if self._level != "audit":  # debug 档:全量订阅(现状)
+            self._attach_high_freq(session)
 
         @session.on("conversation_item_added")
         def _on_item(ev: Any) -> None:

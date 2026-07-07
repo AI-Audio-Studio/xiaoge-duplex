@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_recorder import AudioRecorder
-from common.runtime import append_turn_log as _log, ms as _ms, session_id
+from common.runtime import append_turn_log as _log, ms as _ms
 from common.text_rules import (
     LEADING_PUNCT_RE,
     is_overlap_ack,
@@ -54,6 +54,8 @@ class SessionWiring:
     live_from_main: bool
     live: Any = None  # LiveTranscript(装配后期才创建;事件处理器按属性晚绑定)
     timeline: Any = None
+    record_settings: Any = None  # RecordSettings(RECORD_MODE/TIMELINE_LEVEL 解析,PR-A2)
+    record_dir: Any = None  # 录音/审计产物落盘目录(instrumentation 算一次,recording 复用)
     turn_trace: dict[str, float] = field(default_factory=lambda: {"started_at": time.time()})
     # vad_speaking/vad_off_ts:用于在线软打断的 VAD 佐证(防短幽灵词/接话误打断)。
     online_state: dict[str, object] = field(
@@ -251,39 +253,55 @@ def start_llm_warmup(llm: Any) -> None:
     asyncio.create_task(_warmup_llm())
 
 
-def setup_test_instrumentation(ctx: JobContext, session: Any) -> tuple[Any, Any]:
-    """结构化事件时间线 + 判停 KPI(自动化测试 P0)。**默认关闭**:正常运行完全不创建、
-    零开销;仅 AGENT_TIMELINE=1 启用,纯旁路、后台线程写盘。在 start() 之前 attach
-    才能捕获开场白那一轮。返回 (timeline, turn_metrics),关闭时均为 (None, None)。"""
-    if os.getenv("AGENT_TIMELINE", "0").strip().lower() not in {"1", "true", "yes", "on"}:
-        return None, None
-    try:
-        from event_timeline import EventTimeline, install_debug_log, remove_debug_log
+def setup_test_instrumentation(ctx: JobContext, w: SessionWiring) -> Any:
+    """结构化事件时间线 + 判停 KPI。开关解析见 RecordSettings(PR-A2),**默认=现状**
+    (未设 → AGENT_TIMELINE 主导),PC/测试形态逐字节不变。设 w.timeline/record_settings/
+    record_dir,返回 turn_metrics(仅 debug 档非 None):
+      - `debug`(≡ AGENT_TIMELINE=1):全事件 + debug.log + KPI 进 runs/(现状);
+      - `audit`:轮次级白名单 timeline 进 recordings/,不落 debug.log/KPI(K3);
+      - `off`:不装 timeline(full/single 无 timeline 时仍算好 record_dir 供录音复用)。"""
+    from app.record_settings import RecordSettings
 
-        run_dir = (
-            Path(__file__).resolve().parents[3]
-            / "runs"
-            / f"{time.strftime('%Y%m%d_%H%M%S')}_{session_id()}"
-        )
-        timeline = EventTimeline(run_dir)
+    settings = RecordSettings.from_env()
+    w.record_settings = settings
+    session = w.session
+    repo_root = Path(__file__).resolve().parents[3]
+    level = settings.timeline_level
+
+    if level == "off":
+        if settings.record_mode in {"full", "single"}:
+            w.record_dir = settings.target_dir(repo_root)
+        return None
+    try:
+        from event_timeline import EventTimeline
+
+        run_dir = settings.target_dir(repo_root)
+        w.record_dir = run_dir
+        timeline = EventTimeline(run_dir, level=level)
         timeline.attach(session)
         ctx.add_shutdown_callback(timeline.aclose)
-        # 判停 KPI 仪表盘(仅测试模式;旁路只读,收尾写 runs/<ts>/turn_kpis.json)。
+        w.timeline = timeline
+        if level == "audit":  # 审计档:仅轮次级 timeline,不落 debug.log/KPI
+            _log(f"AUDIT_TIMELINE dir={run_dir}")
+            logger.info("audit timeline -> %s", run_dir)
+            return None
+        # debug 档:另加判停 KPI 仪表盘 + 全量 DEBUG 日志(现状,收尾写 turn_kpis.json)。
         from turn_metrics import TurnMetrics
 
         turn_metrics = TurnMetrics(timeline.directory, timeline=timeline)
         turn_metrics.attach(session)
         ctx.add_shutdown_callback(turn_metrics.aclose)
         _log("TURN_METRICS attached")
-        # 全量 DEBUG 日志也整合进同一个 run 目录(取代旧的 .run/agent.log),非阻塞。
+        from event_timeline import install_debug_log, remove_debug_log
+
         dbg_state = install_debug_log(run_dir)
         ctx.add_shutdown_callback(lambda: remove_debug_log(dbg_state))
         _log(f"TIMELINE dir={timeline.directory}")
         logger.info("event timeline + debug log -> %s", timeline.directory)
-        return timeline, turn_metrics
+        return turn_metrics
     except Exception as exc:  # 时间线初始化失败绝不阻塞启动
         logger.warning("event timeline disabled: %s", exc)
-        return None, None
+        return None
 
 
 def setup_scenario_injection(session: Any, turn_metrics: Any) -> None:
@@ -331,24 +349,56 @@ def setup_mute_gate(session: Any) -> None:
         session.input.audio = runtime.mute_gate
 
 
+def _install_test_recorder(
+    ctx: JobContext,
+    w: SessionWiring,
+    rec_dir: Any,
+    *,
+    mono: bool,
+    segment_seconds: float | None = None,
+) -> None:
+    """装 TestRecorder 到指定目录;失败绝不阻塞启动。"""
+    from test_recorder import TestRecorder
+
+    recorder = TestRecorder(rec_dir, write_mono_tracks=mono, segment_seconds=segment_seconds)
+    recorder.install(w.session)
+    runtime.test_recorder = recorder  # 暴露给 /api/mic 做暂停/继续
+    recorder.set_paused(bool(getattr(w.stt_engine, "muted", False)))  # 与当前静音状态对齐
+    ctx.add_shutdown_callback(recorder.aclose)
+
+
 def setup_recording(ctx: JobContext, w: SessionWiring) -> None:
-    """录音:测试模式(timeline 开)= 多轨 TestRecorder 进 run 目录;正常模式 = 单文件混音。"""
+    """录音(PR-A2):RECORD_MODE `full`/`single` → TestRecorder 进 recordings/<id>/(single 仅
+    duplex);`off` → 不录;`legacy`(未设,现状)→ timeline 开=多轨进 run 目录、否则单文件混音。"""
     session = w.session
+    settings = w.record_settings
+    mode = settings.record_mode if settings else "legacy"
+
+    if mode == "off":
+        _log("RECORDING off (XIAOGE_RECORD_MODE=off)")
+        return
+    if mode in {"full", "single"}:
+        try:
+            _install_test_recorder(
+                ctx,
+                w,
+                w.record_dir,
+                mono=settings.writes_mono_tracks,
+                segment_seconds=settings.segment_seconds,
+            )
+            _log(f"RECORDER mode={mode} dir={w.record_dir} seg={settings.segment_seconds}")
+        except Exception as exc:  # 录音初始化失败绝不阻塞启动
+            logger.warning("recorder disabled: %s", exc)
+        return
+
+    # legacy(现状):测试模式(timeline 开)= 多轨 TestRecorder 进 run 目录;正常模式 = 单文件混音。
     if w.timeline is not None:
         try:
-            from test_recorder import TestRecorder
-
-            recorder: Any = TestRecorder(w.timeline.directory)
-            recorder.install(session)
-            runtime.test_recorder = recorder  # 暴露给 /api/mic 做暂停/继续
-            # 进入时与当前静音状态对齐(若启动时已静音则暂停录制)
-            recorder.set_paused(bool(getattr(w.stt_engine, "muted", False)))
-            ctx.add_shutdown_callback(recorder.aclose)
-            _log(f"TEST_RECORDER dir={recorder.directory}")
-        except Exception as exc:  # 录音初始化失败绝不阻塞启动
+            _install_test_recorder(ctx, w, w.timeline.directory, mono=True)
+            _log(f"TEST_RECORDER dir={w.timeline.directory}")
+        except Exception as exc:
             logger.warning("test recorder disabled: %s", exc)
     else:
-        # 正常模式:沿用原有单文件混音录音(recordings/),不受测试功能影响。
         recorder = AudioRecorder(session_dir="recordings")
         recorder.install(session)
         ctx.add_shutdown_callback(recorder.aclose)

@@ -128,9 +128,22 @@ def _write_text_atomic(path: Path, text: str) -> None:
 class TestRecorder:
     """安装到 AgentSession,按真实时间轴录 user/assistant 双轨 + duplex 立体声。"""
 
-    def __init__(self, run_dir: str | Path, *, flush_interval_s: float = 2.0) -> None:
+    def __init__(
+        self,
+        run_dir: str | Path,
+        *,
+        flush_interval_s: float = 2.0,
+        write_mono_tracks: bool = True,
+        segment_seconds: float | None = None,
+    ) -> None:
         self._dir = Path(run_dir)
         self._flush_interval_s = max(0.5, float(flush_interval_s))
+        # single 档=仅写 duplex.wav(立体声左右分轨仍可审计,K1);full 档=另写 user/assistant 单轨。
+        self._write_mono_tracks = bool(write_mono_tracks)
+        # None=不分段(现状,逐字节不变);>0=按秒分段(P-6:3600=按小时),产物加 .<seq> 后缀。
+        self._segment_seconds = (
+            segment_seconds if (segment_seconds and segment_seconds > 0) else None
+        )
         self._lock = threading.Lock()
         # 每段:(at_us, mono_int16_at_native_rate, native_rate)。采集不重采样。
         self._user: list[tuple[int, np.ndarray, int]] = []
@@ -250,7 +263,41 @@ class TestRecorder:
         self._dir.mkdir(parents=True, exist_ok=True)
         all_at = [s[0] for s in user] + [s[0] for s in assistant]
         base = min(all_at) if all_at else 0
+        seg_us = int(self._segment_seconds * 1_000_000) if self._segment_seconds else None
 
+        if seg_us is None:  # 不分段(现状):单文件集,manifest 结构逐字节不变
+            manifest = self._render_segment(user, assistant, base, "")
+        else:  # P-6 按段:各段独立渲染写 <name>.<seq>.wav,顶层 manifest 列全段
+            buckets: dict[int, tuple[list, list]] = {}
+            for seg in user:
+                buckets.setdefault((seg[0] - base) // seg_us, ([], []))[0].append(seg)
+            for seg in assistant:
+                buckets.setdefault((seg[0] - base) // seg_us, ([], []))[1].append(seg)
+            segments = []
+            for k in sorted(buckets):
+                u_k, a_k = buckets[k]
+                seg_manifest = self._render_segment(u_k, a_k, base + k * seg_us, f".{k}")
+                segments.append({"seq": int(k), **seg_manifest})
+            manifest = {
+                "baseAtUs": base,
+                "segmentSeconds": self._segment_seconds,
+                "format": "pcm_s16le_wav",
+                "segments": segments,
+            }
+        _write_text_atomic(
+            self._dir / "audio_manifest.json",
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+        )
+
+    def _render_segment(
+        self,
+        user: list[tuple[int, np.ndarray, int]],
+        assistant: list[tuple[int, np.ndarray, int]],
+        base: int,
+        suffix: str,
+    ) -> dict:
+        """渲染一段:user/assistant → mono/duplex,写 `<name><suffix>.wav`,返回该段 manifest dict。
+        suffix="" 即不分段(现状产物名与结构不变)。"""
         ur = self._native_rate(user)
         ar = self._native_rate(assistant)
         out_rate = ur or ar or 16_000
@@ -281,10 +328,12 @@ class TestRecorder:
         stereo = np.zeros((n, 2), dtype=np.int16)
         stereo[:, 0] = up  # 左 = 用户
         stereo[:, 1] = ap  # 右 = 助手
-        _write_wav_atomic(self._dir / "user.wav", up, rate=out_rate, channels=1)
-        _write_wav_atomic(self._dir / "assistant.wav", ap, rate=out_rate, channels=1)
-        _write_wav_atomic(self._dir / "duplex.wav", stereo, rate=out_rate, channels=2)
-        manifest = {
+        mono_file = self._write_mono_tracks
+        if mono_file:  # full 档:另写 user/assistant 单轨
+            _write_wav_atomic(self._dir / f"user{suffix}.wav", up, rate=out_rate, channels=1)
+            _write_wav_atomic(self._dir / f"assistant{suffix}.wav", ap, rate=out_rate, channels=1)
+        _write_wav_atomic(self._dir / f"duplex{suffix}.wav", stereo, rate=out_rate, channels=2)
+        return {
             "baseAtUs": base,
             "sampleRate": out_rate,
             "userNativeRate": ur,
@@ -293,7 +342,9 @@ class TestRecorder:
             "tracks": [
                 {
                     "name": "user",
-                    "file": "user.wav",
+                    "file": f"user{suffix}.wav"
+                    if mono_file
+                    else None,  # single 档数据在 duplex 左声道
                     "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in user), default=None),
                     "segmentCount": len(user),
@@ -302,7 +353,9 @@ class TestRecorder:
                 },
                 {
                     "name": "assistant",
-                    "file": "assistant.wav",
+                    "file": f"assistant{suffix}.wav"
+                    if mono_file
+                    else None,  # single 档数据在右声道
                     "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in assistant), default=None),
                     "segmentCount": len(assistant),
@@ -311,7 +364,7 @@ class TestRecorder:
                 },
             ],
             "duplex": {
-                "file": "duplex.wav",
+                "file": f"duplex{suffix}.wav",
                 "channels": 2,
                 "left": "user",
                 "right": "assistant",
@@ -319,10 +372,6 @@ class TestRecorder:
                 "durationUs": _frames_to_us(n, out_rate),
             },
         }
-        _write_text_atomic(
-            self._dir / "audio_manifest.json",
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-        )
 
     async def aclose(self) -> None:
         import asyncio

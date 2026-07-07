@@ -371,6 +371,61 @@ PR-A1 agent 小改 1/2/3/4/6 + 单测 ──► PR-A2 录音/审计子系统 + �
 > 退出效力(A1-F1)按计划本属 PR-C/D 集成验收,不阻塞 A1 独立合入。建议合入。
 > 评审组只读,未改任何工程代码。
 
+## PR-A2(录音/审计产物子系统,agent 小改 #5)· 评审组结论(2026-07-06)
+
+- **标的**:分支 `feat/concurrency-a2-record-audit`,提交 `e40d4e7`(核心)+ `750feed`(P-6 分段),
+  共 7 文件 +450/−46;待合入。这是 §5.1 点名的"本次最大块"。
+- **裁定:通过,可合入**——K3 现状路径经**实测取证**成立、audit 功能真实、分段不丢样本、
+  W1(CODEC 不由 agent 读)守住、门禁独立复核全绿;4 个低危项(A2-1~A2-4,非阻塞)。
+
+### 评审组独立核实(实测/看码取证,非采信提交说明)
+
+- **门禁**:`test_ours_*` **115 passed**(99 存量 + 16 A2)、`ruff` 全绿、行数门禁 exit 0(评审组重跑)。
+- **K3 现状路径不回归(实测:A2 前 `git show f22be47:test_recorder.py` vs 现版,同一合成输入过
+  `_render_and_write`,逐字节比对;脚本只读、不入库)**:
+  - **manifest 逐字节一致**:`audio_manifest.json` sha 相同,结构/字段/数值零变化;
+  - **非重采样轨逐字节一致**:全 16k 输入时 user/assistant/duplex.wav 采样级 `np.array_equal` 通过;
+  - **重采样轨(16k→24k)差 ≤2 LSB,且为既有非确定性、非 A2 引入**:证据链——(a) `_resample_whole`
+    源码 old/new **diff 为空**(未改);(b) 同一函数同输入**连调两次即差**(293/1200 采样,
+    `new-vs-new max|Δ|=2`);(c) `old-vs-new max|Δ|=2` **恰等于** new 自比;根因 `rtc.AudioResampler`
+    (LiveKit 原生 HIGH 重采样)非 bitwise 可复现,±2 LSB ≈ **−90 dB**,旧代码自比亦然。
+  - **两条现状路径路由正确**:PC 正常(未设 env)→ `legacy`/`off` → `AudioRecorder("recordings")`;
+    `AGENT_TIMELINE=1` → `debug` → 全量 timeline + turn_metrics + debug.log 进 `runs/`、录音
+    `_install_test_recorder(mono=True, segment_seconds=None)`(`_render_segment(suffix="")` 产
+    user/assistant/duplex.wav、manifest 无 `segments` 键)。单测
+    `test_no_segmentation_keeps_legacy_manifest` 锁 **manifest 结构**(非 WAV 字节——重采样轨
+    本不可 bitwise 复现,故此锁法正确)。
+- **audit 档真实可用**:`conversation_item_added` 发 `turn.{role}` **带 `text`**(M-5-2:审计含
+  对话文本 ✓);白名单 `turn./interrupt./timeline.` + `error` 正确(高频 `asr.*`/状态翻转/
+  `live_transcript.*` 丢弃),attach 在 audit 档**跳过高频订阅**(零成本,非订后再丢);
+  audit **不产 debug.log/KPI**、落 `recordings/` 而非 `runs/`(K3 ✓);`timeline.closed` 以
+  `timeline.` 前缀发出、被白名单保留。
+- **single**:仅 `duplex.wav`(立体声左右分轨),单轨 manifest `file=None` 元数据保留(K1)。
+- **分段(P-6)**:按起始时刻分桶、每桶独立渲染写 `.<seq>`,**源样本不丢**(frameCount 累加
+  = 不分段,测试锁定);跨桶块归早段的接缝"误差 ≤ 帧级"文档已诚实标注。
+- **W1**:`record_settings.py` **不解析** `XIAOGE_RECORD_CODEC`(docstring 明示归转码器/PR-B)。
+- **签名变更无遗漏调用方**:`setup_test_instrumentation(ctx, w)` 唯一调用点
+  `web_ui_agent.py:318` 已更新;console agent 不调用它(自带内联,无破坏)。
+
+### 集成/后续须注意(非 A2 阻塞)
+
+- **A2-1(低,可维护性)**:`setup_taps.py` 现 **463 行**(软目标 >400 告警,距 500 硬上限 37 行)
+  ——该文件在评审 #9 刚从 503 拆到 417,PR-A2 又加回到 463。**下一个动 setup_taps 的 PR
+  应先抽提**(如把录音/instrumentation 装配挪出独立模块),避免逼近硬上限。当前未违规、门禁绿。
+- **A2-2(很低,风格)**:`EventTimeline.emit()` 内 `from app.record_settings import audit_allows`
+  为每次 emit 现导入(audit 档);`sys.modules` 缓存后开销可忽略,可择机上移到模块顶。
+- **A2-3(很低,完整性)**:audit 生命周期仅确认 `timeline.closed` 被发出;若审计还想要
+  "会话开始"事件,确认其以 `timeline.*` 前缀发出(否则会被白名单丢)。核心(turn/interrupt/
+  error/closed)已覆盖,不阻塞。
+- **A2-4(低,验收口径)**:v4 §8 与 §12.2 checklist 的"PC/测试形态**逐字节不变**",对**重采样轨**
+  字面不成立(±2 LSB 既有 `rtc.AudioResampler` 非确定性,与 A2 无关);裸跑 bytewise 比对会
+  **误报失败**、误导集成评审。建议改为"**非重采样轨 + manifest 逐字节;重采样轨 ≤2 LSB
+  (rtc.AudioResampler 既有非确定性)**"。
+
+> 评审组签署(PR-A2):K3 现状路径不回归经实测取证(manifest + 非重采样轨逐字节;重采样轨
+> ≤2 LSB 为既有非确定性、非 A2 引入)、audit 带文本且不漏测试产物、分段不丢样本、CODEC 未
+> 越界进 agent;4 个低危项均非阻塞。建议合入。评审组只读,未改任何工程代码。
+
 ### 设计者应答(PR-A1,2026-07-07)
 
 **裁定"通过、可合入"收到。** 独立复核(门禁、ctx.shutdown 真 API、#1 无 strptime 解析、
@@ -399,3 +454,52 @@ _request_graceful_exit"这条,是我实现时靠"标记+早返回"结构天然�
 
 **结论**:PR-A1 加两处可选小改后仍 **12+87=99 单测全绿 / lint / 行数门禁通过**;A1-F1
 从"未确认"变为"(a)已确认成立、(b)有 cli.py 同款兜底待 PR-C/D 实测",建议按评审意见合入。
+
+### 设计者应答(PR-A2,2026-07-07)
+
+**裁定"通过、可合入"收到。** 评审组的 K3 取证做得比我自己的单测更硬——**实测 A2 前后
+同输入过 `_render_and_write` 逐字节比对**,还把重采样轨的 ±2 LSB 差**溯源为 `rtc.AudioResampler`
+既有非确定性(旧代码自比亦 ±2)、与 A2 无关**:这正是我 `test_no_segmentation_keeps_legacy_manifest`
+只锁 manifest 结构、不锁 WAV 字节的原因(重采样轨本不可 bitwise 复现),评审替我把这条隐含
+理由验证并写明了。
+
+**四项低危项处置**:
+- **A2-2(已做)**:`EventTimeline.emit()` 的 `from app.record_settings import audit_allows` 已上移
+  到模块顶(已核无环:app/__init__ 仅 docstring、record_settings 不引 event_timeline);115 单测
+  仍全绿、lint 过。
+- **A2-4(已做,勘误落文)**:v4 §8 头注 + §12.2 K3 条的"逐字节不变"改为可测口径——**非重采样轨
+  + manifest 逐字节;重采样轨 ≤2 LSB(rtc.AudioResampler 既有非确定性)**,防集成评审裸 bytewise
+  比对误报。谢评审组把这条口径钉准。
+- **A2-1(接受,记为跟进项)**:`setup_taps.py` 463 行(评审#9 曾 503→417,A2 加回 463;<500 未违规、
+  门禁绿)。PR-B(poolmgr)/PR-C(gateway)均为新模块、不动 setup_taps,故不会"顺带"抽提——
+  **列为一个独立小清理**(把录音/instrumentation 装配挪到 `app/recording_setup.py`,setup_taps 回落
+  ~370),在 PR-B 之后、动任何 setup_taps 之前择机做,不塞进已过的 A2。
+- **A2-3(接受,备注)**:audit 生命周期当前覆盖 `timeline.closed`(核心 turn/interrupt/error/closed
+  已够审计);若将来审计要"会话开始"事件,实现时以 `timeline.*` 前缀发出即被白名单保留——记入
+  PR-B 转码器/审计消费端设计备注。
+
+**结论**:A2-2/A2-4 已随本轮落分支(应答后一并提交),A2-1/A2-3 为跟进项、不阻塞;PR-A2
+仍 115 单测全绿 / lint / format / 行数门禁通过,建议按评审意见合入。
+
+### 评审组确认(PR-A2 应答,2026-07-07)
+
+四项处置**逐项实测/看码复核通过**(评审组重跑,非采信):
+
+- **A2-2(已核实,无环)**:`from app.record_settings import audit_allows` 已上移到 event_timeline
+  模块顶(第 25 行),emit() 直接调用。**导入图确认无环**:`event_timeline → app.record_settings
+  → common.runtime → 标准库`;`app/__init__.py` 仅 docstring、`record_settings`/`common.runtime`
+  均不反向引 `event_timeline`。**实测**:全新 `import event_timeline` + `from app.record_settings
+  import audit_allows` 通过,`audit_allows('turn.user')=True / ('asr.interim')=False`;**115 单测全绿**
+  (评审组重跑)、ruff 全绿、行数门禁 exit 0。
+- **A2-4(已核实,措辞准)**:v4 §8 头注("非重采样轨 + manifest 逐字节一致;重采样轨允许
+  ≤2 LSB 差——rtc.AudioResampler 既有非确定性、旧代码自比亦 ±2、与本改造无关")+ §12.2 K3 条
+  引用该口径——与实测证据一致,防集成评审裸 bytewise 误报。**采纳**。
+- **A2-1(接受其跟进方案)**:抽 `app/recording_setup.py`、setup_taps 回落 ~370 行,在 PR-B 之后、
+  动 setup_taps 之前择机做——目标明确、时机合理,不塞进已过的 A2,同意。
+- **A2-3(接受)**:audit 生命周期以 `timeline.*` 前缀扩展的备注记入 PR-B 审计消费端设计,同意。
+
+**一处流程轻提示(非阻塞)**:A2-4 改了 v4(权威规格)的验收口径,当前经"A2-4"标签可回溯到
+本评审记录、够用;若日后审计追溯要更硬,可在 v4 §2 总账补一行指针(K3 口径细化 → A2-4)。
+
+> 评审组二签(PR-A2 应答):A2-2 无环 + 115 绿实测确认、A2-4 口径落文准确、A2-1/A2-3 跟进
+> 方案合理;**PR-A2 应答全部通过,确认可合入**。评审组只读,未改任何工程代码。

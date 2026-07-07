@@ -315,7 +315,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
     register_session_handlers(w)
     start_llm_warmup(llm)
-    w.timeline, turn_metrics = setup_test_instrumentation(ctx, session)
+    turn_metrics = setup_test_instrumentation(ctx, w)  # 设 w.timeline/record_settings/record_dir
 
     await session.start(agent=VoiceAgent(), room=ctx.room)
     runtime.session = session  # 供模块级聆听助手/欢迎语在 agent 循环里 say/收尾
