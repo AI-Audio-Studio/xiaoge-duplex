@@ -41,13 +41,16 @@ from webpanel.state import (
 
 logger = logging.getLogger("web-ui-agent")
 
-# 页面加载一次进内存;<!--BACKEND_TABS--> 由注册表生成(加后端自动出 tab)。
-# M5/D-19:asr/tts 隐藏态(ADMIN_ROUTES 关)连后端切换 tab 也不注入(开关同控路由注册与 tab)。
-_INDEX_HTML = (
-    (Path(__file__).resolve().parent / "static" / "index.html")
-    .read_text(encoding="utf-8")
-    .replace("<!--BACKEND_TABS-->", backend_tabs_html() if ADMIN_ROUTES else "")
-)
+
+def _build_index_html(admin_routes: bool) -> str:
+    """读 static/index.html 注入后端 tab(注册表生成,加后端自动出 tab)。
+    M5/D-19:`admin_routes` 关则 `<!--BACKEND_TABS-->` **不注入**——开关同控路由注册与 tab。"""
+    html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(encoding="utf-8")
+    return html.replace("<!--BACKEND_TABS-->", backend_tabs_html() if admin_routes else "")
+
+
+# 页面加载一次进内存(依模块 ADMIN_ROUTES 定态)。
+_INDEX_HTML = _build_index_html(ADMIN_ROUTES)
 
 
 async def _send_busy_and_close(ws: aiohttp.web.WebSocketResponse) -> None:

@@ -53,6 +53,18 @@ def test_code_default_shows_admin_routes() -> None:
     assert "/api/asr" in paths and "/api/tts" in paths
 
 
+def test_tab_injection_gated_by_admin_routes() -> None:
+    """T1 tab 半:门控关时页面**不注入**后端切换 tab(开关同控路由 + tab);开时注入。"""
+    tabs = ws.backend_tabs_html()
+    assert tabs.strip()  # 注册表非空,tab 片段有内容(否则本测无意义)
+    shown = ws._build_index_html(admin_routes=True)
+    hidden = ws._build_index_html(admin_routes=False)
+    assert tabs in shown  # 开:注入
+    assert tabs not in hidden  # 关:不注入(T1 tab 同控)
+    assert "<!--BACKEND_TABS-->" not in shown  # 占位已替换(非残留)
+    assert "<!--BACKEND_TABS-->" not in hidden
+
+
 def test_hidden_admin_route_returns_404_over_http() -> None:
     """端到端:隐藏态经真 HTTP 打 /api/asr、/api/tts → 404(而非仅前端无入口)。"""
 
