@@ -80,7 +80,7 @@ def test_validation_failure_keeps_source(tmp_path: Path, monkeypatch: pytest.Mon
     assert not (tmp_path / "user.opus").exists()  # 半成品产物删掉
 
 
-def test_scan_leftovers_enqueues(tmp_path: Path) -> None:
+def test_scan_leftovers_enqueues_per_dir(tmp_path: Path) -> None:
     root = tmp_path / "recordings"
     for sid in ("20260707_100000_p1", "20260707_100001_p2"):
         d = root / sid
@@ -88,8 +88,61 @@ def test_scan_leftovers_enqueues(tmp_path: Path) -> None:
         _make_wav(d / "user.wav", seconds=0.2)
         _make_wav(d / "duplex.wav", seconds=0.2, channels=2)
     t = tc.Transcoder(root, codec="opus")
-    assert t.scan_leftovers() == 4  # 两会话 × 两 wav
-    assert t.metrics()["queue_depth"] == 4
+    assert t.scan_leftovers() == 2  # 两会话目录(整目录为一工作单元,非按文件)
+    assert t.metrics()["queue_depth"] == 2
+
+
+def test_transcode_dir_rewrites_manifest_no_dangling(tmp_path: Path) -> None:
+    """B-1:整目录转码后回写 audio_manifest.json 的 file 引用为新后缀,审计索引不悬空。"""
+    import json
+
+    d = tmp_path / "sess"
+    d.mkdir()
+    for name in ("user.wav", "assistant.wav"):
+        _make_wav(d / name, seconds=0.3)
+    _make_wav(d / "duplex.wav", seconds=0.3, channels=2)
+    manifest = {
+        "tracks": [
+            {"name": "user", "file": "user.wav"},
+            {"name": "assistant", "file": "assistant.wav"},
+        ],
+        "duplex": {"file": "duplex.wav"},
+    }
+    (d / "audio_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    results = tc.transcode_dir(d, "opus")
+    assert all(r.ok for r in results)
+    m2 = json.loads((d / "audio_manifest.json").read_text(encoding="utf-8"))
+    assert m2["tracks"][0]["file"] == "user.opus"
+    assert m2["tracks"][1]["file"] == "assistant.opus"
+    assert m2["duplex"]["file"] == "duplex.opus"
+    for f in ("user.opus", "assistant.opus", "duplex.opus"):  # 引用的文件都真实存在
+        assert (d / f).exists()
+    assert not (d / "user.wav").exists()  # 源已删
+
+
+def test_rewrite_manifest_handles_segments(tmp_path: Path) -> None:
+    """分段 manifest(segments[].tracks/duplex)的 file 引用也被递归回写。"""
+    import json
+
+    p = tmp_path / "audio_manifest.json"
+    p.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "seq": 0,
+                        "tracks": [{"name": "user", "file": "user.0.wav"}],
+                        "duplex": {"file": "duplex.0.wav"},
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    tc.rewrite_manifest(p, {"user.0.wav": "user.0.opus", "duplex.0.wav": "duplex.0.opus"})
+    m = json.loads(p.read_text(encoding="utf-8"))
+    assert m["segments"][0]["tracks"][0]["file"] == "user.0.opus"
+    assert m["segments"][0]["duplex"]["file"] == "duplex.0.opus"
 
 
 def test_iter_session_wavs_excludes_products(tmp_path: Path) -> None:

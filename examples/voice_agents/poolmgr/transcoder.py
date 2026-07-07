@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import queue
@@ -113,6 +114,52 @@ def iter_session_wavs(session_dir: str | Path) -> list[Path]:
     return sorted(d.glob("*.wav")) if d.is_dir() else []
 
 
+def _write_json_atomic(path: Path, obj: object) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _remap_files(node: object, renames: dict[str, str]) -> None:
+    """递归把 manifest 里 `file=<旧名>` 换成 `<新名>`;兼容不分段(tracks/duplex)与分段
+    (segments[].tracks/duplex)两种结构。"""
+    if isinstance(node, dict):
+        f = node.get("file")
+        if isinstance(f, str) and f in renames:
+            node["file"] = renames[f]
+        for v in node.values():
+            _remap_files(v, renames)
+    elif isinstance(node, list):
+        for item in node:
+            _remap_files(item, renames)
+
+
+def rewrite_manifest(manifest_path: str | Path, renames: dict[str, str]) -> None:
+    """转码成功后回写 `audio_manifest.json` 的 file 引用后缀(B-1:审计索引不悬空,W2)。"""
+    p = Path(manifest_path)
+    if not renames or not p.is_file():
+        return
+    with contextlib.suppress(Exception):
+        manifest = json.loads(p.read_text(encoding="utf-8"))
+        _remap_files(manifest, renames)
+        _write_json_atomic(p, manifest)
+
+
+def transcode_dir(session_dir: str | Path, codec: str) -> list[TranscodeResult]:
+    """转一个会话目录的所有 wav,**整目录为一个工作单元**(单 worker 处理→无并发改 manifest
+    竞态);全部转完后一次性回写 manifest 的 file 后缀(B-1)。"""
+    d = Path(session_dir)
+    results: list[TranscodeResult] = []
+    renames: dict[str, str] = {}
+    for wav in iter_session_wavs(d):
+        r = transcode_file(wav, codec)
+        results.append(r)
+        if r.ok and r.dst is not None:
+            renames[wav.name] = r.dst.name
+    rewrite_manifest(d / "audio_manifest.json", renames)
+    return results
+
+
 class Transcoder:
     """转码任务队列 + 低优先级 worker(D-22)。release 入队会话目录;启动扫描遗留(P-5)。"""
 
@@ -137,28 +184,28 @@ class Transcoder:
             t.start()
             self._threads.append(t)
 
-    def enqueue_dir(self, session_dir: str | Path) -> int:
-        """把一个会话目录的 .wav 全部入队。返回入队数。"""
-        n = 0
-        for wav in iter_session_wavs(session_dir):
-            with self._lock:
-                self._enqueued_at[wav] = time.monotonic()
-            self._q.put(wav)
-            n += 1
-        return n
+    def enqueue_dir(self, session_dir: str | Path) -> bool:
+        """把一个会话目录**整体**入队(一目录=一工作单元:转完原子回写 manifest,免竞态)。"""
+        d = Path(session_dir)
+        if not d.is_dir() or not iter_session_wavs(d):
+            return False
+        with self._lock:
+            self._enqueued_at[d] = time.monotonic()
+        self._q.put(d)
+        return True
 
     def scan_leftovers(self) -> int:
-        """启动时扫描 recordings/*/ 遗留 .wav 入队(崩溃恢复,P-5)。"""
+        """启动时扫描 recordings/*/ 遗留录音目录入队(崩溃恢复,P-5)。返回目录数。"""
         total = 0
         if self._root.is_dir():
             for session in sorted(self._root.iterdir()):
-                if session.is_dir():
-                    total += self.enqueue_dir(session)
-        logger.info("transcoder scanned %d leftover wav(s)", total)
+                if self.enqueue_dir(session):
+                    total += 1
+        logger.info("transcoder scanned %d leftover session dir(s)", total)
         return total
 
     def metrics(self) -> dict:
-        """队列深度、最老任务时长(→ §11 监控 R7)。"""
+        """队列深度(待转目录数)、最老任务时长(→ §11 监控 R7)。"""
         with self._lock:
             oldest = min(self._enqueued_at.values(), default=None)
         age = (time.monotonic() - oldest) if oldest is not None else 0.0
@@ -173,7 +220,7 @@ class Transcoder:
             if item is None:
                 return
             try:
-                transcode_file(item, self._codec)
+                transcode_dir(item, self._codec)  # 整目录:转码 + 回写 manifest(B-1)
             except Exception:
                 logger.warning("transcode task crashed: %s", item, exc_info=True)
             finally:

@@ -60,6 +60,11 @@ class PoolProcess:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+def _default_reap(work: Callable[[], None]) -> None:
+    """默认回收执行器:守护线程跑 kill+入队(不阻塞锁,B-2)。"""
+    threading.Thread(target=work, name="poolmgr-reap", daemon=True).start()
+
+
 @dataclass
 class PoolIO:
     """可注入的进程 I/O(默认=真实现;单测传假实现)。"""
@@ -67,6 +72,7 @@ class PoolIO:
     spawn: Callable[[str, int], Any] | None = None  # (proc_id, port) → handle
     healthz: Callable[[int], bool] | None = None  # (port) → ready?
     kill: Callable[[Any], None] | None = None  # (handle) → None
+    reap: Callable[[Callable[[], None]], None] | None = None  # 回收执行器(默认线程)
 
 
 @dataclass
@@ -99,6 +105,7 @@ class PoolManager:
         self._spawn_fn = io.spawn or default_spawn
         self._healthz_fn = io.healthz or default_healthz
         self._kill_fn = io.kill or default_kill
+        self._reap = io.reap or _default_reap
         self._transcoder = transcoder
         self._poll_interval_s = float(t.poll_interval_s)
         self._fail_limit = int(t.healthz_fail_limit)
@@ -137,14 +144,22 @@ class PoolManager:
         logger.info("spawn proc=%s port=%d", proc_id, port)
         return p
 
-    def _recycle(self, p: PoolProcess, reason: str) -> None:
-        """kill + 同端口重启(比状态复位可靠)。持锁调用。"""
+    def _recycle(self, p: PoolProcess, reason: str, *, enqueue_session: str | None = None) -> None:
+        """持锁调用:pop + **同端口立即重启**(池即时补位);kill(+可选录音入队)交 reaper 线程
+        (**不在锁内阻塞** kill 的 wait,B-2;kill 确认进程死后才入队转码,免与录音收尾竞态 B-3)。"""
         logger.info("recycle proc=%s port=%d reason=%s", p.proc_id, p.port, reason)
         p.state = RECYCLING
-        with contextlib.suppress(Exception):
-            self._kill_fn(p.handle)
         self._procs.pop(p.proc_id, None)
-        self._spawn_one(p.port)
+        handle = p.handle
+        self._spawn_one(p.port)  # 立即补位,不等旧进程死
+        self._reap(lambda: self._reap_work(handle, enqueue_session))
+
+    def _reap_work(self, handle: Any, enqueue_session: str | None) -> None:
+        """回收(锁外执行):先 kill 并等进程真死(录音收尾完成),再入队转码。"""
+        with contextlib.suppress(Exception):
+            self._kill_fn(handle)  # terminate + wait:确认死
+        if enqueue_session is not None:
+            self._enqueue_recordings(enqueue_session)  # B-3:确认死后再转码
 
     # ── 网关调用面 ──────────────────────────────────────────────────────────
     def alloc(self) -> dict[str, Any] | None:
@@ -172,8 +187,8 @@ class PoolManager:
             )
             if target is None:
                 return False
-            self._enqueue_recordings(session_id)
-            self._recycle(target, reason or "released")
+            # 录音入队推迟到 reaper 内 kill 确认死后(B-3);kill 的 wait 也在锁外(B-2)。
+            self._recycle(target, reason or "released", enqueue_session=session_id)
             return True
 
     def _enqueue_recordings(self, session_id: str) -> None:

@@ -35,7 +35,7 @@ class _Clock:
         return self.t
 
 
-def _make(size: int = 2, transcoder: object = None) -> tuple:
+def _make(size: int = 2, transcoder: object = None, reap=None, kill=None) -> tuple:
     spawned: list[_FakeHandle] = []
     ready: dict[int, bool] = {}
     clock = _Clock()
@@ -50,7 +50,8 @@ def _make(size: int = 2, transcoder: object = None) -> tuple:
         io=PoolIO(
             spawn=spawn,
             healthz=lambda port: ready.get(port, False),
-            kill=lambda h: h.terminate(),
+            kill=kill or (lambda h: h.terminate()),
+            reap=reap or (lambda work: work()),  # 默认同步执行,断言确定;B-2 用捕获式
         ),
         tuning=PoolTuning(base_port=19100, poll_interval_s=3600, clock=clock),  # 后台线程休眠
         transcoder=transcoder,
@@ -152,6 +153,55 @@ def test_ready_below_threshold_alert() -> None:
         ready[h.port] = True
     m.poll_once()
     assert m.status()["ready_below_threshold"] is False  # 4 ready ≥ 2
+    m.stop()
+
+
+def test_release_defers_kill_off_lock_b2(tmp_path: Path) -> None:
+    """B-2:kill 的 wait 不得在锁内阻塞——release 立即返回、池即时补位、status 不冻结,
+    kill 推迟到 reaper 执行。"""
+    captured: list = []
+    m, spawned, ready, _ = _make(size=1, reap=captured.append)  # 捕获 reaper work,不执行
+    m.start()
+    ready[spawned[0].port] = True
+    m.poll_once()
+    a = m.alloc()
+    assert m.release(a["session_id"], "done") is True
+    assert spawned[0].killed is False  # kill 尚未发生(未在锁内阻塞)
+    assert len(spawned) == 2  # 池已即时补位
+    assert m.status()["size"] == 1  # status 未被 kill 的 wait 冻结
+    captured[0]()  # 执行 reaper → kill 真正发生
+    assert spawned[0].killed is True
+    m.stop()
+
+
+def test_kill_before_enqueue_b3(tmp_path: Path) -> None:
+    """B-3:reaper 内必须**先 kill(确认进程死)再入队录音转码**,免与录音收尾竞态。"""
+    order: list[str] = []
+
+    class _Tx:
+        def start(self) -> None: ...
+        def scan_leftovers(self) -> int:
+            return 0
+
+        def enqueue_dir(self, d: object) -> None:
+            order.append("enqueue")
+
+        def metrics(self) -> dict:
+            return {}
+
+        def stop(self) -> None: ...
+
+    root = tmp_path / "recordings"
+    m, spawned, ready, _ = _make(size=1, transcoder=_Tx(), kill=lambda h: order.append("kill"))
+    m._recordings_root = root
+    m.start()
+    ready[spawned[0].port] = True
+    m.poll_once()
+    a = m.alloc()
+    sid = a["session_id"]
+    (root / f"20260707_100000_{sid}").mkdir(parents=True)
+    m.release(sid, "done")
+    assert order == ["kill", "enqueue"]  # 先杀后转码
     m.stop()
 
 
