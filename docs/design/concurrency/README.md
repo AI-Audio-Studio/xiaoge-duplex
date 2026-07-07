@@ -59,12 +59,15 @@ KICKOFF 是拿前两者过第一门**。读设计看 DESIGN;查"为什么这么�
     (PR #26,main HEAD `f22be47`)。集成期须验证 A1-F1(#3 console 退出效力——已查:
     console 与 proc 共用 shutdown 路径、drain 录音收尾成立;仅"进程退出供池回收"待
     SIGTERM 兜底,PR-C/D 实测)/ A1-F2(#3 依赖 PR-C 宽限窗)记入 PR-C/D 清单。
-  - **PR-A2**(录音/审计产物子系统 #5:RECORD_MODE/TIMELINE_LEVEL/按小时分段):**评审
-    通过**,在分支 `feat/concurrency-a2-record-audit`(`750feed`)**待合入**;115 单测全绿、
-    K3 逐字节不变逐路径核过;3 个低危项(A2-1 setup_taps 463 行近 500 上限 / A2-2 / A2-3)
-    非阻塞。
-- **代码**:**PR-A1 已入 main**;PR-A2 在分支待合入。上线仍锁两道前置门(目标机 N + Q5)。
-  下一步:PR-B(池管理器 + 转码器)。
+  - **PR-A2**(录音/审计产物子系统 #5):评审通过 + 应答二签,**已合入 main**
+    (PR #28,`6857b2a`);A2-1(setup_taps 抽提)记为跟进 task。
+  - **PR-B**(池管理器 poolmgr/):在分支 `feat/concurrency-b-poolmgr`**待评审+合入**;
+    三组件 —— transcoder(D-13/D-21/D-22,WAV→Opus/FLAC 分档校验/失败保底/低优先级/扫描
+    遗留)、manager(spawn→ready→alloc→release→recycle 状态机、env 注入表 §7.2、healthz
+    冷启动不误杀)、control_api(/alloc·/release·/status,只绑 127.0.0.1)。21 新单测
+    (转码7+管理7+API7),I/O 注入=假 agent 独立测,不依赖真进程/网关;136 单测全绿。
+- **代码**:**PR-A1/A2 已入 main**;PR-B 在分支待合入。上线仍锁两道前置门(目标机 N + Q5)。
+  下一步:PR-C(网关)。
 
 ## 4. 维护规则（改文档时照此走）
 
