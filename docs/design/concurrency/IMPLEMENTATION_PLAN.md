@@ -934,7 +934,7 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 | 3 | D1 关闭码/重分配单入口 | ✅ | c_main(4001/409·规则1单入口)+ **d_integration D1**(真回收后旧cookie→409/4001→重分配) |
 | 4 | Q6 准入 | ✅ | c_main `test_access_gate_blocks_without_code` |
 | 5 | R6 安全四条 | ✅ | c_main(白名单404·cookie HttpOnly/SameSite)+ c_proxy(令牌桶·超帧断连) |
-| 6 | B4 healthz 千次专项 | 🧪 | b_manager(健康→不回收/死亡→回收);**千次探测 + 真实会话 KPI 无扰动 → soak** |
+| 6 | B4 healthz 千次专项 | 🧪 | b_manager(健康→不回收/死亡→回收);**soak harness 已就位**(`harness/soak.py`);千次探测 + 真实会话 KPI 无扰动 → 目标机真 agent 全量浸泡 |
 | 7 | M3 内网绑定 | ✅ / 🚀 | b_control_api(serve 强制 loopback)+ default_agent_env `WEB_UI_HOST=127.0.0.1`;**外网 nmap 不可达 → 部署验收** |
 | 8 | R2 转码归属 | ✅ | b_transcoder + b_manager(转码在池侧·per-dir 队列·崩溃不阻塞 alloc/在线) |
 | 9 | N1 分档校验 | ✅ | b_transcoder(D-21:FLAC 采样数逐一 / Opus 时长差≤0.07s;失败留 WAV 不删源) |
@@ -1113,3 +1113,21 @@ T1 要求路由 + tab 双验;建议补一条断言——`ADMIN_ROUTES=0` 下 `_I
 > 评审组签署(M5 + 前进):tab 门控补测判别性落地、重构行为等价、102 绿——M5 达标可合入,claim
 > 属实;编码阶段随 M5/PR-D 增量合入收官,其后转 soak/部署验收/前置门(非编码),两硬门未过不上线。
 > 评审组只读,未改任何工程代码。
+
+### 浸泡 harness 交付(§7,2026-07-07)——待评审
+
+编码阶段收官后第一项非编码活动的**工具**。§7 P-7"实施期落为脚本"现落地:
+
+- **`examples/voice_agents/harness/soak.py`**(319 行,CLI `python -m harness.soak`):拉起**真
+  PoolManager(spawn 假 agent 子进程)+ 真 control API + 真网关 + 真 sweep**,N 个虚拟用户长时高频
+  **churn**(新浏览器→GET/→/ws/audio→帧+回声→断→半数窗内 REATTACH/半数放任超时回收),周期
+  **采样进程树 RSS / 文件句柄 / 池态(ready·assigned)/ 持有上游(proxy 宽限窗)/ 会话表规模**;
+  churn 后冷却让宽限窗全超时 + 池复位,采末态。**泄漏判据**(全 PASS 方绿):会话表末态归零、
+  持有上游归零、池全回收复位、RSS 相对基线增长 ≤ 限、句柄增长 ≤ 限。报告(检查表 + 采样序列)
+  落 `docs/reports/concurrency_soak_<ts>.md`。
+- **假 agent 浸泡查网关/池泄漏**(RSS/句柄/会话/槽/上游),`--agent-cmd` 可换真 agent + 真 env/录音
+  在目标机做 §7 全量 **4 路×2h**(含 `recordings` 磁盘增速 / 转码积压曲线——需真录音,假 agent 恒 0)。
+- **冒烟**:`tests/test_ours_concurrency_soak_smoke.py`(2 会话×5s 真栈,断言泄漏检查全 PASS + 报告落盘),
+  锁 harness 本体可跑通;实测 RSS 增长 <1MB、句柄稳、末态全归零。并发用例 **103 绿**、lint-ours/行数门禁过。
+- **定位**:harness 是**工具**;B4 千次 + 真实会话 KPI 无扰动、N2 在线路 KPI 无扰动、`recordings` 磁盘/转码
+  积压 = **目标机真 agent 全量浸泡**的产出(需运维发令 + 目标机),与两前置门同批。分支 `feat/concurrency-soak-harness`。

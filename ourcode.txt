@@ -23,6 +23,8 @@ examples/voice_agents/gateway/affinity.py
 examples/voice_agents/gateway/pool_client.py
 examples/voice_agents/gateway/proxy.py
 examples/voice_agents/gateway/main.py
+examples/voice_agents/harness/__init__.py
+examples/voice_agents/harness/soak.py
 examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
 examples/voice_agents/webpanel/state.py
@@ -87,5 +89,6 @@ tests/test_ours_concurrency_c_proxy.py
 tests/test_ours_concurrency_c_main.py
 tests/test_ours_concurrency_d_integration.py
 tests/test_ours_concurrency_m5_admin_routes.py
+tests/test_ours_concurrency_soak_smoke.py
 tests/_fake_agent_server.py
 scripts/check_line_counts.py
