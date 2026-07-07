@@ -480,3 +480,26 @@ _request_graceful_exit"这条,是我实现时靠"标记+早返回"结构天然�
 
 **结论**:A2-2/A2-4 已随本轮落分支(应答后一并提交),A2-1/A2-3 为跟进项、不阻塞;PR-A2
 仍 115 单测全绿 / lint / format / 行数门禁通过,建议按评审意见合入。
+
+### 评审组确认(PR-A2 应答,2026-07-07)
+
+四项处置**逐项实测/看码复核通过**(评审组重跑,非采信):
+
+- **A2-2(已核实,无环)**:`from app.record_settings import audit_allows` 已上移到 event_timeline
+  模块顶(第 25 行),emit() 直接调用。**导入图确认无环**:`event_timeline → app.record_settings
+  → common.runtime → 标准库`;`app/__init__.py` 仅 docstring、`record_settings`/`common.runtime`
+  均不反向引 `event_timeline`。**实测**:全新 `import event_timeline` + `from app.record_settings
+  import audit_allows` 通过,`audit_allows('turn.user')=True / ('asr.interim')=False`;**115 单测全绿**
+  (评审组重跑)、ruff 全绿、行数门禁 exit 0。
+- **A2-4(已核实,措辞准)**:v4 §8 头注("非重采样轨 + manifest 逐字节一致;重采样轨允许
+  ≤2 LSB 差——rtc.AudioResampler 既有非确定性、旧代码自比亦 ±2、与本改造无关")+ §12.2 K3 条
+  引用该口径——与实测证据一致,防集成评审裸 bytewise 误报。**采纳**。
+- **A2-1(接受其跟进方案)**:抽 `app/recording_setup.py`、setup_taps 回落 ~370 行,在 PR-B 之后、
+  动 setup_taps 之前择机做——目标明确、时机合理,不塞进已过的 A2,同意。
+- **A2-3(接受)**:audit 生命周期以 `timeline.*` 前缀扩展的备注记入 PR-B 审计消费端设计,同意。
+
+**一处流程轻提示(非阻塞)**:A2-4 改了 v4(权威规格)的验收口径,当前经"A2-4"标签可回溯到
+本评审记录、够用;若日后审计追溯要更硬,可在 v4 §2 总账补一行指针(K3 口径细化 → A2-4)。
+
+> 评审组二签(PR-A2 应答):A2-2 无环 + 115 绿实测确认、A2-4 口径落文准确、A2-1/A2-3 跟进
+> 方案合理;**PR-A2 应答全部通过,确认可合入**。评审组只读,未改任何工程代码。
