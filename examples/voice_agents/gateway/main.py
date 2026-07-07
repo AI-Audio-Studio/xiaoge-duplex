@@ -34,7 +34,9 @@ logger = logging.getLogger("gateway")
 
 COOKIE = "xg_aff"  # 亲和 cookie
 ACCESS_COOKIE = "xg_access"  # 准入凭证 cookie(D-18)
-_API_WHITELIST = {"mic", "asr", "tts"}  # §6.2 ①(asr/tts 隐藏态由 agent 侧 404,D-19)
+# §6.2 ①:白名单转发 mic/asr/tts。D-19/M5(asr/tts 服务器形态默认隐藏→404)属 agent 侧路由门控,
+# **尚未实现**(PLAN §12.2 台账 M5 / 跟进 task);落地前 asr/tts 经此照常反代、由 agent 服务(非 404)。
+_API_WHITELIST = {"mic", "asr", "tts"}
 _SWEEP_INTERVAL_S = 2.0
 
 _PAGE = "<!doctype html><meta charset=utf-8><title>小歌</title>"

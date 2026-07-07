@@ -85,4 +85,6 @@ tests/test_ours_concurrency_c_affinity.py
 tests/test_ours_concurrency_c_poolclient.py
 tests/test_ours_concurrency_c_proxy.py
 tests/test_ours_concurrency_c_main.py
+tests/test_ours_concurrency_d_integration.py
+tests/_fake_agent_server.py
 scripts/check_line_counts.py
