@@ -195,9 +195,12 @@ async def _sweep_loop(
     """宽限窗/即断即杀统一收尾(规则5 + D-07):PENDING 到期 → 关上游 + 池 release。"""
     while True:
         await asyncio.sleep(interval)
-        for s in table.sweep_expired():
-            await proxy.close_session_io(s.session_id)
-            await pool.release(s.session_id, "grace timeout")
+        try:  # N-1:单次迭代异常不得杀死 sweep 任务(否则所有宽限窗清理静默停摆),与 poolmgr 对齐
+            for s in table.sweep_expired():
+                await proxy.close_session_io(s.session_id)
+                await pool.release(s.session_id, "grace timeout")
+        except Exception:
+            logger.exception("sweep iteration failed")
 
 
 def _build_components(config: GatewayConfig) -> tuple[af.AffinityTable, Proxy, PoolClient]:

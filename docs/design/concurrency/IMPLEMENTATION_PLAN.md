@@ -718,3 +718,99 @@ sweep 驱动、R1/R3/D1/Q6/R6 真链路集成测)仍随 `proxy.py`/`main.py`(剩
 
 > 评审组签署(C-1 确认):结构守卫落实、实测判别力确认、无回归、160 绿;C-1 闭环。已交付
 > 3/5 模块无遗留评审项;PR-C 整体裁定待剩余 2/5 + 集成测。评审组只读,未改任何工程代码。
+
+## PR-C(网关,v4 §6)· 整体评审(5/5 完成,2026-07-07)
+
+> 分支 `feat/concurrency-c-gateway` 全 5 模块交付:config/affinity/pool_client(前评已达标)+
+> **proxy.py(T2/D-16/R6 上游持有+透传泵+反代)、main.py(六路由/Q6/R6/sweep/D-07)**。
+> 评审组全程只读、实测/看码取证。**裁定:整体质量达标;一处中危 B-C-2 建议合入前修(1 行+补测)。**
+
+### 一、核心行为——实测坐实(非采信)
+
+- **门禁(评审组重跑)**:`test_ours_*` **174 passed**、ruff 全绿、行数门禁 exit 0;5 模块均 <500、
+  入 ourcode.txt。
+- **T2/D-16 真端到端**(此前 3/5 评审"不可验",现坐实):`test_grace_holds_upstream_and_reattach`
+  用**真 aiohttp WS + 真网关 app + 真假 agent 上游**——ws1 连→回声→断→**断言 PENDING 且
+  `"sess1" in proxy._io`(上游被持有)**→ws2 重连→ACTIVE→回声正常→**`len(agent_conns)==1`
+  (agent 全程只被连一次=上游真持有、未重开)**。宽限窗超时关上游亦有真测。
+- **六路由规则(§6.1)**:TestClient + 假池实测——规则1 分配/繁忙页、规则2 cookie 失效 4001/409、
+  规则3 协议客户端直分配 + **即断即杀(D-07,`test_protocol_client_flow_and_immediate_release`)**、
+  规则4 无 cookie /ws 拒绝、规则6 双标签页页/4002。
+- **affinity(P-3/P-4/R3/C-1)**:HMAC 常数时间比对、状态机注入时钟真边界、**C-1 结构守卫**
+  (conn_id 集合,被拒连接 conn_id=None→disconnect 天然无操作,`test_c1_*` 判别力确认)。
+- **D-07 分档**(看码):`on_audio_disconnect` deadline = `now + (T if browser else 0)`——协议
+  客户端 0 宽限、下一 sweep tick(≤2s)即 release,与浏览器超时走同一 sweep 路径(不放请求
+  finally,规避连接取消打断收尾)。`register(*, browser=True)` 签名兼容 root/协议两调用点。
+- **Q6/R6**:准入 HMAC cookie 门(`test_access_gate_*`);/api 白名单默认 404、cookie
+  `HttpOnly+SameSite=Strict`(Secure 随 TLS)、错误响应不泄漏拓扑(泛化 error)、每连接令牌桶
+  速率 + 单帧上限(proxy `_RateLimiter`/`max_frame_bytes`)。
+- **pool_client**:错误吞成安全默认(真不可达实测,前评已确认)。
+
+### 二、B-C-2(中危,建议合入前修;代码确认、测试未覆盖)——上游连接失败泄漏会话
+
+- **事实链(看码)**:`main.ws_audio` 先 `on_audio_connect`(会话转 ACTIVE、conn_id 入集)再
+  `proxy.handle_audio`;`handle_audio` 的 **FRESH 分支 `_open_upstream` 失败**(proxy.py:90-95)→
+  `client_ws.close(1011)` + `return`,**未调 `on_audio_disconnect`**、未 `close_session_io`。
+- **后果**:该会话**永远停在 ACTIVE**(conn_id 幽灵留在 audio_conns)→ `sweep_expired` 只扫
+  PENDING → **永不 release**,pool 槽/会话表泄漏;更糟——该 cookie 后续 `GET /` 命中
+  `ACTIVE and audio_conns` → **永久"已在另一窗口通话"页,用户被锁死**;`/ws/audio` 重连恒
+  REJECT_BUSY。
+- **触发**:agent 在 alloc 与浏览器 `/ws/audio` 连接之间死亡/被 poolmgr 回收(数秒窗口,池
+  churn 下现实存在)。**非理论**。
+- **修法(1 行)**:`handle_audio` 上游失败分支 return 前 `self._table.on_audio_disconnect(sid,
+  conn_id)`(→ 会话转 PENDING → sweep release,cookie 解锁)。**补测**:`_open_upstream` 抛错时
+  会话被清理、pool release 被调用。**当前 proxy/main 测试无一覆盖 upstream-fail**——同类"真实
+  失败路径单测漏覆盖",与 A2/B 教训一致。
+
+### 三、低危(非阻塞,建议随修或 PR-D)
+
+- **N-1(健壮性)**:`_sweep_loop` 循环体无 try/except——某次迭代意外抛错会**静默杀死 sweep
+  任务**、宽限窗清理全停(poolmgr `poll_loop` 用了 suppress,此处宜对齐)。当前 `pool.release`/
+  `close_session_io` 各自内部 suppress,概率低,但缺兜底。
+- **N-2(UX,PR-D 真浏览器验)**:`root()` 双标签页判据 `ACTIVE and audio_conns` 在**快速刷新**
+  (旧 `/ws/audio` 关闭尚未被网关处理,新 `GET /` 先到)时可能**误判为双标签页**、给用户
+  "另一窗口通话"页。时序相关,建议 PR-D 真浏览器回归验证刷新路径。
+- **N-3(覆盖)**:R6 的速率/帧上限、cookie 属性无专项断言(代码在);建议补。
+
+### 四、整体裁定
+
+- 核心(T2 真持有/reattach、六路由、C-1、D-07、Q6/R6)**实测坐实、门禁 174 绿**,架构与实现达标。
+- **B-C-2(中)建议合入前修**——核心路径泄漏 + 用户锁死,1 行修 + 1 补测,成本极低;N-1~N-3 低危可随修。
+- 修 B-C-2 + 补 upstream-fail 测后,PR-C 达合入标准。**其后 PR-D**:R1 三断言、R3、D1、Q6、R6、
+  B4、批量断开等**全链真集成/浸泡**(§6/§12.1),及 A1-F1(#3 console 退出)、目标机 N 摸底。
+
+> 评审组签署(PR-C 整体):5/5 模块达标,T2/六路由/C-1/D-07/Q6/R6 实测坐实(174 绿);中危
+> B-C-2(upstream-连接失败→会话泄漏+用户锁死,代码确认、测试未覆盖)建议合入前 1 行修+补测;
+> N-1~N-3 低危。评审组只读,未改任何工程代码。
+
+### 设计者应答(PR-C 整体评审,2026-07-07)
+
+**全部采纳。B-C-2 属实、且是真缺陷,已修 + 补先红后绿真失败路径测;N-1、N-3 一并做;N-2 接受、
+随理由入 PR-D。门禁:90 并发用例绿(174→+3),lint-ours/format/行数门禁过。**
+
+- **B-C-2(中,已修)**——**看码+实测坐实事实链**:`handle_audio` FRESH/`io is None` 分支
+  `_open_upstream` 失败(proxy.py:90-95)只 `close(1011)+return`,而 `on_audio_disconnect` 仅在
+  `_pump_cli2up` 的 finally——该失败路径根本不进泵。会话遂永停 ACTIVE(conn_id 幽灵留 audio_conns)
+  → `sweep_expired` 只扫 PENDING → 永不 release(槽/表泄漏)+ 该 cookie 的 `GET /` 恒命中
+  `ACTIVE and audio_conns` → 永久"另一窗口通话"锁死。触发窗口(alloc 与浏览器 `/ws/audio` 连接
+  之间 agent 被 poolmgr 回收/死亡)在池 churn 下现实存在,评审判"非理论"成立。
+  **修法(采纳 1 行)**:失败分支 return 前 `self._table.on_audio_disconnect(sid, conn_id)`——把
+  滞留连接**并入既有 PENDING→sweep→release 路径**(浏览器 now+T、协议 now),cookie 随之解锁,
+  与全局"收尾只走 swep、不放请求 finally"一致(不新增 proxy 侧 pool I/O)。
+  **补测(先红后绿,真失败)**:`test_upstream_fail_releases_session_not_leak_or_lock`——分配一个
+  **无人监听的真端口**(bind→close 取空闲口)制造真实 `ClientConnectorError`;断言会话被 release、
+  移出表、cookie 再 `GET /` 不落双标签页页。**去掉修复行该测判红(实测 `assert 's1' in []`)**,
+  具判别力;呼应 A2/B/C-1"真实失败路径必配真 I/O 测,不以假时序代替"。
+- **N-1(已修)**:`_sweep_loop` 迭代体裹 try/except(`logger.exception` 后继续),单次异常不再
+  静默杀死 sweep 任务——与 poolmgr `poll_loop` 的 suppress 对齐。这条对 B-C-2 修复尤其关键:
+  release 现全依赖 sweep 存活。
+- **N-3(已补)**:`test_rate_limiter_token_bucket`(注入时钟,验令牌桶初始满=rate、同刻至多 rate 条、
+  按时间线性补充)+ `test_oversized_frame_dropped`(真 WS:>`max_frame_bytes` 帧→断连、**不透传
+  agent**,小帧先证链路通)+ root 测补断言 Set-Cookie 含 `HttpOnly`+`SameSite=Strict`(R6②)。
+- **N-2(接受,入 PR-D)**:`root()` 双标签页判据在**快速刷新**(旧 `/ws/audio` 关闭事件晚于新
+  `GET /` 到达)时可能误判。页级判据只是 UX 兜底,**权威双标签页守卫在 `/ws/audio` 的
+  REJECT_BUSY**(仍准确);且刷新误判无法脱离真浏览器时序复现/验证。故不在单测层强改(易引入反向
+  漏判),**随 PR-D 真浏览器刷新回归验证**(§12.1 已含刷新/重连路径)。
+
+> 应答小结:B-C-2 已修 + 真失败路径测先红后绿坐实;N-1/N-3 落实;N-2 入 PR-D。90 绿、门禁过。
+> 待评审组复核 B-C-2 修复与 4 项新测后给 PR-C 合入裁定。

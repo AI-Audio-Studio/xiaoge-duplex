@@ -70,11 +70,11 @@ async def _wait_state(table: af.AffinityTable, sid: str, state: str, timeout: fl
     return False
 
 
-async def _setup(clock: _Clock):
+async def _setup(clock: _Clock, max_frame_bytes: int = 32_768):
     agent_conns: list[int] = []
     agent = TestServer(_make_agent_app(agent_conns))
     await agent.start_server()
-    cfg = GatewayConfig(max_frame_bytes=32_768)
+    cfg = GatewayConfig(max_frame_bytes=max_frame_bytes)
     table = af.AffinityTable(grace_seconds=10.0, secret="s", clock=clock)
     proxy = Proxy(cfg, table)
     table.register("sess1", "p1", agent.port)
@@ -178,6 +178,41 @@ def test_http_proxy() -> None:
                 async with cs.post(f"http://127.0.0.1:{gw.port}/api/mic", json={"x": 1}) as r:
                     body = await r.json()
                 assert r.status == 200 and body["proxied"] is True
+        finally:
+            await proxy.aclose()
+            await gw.close()
+            await agent.close()
+
+    asyncio.run(_main())
+
+
+# ── R6 ③:速率上限(令牌桶,确定性单测)+ 单帧上限(真 WS)─────────────────────
+def test_rate_limiter_token_bucket() -> None:
+    """R6③:令牌桶——桶初始满=rate,同一时刻至多放行 rate 条,补充随时间线性(clock 注入)。"""
+    from gateway.proxy import _RateLimiter
+
+    clk = _Clock()  # t=0
+    rl = _RateLimiter(rate_per_s=10.0, clock=clk)
+    assert sum(1 for _ in range(15) if rl.allow()) == 10  # 同刻至多 10 条
+    clk.t = 1.0  # 过 1s → 补满 10 令牌
+    assert sum(1 for _ in range(15) if rl.allow()) == 10
+
+
+def test_oversized_frame_dropped() -> None:
+    """R6③:单帧超 max_frame_bytes → 断开该连接、**不透传给 agent**;正常小帧先证链路通。"""
+
+    async def _main():
+        agent, gw, proxy, table, agent_conns = await _setup(_Clock(), max_frame_bytes=16)
+        try:
+            async with aiohttp.ClientSession() as cs:
+                ws = await cs.ws_connect(f"http://127.0.0.1:{gw.port}/gw/audio")
+                assert (await ws.receive()).data == "agent-conn-1"
+                await ws.send_bytes(b"small")  # ≤16:正常回声
+                assert (await ws.receive()).data == b"echo:small"
+                await ws.send_bytes(b"x" * 64)  # >16:网关断开本连接,不回声
+                msg = await ws.receive()
+                assert msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING)
+                await ws.close()
         finally:
             await proxy.aclose()
             await gw.close()

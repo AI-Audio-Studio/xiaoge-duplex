@@ -47,9 +47,9 @@ class _FakePool:
 
 
 def _mk(
-    config: GatewayConfig, pool: _FakePool
+    config: GatewayConfig, pool: _FakePool, grace: float = 10.0
 ) -> tuple[aiohttp.web.Application, af.AffinityTable, Proxy]:
-    table = af.AffinityTable(grace_seconds=10.0, secret=config.hmac_secret)
+    table = af.AffinityTable(grace_seconds=grace, secret=config.hmac_secret)
     proxy = Proxy(config, table)
     app = gwmain.build_gateway_app(config, table, proxy, pool)  # type: ignore[arg-type]
     return app, table, proxy
@@ -57,6 +57,17 @@ def _mk(
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
+
+
+def _dead_port() -> int:
+    """绑一个端口后立即释放 → 该端口此刻无人监听(用于制造真实的上游连接失败)。"""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
 
 
 # ── 规则1:GET / 分配 / 繁忙 / 刷新 ────────────────────────────────────────────
@@ -70,6 +81,8 @@ def test_root_allocs_and_sets_cookie() -> None:
             assert r.status == 200
             assert gwmain.COOKIE in r.cookies  # 种亲和 cookie(规则1)
             assert "小歌" in await r.text()
+            setck = "; ".join(r.headers.getall("Set-Cookie", []))  # R6②:cookie 属性
+            assert "HttpOnly" in setck and "SameSite=Strict" in setck
 
     _run(_main())
 
@@ -238,5 +251,44 @@ def test_protocol_client_flow_and_immediate_release() -> None:
                 await sweep
             await proxy.aclose()
             await agent.close()
+
+    _run(_main())
+
+
+# ── B-C-2:上游连接失败不得泄漏会话 / 锁死用户(真实失败路径)─────────────────────
+def test_upstream_fail_releases_session_not_leak_or_lock() -> None:
+    """B-C-2:agent 在 alloc 与浏览器 /ws/audio 连接之间死亡 → 上游连接失败。会话**不得永停
+    ACTIVE**(否则 sweep 只扫 PENDING、永不 release,pool 槽泄漏 + 该 cookie 永久命中双标签页页、
+    用户锁死)。制造真实失败:分配一个无人监听的端口。"""
+
+    async def _main() -> None:
+        cfg = GatewayConfig(hmac_secret="s")
+        pool = _FakePool([{"session_id": "s1", "proc_id": "p1", "port": _dead_port()}])
+        app, table, proxy = _mk(cfg, pool, grace=0.1)  # 小宽限窗,便于快速验 release
+        sweep = asyncio.create_task(gwmain._sweep_loop(table, proxy, pool, interval=0.03))
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                r = await cli.get("/")  # 浏览器分配 + 种 cookie(TestClient 自动存)
+                assert r.status == 200 and gwmain.COOKIE in r.cookies
+                ws = await cli.ws_connect("/ws/audio")  # 携 cookie → FRESH → 上游连不上
+                msg = await ws.receive()
+                assert msg.type == aiohttp.WSMsgType.CLOSE  # 网关回 1011 关闭
+                with contextlib.suppress(Exception):
+                    await ws.close()
+                # 修复核心:会话转 PENDING(非永停 ACTIVE)→ sweep release
+                for _ in range(80):
+                    if "s1" in pool.released:
+                        break
+                    await asyncio.sleep(0.02)
+                assert "s1" in pool.released  # 已 release(未泄漏)
+                assert table.get("s1") is None  # 已移出表(未永停 ACTIVE)
+                # cookie 未锁死:再 GET / 不落"另一窗口通话"页(会话已清、按新用户走繁忙/分配)
+                r2 = await cli.get("/")
+                assert "另一窗口" not in await r2.text()
+        finally:
+            sweep.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep
+            await proxy.aclose()
 
     _run(_main())

@@ -91,6 +91,9 @@ class Proxy:
                 up = await self._open_upstream(session)
             except Exception as exc:
                 logger.warning("upstream connect failed sid=%s: %s", sid, exc)
+                # B-C-2:上游失败也必须解绑本连接 → 会话转 PENDING → sweep release + cookie 解锁;
+                # 否则会话永停 ACTIVE(sweep 只扫 PENDING),槽泄漏且该 cookie 永久命中双标签页页。
+                self._table.on_audio_disconnect(sid, conn_id)
                 await client_ws.close(code=1011, message=b"upstream unavailable")
                 return
             io = _SessionIO(upstream=up, client=client_ws)
