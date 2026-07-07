@@ -694,3 +694,27 @@ SIGKILL)才 spawn,用例仍绿。Windows 侧 `terminate` 硬杀不走 handler、
 proxy.py 将从一开始就用上述安全 API(conn_id 配对),不留 C-1 隐患。
 
 **门禁**:160 单测全绿,lint/format/行数门禁过。继续 proxy.py + main.py。
+
+### 评审组确认(C-1 修复,2026-07-07)
+
+C-1 已修,且**优于评审建议**——我原建议"proxy.py 纪律 + 补测",设计者改为**结构守卫**
+(提交 `63a25a5`),看码 + 实测确认:
+
+- **结构**:`Session.audio_conns` 由 `int` 计数改 **`set[str]` conn_id 集合**;`on_audio_connect`
+  返 `(结果, session, conn_id)`——FRESH/REATTACH 生成 `uuid4` conn_id 并入集,**REJECT_BUSY/GONE
+  的 conn_id=None**;`on_audio_disconnect(session_id, conn_id)` 仅当 `conn_id in audio_conns` 才生效。
+  被拒连接拿不到 conn_id → 误调 disconnect(None/陌生 id)**天然无操作**——footgun **结构性堵死**,
+  不再依赖调用方纪律(比原建议更硬)。
+- **实测**:`test_c1_rejected_double_tab_close_does_not_kill_session`——第一标签页 FRESH(cid1)、
+  第二标签页 REJECT_BUSY(cid2=None);`on_audio_disconnect(s1, None)` 后**真会话仍 ACTIVE、
+  audio_conns=1**;仅 `on_audio_disconnect(s1, cid1)` 才转 PENDING;重复断开幂等(cid1 已移除→无操作)。
+  该用例对旧"无条件递减"代码会判红,具判别力。
+- **无回归**:签名 3 元组变更无 in-tree 旧调用方(proxy.py 未写,仅测试用);全量 **160 绿**、
+  lint/行数门禁过;其余状态机用例(FRESH/REATTACH/GONE/双标签页)同步更新仍绿。
+
+**C-1 闭环**。3/5 阶段性评审的唯一 actionable 项已消除;其余(T2 真上游持有/reattach 帧续接、
+sweep 驱动、R1/R3/D1/Q6/R6 真链路集成测)仍随 `proxy.py`/`main.py`(剩余 2/5)交付时验证——
+届时以真 WS 集成测坐实,不以单测时序代替。
+
+> 评审组签署(C-1 确认):结构守卫落实、实测判别力确认、无回归、160 绿;C-1 闭环。已交付
+> 3/5 模块无遗留评审项;PR-C 整体裁定待剩余 2/5 + 集成测。评审组只读,未改任何工程代码。
