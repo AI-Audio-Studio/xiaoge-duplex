@@ -128,9 +128,17 @@ def _write_text_atomic(path: Path, text: str) -> None:
 class TestRecorder:
     """安装到 AgentSession,按真实时间轴录 user/assistant 双轨 + duplex 立体声。"""
 
-    def __init__(self, run_dir: str | Path, *, flush_interval_s: float = 2.0) -> None:
+    def __init__(
+        self,
+        run_dir: str | Path,
+        *,
+        flush_interval_s: float = 2.0,
+        write_mono_tracks: bool = True,
+    ) -> None:
         self._dir = Path(run_dir)
         self._flush_interval_s = max(0.5, float(flush_interval_s))
+        # single 档=仅写 duplex.wav(立体声左右分轨仍可审计,K1);full 档=另写 user/assistant 单轨。
+        self._write_mono_tracks = bool(write_mono_tracks)
         self._lock = threading.Lock()
         # 每段:(at_us, mono_int16_at_native_rate, native_rate)。采集不重采样。
         self._user: list[tuple[int, np.ndarray, int]] = []
@@ -281,9 +289,11 @@ class TestRecorder:
         stereo = np.zeros((n, 2), dtype=np.int16)
         stereo[:, 0] = up  # 左 = 用户
         stereo[:, 1] = ap  # 右 = 助手
-        _write_wav_atomic(self._dir / "user.wav", up, rate=out_rate, channels=1)
-        _write_wav_atomic(self._dir / "assistant.wav", ap, rate=out_rate, channels=1)
+        if self._write_mono_tracks:  # full 档:另写 user/assistant 单轨
+            _write_wav_atomic(self._dir / "user.wav", up, rate=out_rate, channels=1)
+            _write_wav_atomic(self._dir / "assistant.wav", ap, rate=out_rate, channels=1)
         _write_wav_atomic(self._dir / "duplex.wav", stereo, rate=out_rate, channels=2)
+        mono_file = self._write_mono_tracks
         manifest = {
             "baseAtUs": base,
             "sampleRate": out_rate,
@@ -293,7 +303,9 @@ class TestRecorder:
             "tracks": [
                 {
                     "name": "user",
-                    "file": "user.wav",
+                    "file": "user.wav"
+                    if mono_file
+                    else None,  # single 档单轨不落盘,数据在 duplex 左声道
                     "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in user), default=None),
                     "segmentCount": len(user),
@@ -302,7 +314,7 @@ class TestRecorder:
                 },
                 {
                     "name": "assistant",
-                    "file": "assistant.wav",
+                    "file": "assistant.wav" if mono_file else None,  # single 档数据在 duplex 右声道
                     "channels": 1,
                     "firstSampleAtUs": min((s[0] for s in assistant), default=None),
                     "segmentCount": len(assistant),

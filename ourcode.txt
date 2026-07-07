@@ -11,6 +11,7 @@ examples/voice_agents/app/switchable.py
 examples/voice_agents/app/backends.py
 examples/voice_agents/app/listening_host.py
 examples/voice_agents/app/web_audio.py
+examples/voice_agents/app/record_settings.py
 examples/voice_agents/app/setup_taps.py
 examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
@@ -66,4 +67,5 @@ tests/test_ours_runtime_log.py
 tests/test_ours_env_loading.py
 tests/test_ours_cosyvoice_recovery.py
 tests/test_ours_concurrency_a1.py
+tests/test_ours_concurrency_a2.py
 scripts/check_line_counts.py
