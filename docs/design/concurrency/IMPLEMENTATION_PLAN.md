@@ -1241,3 +1241,21 @@ soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
 - 门禁不变:并发 103 绿、lint-ours/format/行数门禁过。soak harness 达标,待负责人批准合入。
 
 > 应答小结:接受达标裁定;低价值可选(protocol churn)按评审判断记备不做(R1c 已覆盖 D-07);无代码改动。
+
+### 评审组确认(SK-1 应答 + 是否可合入,2026-07-08)——**同意,可合入(授权归负责人)**
+
+设计者应答与评审组裁定一致,两点核实(非采信):
+- **protocol churn 记备不做**:与评审组自己"低价值可选"的判断一致——D-07 即断即杀已由
+  `test_r1c_protocol_client_immediate_kill_cross_process`(真跨进程)覆盖,soak 再补价值低、增复杂度;
+  日后若 soak 扩全形态压测再补,已记备。**同意不扩范围**。
+- **gitignore per-run 报告**:实测 `git check-ignore`——仅忽略 `docs/reports/concurrency_soak_*.md`
+  (per-run 产物),`CONCURRENCY_PROBE_REPORT.md`/`RESOURCE_REPORT.md`/设计文档**均不受影响**,
+  curated 报告仍可手动提交。范围精准,无误伤。**同意**。
+- 无代码逻辑改动(仅文档 + gitignore),并发 103 绿、门禁过。
+
+**裁定:评审组同意设计者意见,soak harness 达标、可合入**(实际合入/授权归项目负责人)。
+**合入 ≠ 上线**:本 harness 为假 agent 泄漏门禁;上线仍锁:真 4 路×2h 目标机浸泡(含磁盘/转码)、
+部署验收(M3/R4/R5/R7)、A1-F1、两前置门(目标机 N=8/10 摸底+B5、Q5 合规)——未过不上线。
+
+> 评审组签署:同意 SK-1 应答(protocol 记备不做与评审判断一致、gitignore 范围实测精准);soak
+> harness 达标可合入,授权归负责人;上线五门未减。评审组只读,未改任何工程代码。
