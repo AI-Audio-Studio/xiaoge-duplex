@@ -92,6 +92,18 @@ def test_scan_leftovers_enqueues_per_dir(tmp_path: Path) -> None:
     assert t.metrics()["queue_depth"] == 2
 
 
+def test_disabled_codec_skips_enqueue(tmp_path: Path) -> None:
+    """codec=off(保持 WAV,无 worker)时不入队——否则 scan_leftovers 入的目录会悬在队列排不空。"""
+    root = tmp_path / "recordings"
+    d = root / "20260707_100000_p1"
+    d.mkdir(parents=True)
+    _make_wav(d / "user.wav", seconds=0.2)
+    t = tc.Transcoder(root, codec="off")
+    assert t.scan_leftovers() == 0  # 停用档:不入队
+    assert t.enqueue_dir(d) is False  # release 期入队同样跳过
+    assert t.metrics()["queue_depth"] == 0  # 队列不悬非零
+
+
 def test_transcode_dir_rewrites_manifest_no_dangling(tmp_path: Path) -> None:
     """B-1:整目录转码后回写 audio_manifest.json 的 file 引用为新后缀,审计索引不悬空。"""
     import json

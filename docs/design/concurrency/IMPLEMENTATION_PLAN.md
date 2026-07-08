@@ -1259,3 +1259,168 @@ soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
 
 > 评审组签署:同意 SK-1 应答(protocol 记备不做与评审判断一致、gitignore 范围实测精准);soak
 > harness 达标可合入,授权归负责人;上线五门未减。评审组只读,未改任何工程代码。
+
+## 运维交接文档(OPS_CHECKLIST.md / DEPLOYMENT.md)· 评审组结论(2026-07-08)
+
+**问题:能否直接交运维操作?——暂不能。结构与网关半边达交接质量,但有一处阻塞级事实缺陷:
+池管理器无可运行入口、无 `XG_POOL_*` env 层——运维照 A5 会立刻失败,且无 SSH 无法现场救。
+先本机补齐入口(正属"本机能继续实现"),对齐两文档,即可交付。**
+
+### 一、达标部分(看码/实跑核实)
+- **结构好**:§A 操作 / §B 注意 / §C 填值 / §D 反馈 / §E 验证分工 / §F 前置门 / 待对齐——四问清晰;
+  "机上=运维、HTTPS=开发"的无 SSH 交互模型合理;红线(仅网关 HTTPS 对外、内部口只 127.0.0.1)醒目。
+- **网关半边真可部署**:A7 `python -m gateway.main` **实跑可用**;§C 表1 的 `XG_LISTEN_HOST/PORT`、
+  `XG_SSL_CERT/KEY`、`XG_POOL_API`、`XG_GRACE_SECONDS`、`XG_ACCESS_CODE`、`XG_HMAC_SECRET`、`XG_MSG_RATE`、
+  `XG_MAX_FRAME_BYTES` **逐项与 `gateway/config.py:from_env` 一致**。
+- **agent 注入注记准确**:§C"WEB_UI_HOST=127.0.0.1…XIAOGE_ADMIN_ROUTES=0 由池自动注入"与
+  `manager.default_agent_env` 一致。/status 管理面诚实标"待实现/待对齐"。
+
+### 二、OPS-1(阻塞,实测坐实)池管理器无运行入口 + 无 XG_POOL_* env——A5/A6/§C 表2 不可执行
+- **事实**:`cd examples/voice_agents && python -m poolmgr` → **`No module named poolmgr.__main__;
+  'poolmgr' is a package and cannot be directly executed`**(`poolmgr/` 无 `__main__.py`)。
+- **事实**:`poolmgr/` **无任何 `XG_POOL_*` env 解析**(全仓仅 `manager.default_spawn` 有
+  `dict(os.environ)` 继承给 agent);`XG_POOL_SIZE/BASE_PORT/CONTROL_PORT/RECORDINGS_ROOT/
+  TRANSCODE_CODEC/TRANSCODE_WORKERS` **代码从不读**——运维填了也被无视。
+- **事实**:唯一装配 `PoolManager + build_control_app + Transcoder` 的地方是 **`harness/soak.py`(测试)**,
+  **无生产 driver**。
+- **后果**:运维照 §A **走到 A5 即失败**(池起不来→A6 无 ready→A7 网关分不到 agent),而**无 SSH
+  无法现场排障**——正是本交接要避免的死局。
+- **文档自不一致**:`DEPLOYMENT.md §7"待实现"`列了 /status 管理面、远端 harness,却**未列池入口缺失**;
+  `OPS_CHECKLIST §A5` 又把 `python -m poolmgr` 当可执行步——两文档对"池能否起"口径矛盾。
+
+### 三、须先本机补齐(正属"本机能继续实现",不需服务器)
+1. **`poolmgr/__main__.py` 生产入口**:读 §C 表2 的 `XG_POOL_*` env → 构 `PoolTuning`/`PoolManager(size)` +
+   `control_api.serve(port)` + `Transcoder(codec, workers)` 装配起来(底层参数都已在,缺的只是 env→装配的
+   driver);env 名须与 §C 表2 一致。补冒烟:`python -m poolmgr` 起得来、`/status` 返 ready==N。
+2. **对齐两文档**:池入口实现后,`OPS_CHECKLIST A5/§C 表2` 与 `DEPLOYMENT §7` 口径一致;或在补齐前
+   把 A5/表2 显式标"待入口实现",避免交出去即踩坑。
+3. (次要)网关 `python -m gateway.main` 可跑但无 `gateway/__main__.py`;若想 `python -m gateway` 更顺,
+   加一个薄 `__main__.py`(非阻塞)。
+
+### 四、裁定
+- **暂不可直接交运维**——OPS-1(池无入口/无 env)是阻塞级、运维 A5 即死、无 SSH 不可救。
+- 网关半边 + 交互模型 + 安全红线**达交接质量**;补齐池入口(本机可做)+ 对齐两文档后,**即可交付运维**。
+- 交付后运维侧顺序/验证分工/前置门(目标机 N、真 2h 浸泡、M3/R4/R5/R7、Q5)框架已就绪。
+
+> 评审组签署(运维交接):结构与网关半边达标;**OPS-1 阻塞——`python -m poolmgr` 实测报错、无
+> `XG_POOL_*` env、唯一装配在 soak 测试里**,运维照 A5 即失败且无 SSH 不可救;先本机补池入口 + 对齐
+> 两文档再交。评审组只读,未改任何工程代码。
+
+### 设计者应答(OPS-1,2026-07-08):池入口已补(实为分支可见性问题)+ 两文档已对齐
+
+**OPS-1 属实(以评审组当时所见分支为准),但修复本轮已建——只是落在**独立分支**上、未与运维文档
+同支,故评审在文档分支上跑 `python -m poolmgr` 才报错。已把启动器合入同支、实跑验证、并对齐两文档。**
+
+- **根因 = 分支可见性**:本会话已建 `poolmgr/launcher.py` + `poolmgr/__main__.py`(启动器),但落在
+  **`feat/concurrency-poolmgr-launcher`**;运维文档落在 **`docs/concurrency-deployment-ops`**——两者皆基于
+  main、互不含对方。评审在文档分支上验证,自然见不到启动器 → `python -m poolmgr` 报错。**评审的
+  §三 处方与已建启动器逐条吻合**(`__main__.py` 读 `XG_POOL_*` → `PoolTuning/PoolManager/Transcoder/
+  control_api.serve` 装配,env 名与 §C 表2 一致)。
+- **处置**:①**把启动器合入运维文档同支**——单次 checkout 即可部署;②(次要采纳)补 `gateway/__main__.py`
+  使 `python -m gateway` 与 `python -m poolmgr` 对称,OPS_CHECKLIST A7 同步。
+- **实跑坐实(本机)**:合支后 `cd examples/voice_agents && XG_POOL_SIZE=1 … python -m poolmgr` →
+  **`pool manager starting: N=1 … control=127.0.0.1:19000`** + 起转码器 + `pool control API on
+  http://127.0.0.1:19000` + 开始 spawn agent——**OPS-1 报错消失**,`XG_POOL_*` 生效、控制 API 绑 loopback。
+- **诚实边界**:`python -m poolmgr` 起**真 agent** 到 ready(§A6 `/status` ready==N)需部署侧 agent 运行 env
+  (LIVEKIT/provider/模型),本机无云不能端到端;但**装配路径由 soak 冒烟以假 agent 证到 ready==N**,加
+  上本机"entry 解析 + 起 + 控制 API served"实跑,池入口成立无疑。启动器测 `test_ours_concurrency_poolmgr_launcher`
+  (4 例:env 默认/覆盖、build_manager status 反映 N 无 spawn、codec=off 可装配)。
+- **两文档对齐**:`DEPLOYMENT §5` 补 `python -m poolmgr`/`python -m gateway` 命令 + "运行入口均已实现"注,
+  与 `OPS_CHECKLIST A5/A7/§C 表2` 一致;不再有"池能否起"口径矛盾。并发用例 **107 绿**、门禁过。
+
+> 应答小结:OPS-1 是分支可见性(启动器已建但未与文档同支);已合支 + 补 `python -m gateway` 对称入口 +
+> 实跑坐实 `python -m poolmgr` 起来、控制 API loopback + 对齐两文档;107 绿。待评审组在合支后复核可交付性。
+
+### 评审组确认(OPS-1 修复,2026-07-08)——**已解,运维交接文档可交付**
+
+OPS-1(池无入口/无 XG_POOL_* env → 运维 A5 即死)**已解,评审组实跑 + 看码 + git 核实**:
+
+- **`python -m poolmgr` 实跑可用(评审组亲跑)**:`XG_POOL_SIZE=1 XG_POOL_CONTROL_PORT=19055
+  python -m poolmgr` → 控制 API 绑 `127.0.0.1:19055`、`/status` 返 **200** `{"size":1,"ready":0,
+  "spawning":1,…}`——OPS-1 的 "No module named poolmgr.__main__" 报错消失。`ready=0/spawning=1`
+  正是诚实边界(真 agent 到 ready 需部署侧云 env,本机无云;装配路径已通)。
+- **`poolmgr/launcher.py` 读的 env 名与 §C 表2 逐项一致**:`XG_POOL_SIZE/BASE_PORT/CONTROL_PORT/
+  RECORDINGS_ROOT/TRANSCODE_CODEC/TRANSCODE_WORKERS`(+poll/spawn_timeout/fail_limit),装配
+  `PoolManager+Transcoder+control_api.serve`(loopback 强制,M3);运维填的值真被读。
+- **文件已提交/tracked(关键:运维 git clone 才拿得到)**:`git ls-files` 确认 `launcher.py`/
+  `poolmgr/__main__.py`/`gateway/__main__.py`/launcher 测均在版本库(commit `14acf6d`),工作树无未提交。
+- **`python -m gateway` 对称入口有效**(`gateway/__main__.py` → `gateway.main.main`);两文档已对齐:
+  `OPS_CHECKLIST A5/A7` 与 `DEPLOYMENT §5`("运行入口均已实现"+两命令)口径一致,"池能否起"矛盾消除。
+- **门禁**:launcher 有单测;并发 **107 绿**、ruff/行数门禁过。
+- 极小 nit(非阻塞、非默认):`XG_POOL_TRANSCODE_CODEC=off` 时 `scan_leftovers` 仍入队遗留目录但无
+  worker 排空(codec=off 转码器停用),`queue_depth` 显示非零、不增长——纯信息、无害;默认 `opus` 下
+  worker 正常排空。可择机让 off 档跳过入队。
+
+**裁定**:OPS-1 **已解**——`python -m poolmgr` 实跑可用、env 名对齐、文件已提交(clone 可得)、两文档
+一致。**运维交接文档(OPS_CHECKLIST + DEPLOYMENT)现具备交付运维的条件**。交付后按 §F 前置门推进
+(目标机 N 摸底、真 2h 浸泡、M3/R4/R5/R7 部署验收、Q5 合规);待对齐三项(/status 管理面 待实现、
+HMAC 持久、N 初值)随交互推进,先起服务不阻塞。
+
+> 评审组签署(OPS-1):`python -m poolmgr` 评审组亲跑通(/status 200)、launcher env 名对齐 §C 表2、
+> 文件已提交(clone 可得)、`python -m gateway` 对称、两文档一致、107 绿——**OPS-1 已解,运维交接
+> 文档可交付**。评审组只读,未改任何工程代码。
+
+### 设计者应答(OPS-1 确认 + off 档 nit,2026-07-08)
+
+**收到"OPS-1 已解、运维交接文档可交付"。评审组亲跑 `python -m poolmgr` 拿 /status 200 是最实的复核。
+顺手把那条极小 nit 修了(既然直落在 launcher 的 codec=off 文档档)。**
+
+- **off 档 nit(已修)**:`XG_POOL_TRANSCODE_CODEC=off`(保持 WAV、无 worker)时,`scan_leftovers` 原会把
+  遗留目录入队、悬在队列排不空(`queue_depth` 非零、无害但碍眼)。修:`Transcoder` 加 `_enabled`
+  (codec ∈ 可编码集)属性,**`enqueue_dir` 停用档直接返 False**——`scan_leftovers` 与 release 期入队
+  **一并跳过**,`queue_depth` 恒 0;默认 `opus` 档不受影响(worker 正常排空)。`start()` 亦改用 `_enabled`
+  统一判据。补测 `test_disabled_codec_skips_enqueue`(off 档 scan/enqueue 均跳过、队列不悬)。
+- **无回归**:`b_transcoder`(opus 档 scan_leftovers==2 等)照旧;并发用例 **108 绿**、门禁过。
+
+> 应答小结:OPS-1 复核通过、文档可交付;off 档 nit 已修(停用档不入队、queue_depth 恒 0)+ 补测;108 绿。
+> 运维交接文档(OPS_CHECKLIST + DEPLOYMENT)具备交付条件,分支 `docs/concurrency-deployment-ops` 待合入。
+
+### 评审组:交付同意 + 入库建议(2026-07-08)
+
+**off-档 nit 已修实测确认**:codec=off 时 `python -m poolmgr` 的 `/status` 现 `queue_depth: 0`
+(修前 7);全量自有单测 **195 passed**、ruff/行数门禁过。
+
+**同意交付**:运维交接文档(OPS_CHECKLIST + DEPLOYMENT)内容达标、OPS-1 已解、off-nit 已修。
+
+**入库前先纠正一处评审组自述**(上轮我口述"soak/M5/PR-D 都堆在本支、未上 main"——**有误**):
+`git cat-file` 实证 **M5、PR-D 集成、soak 均已在 main**。故本支 `docs/concurrency-deployment-ops`
+**不是混装大支**,而是干净聚焦的增量(**+649/-3、11 文件**):poolmgr `launcher.py`+`__main__.py`、
+gateway `__main__.py`(部署入口)、OPS_CHECKLIST/DEPLOYMENT(运维文档)、transcoder off-fix + 测、
+launcher 测。8 commit ahead、1 内部 merge(launcher)。
+
+**入库建议(工程卫生)**:
+1. **可作单个聚焦 PR 合 main**——主题="部署入口 + 运维交接 + off-fix",非混装,history 清晰。
+2. **改名**:分支/PR 名 `docs/…` 名不副实(实带生产代码 launcher/`__main__`);建议
+   `feat/concurrency-deploy-launcher-ops`,让历史反映它含部署入口而非仅文档。
+3. **squash-merge**:有 1 个内部 merge(launcher),squash 成单 commit(或按"入口/文档/off-fix"少数
+   逻辑 commit)入 main,history 干净、可 revert;评审轨已在 IMPLEMENTATION_PLAN 留档。
+4. **打 tag 供运维**:合 main 后在该 commit 打**不可变 tag**(如 `concurrency-deploy-v1`)。运维
+   无 SSH、往返慢——给**固定 SHA/tag**而非移动分支,部署可复现;把它填进 OPS_CHECKLIST **A1 的
+   "切到 dev 指定分支/tag:【dev 填】"** 占位,运维即 `git clone` 该 tag。
+5. **门禁**:合前跑一遍 `make check`(全量)——本轮已确认自有单测 195 绿 + lint + 行数门禁。
+6. **清理**:确认已上 main 的 `feat/concurrency-*` 分支(A1/A2/B/C/soak/M5/PR-D)可删(本地+远端)减杂。
+
+**交付路径**:入库(合 main + 打 tag)→ 用 tag 填 OPS_CHECKLIST A1 → 交运维 clone 该 tag 操作。
+**不建议**直接把运维指到本 feature 分支(分支会动/可能删,与"clone 固定 ref"的无 SSH 前提相悖)。
+
+> 评审组签署:off-nit 修复实测(queue_depth 0)、195 绿;**同意交付**;入库建议=聚焦单 PR/改名/
+> squash/打 tag 供运维 clone、tag 填 A1、清理旧支;纠正上轮"未上 main"自述(M5/PR-D/soak 实已在 main)。
+> 评审组只读,未改任何工程代码。
+
+### 设计者应答(入库建议,2026-07-08)——全采纳
+
+收到"同意交付"。6 条入库建议全采纳,分工如下:
+
+- **#2 改名(已做)**:分支 `docs/concurrency-deployment-ops` → **`feat/concurrency-deploy-launcher-ops`**
+  ——它带生产入口(`launcher.py`/`__main__.py`/gateway `__main__.py`),`feat/` 名副其实。
+- **#1 聚焦单 PR / #3 squash**:本支即单一主题增量(部署入口 + 运维交接 + off-fix);合入时建议
+  **squash-merge**(把 1 个内部 launcher merge 压平成单/少数逻辑 commit),由负责人在 GitHub 侧执行。
+- **#4 打 tag 供运维**:合 main 后在合并 commit 打**不可变 tag `concurrency-deploy-v1`**;
+  `OPS_CHECKLIST A1` 的"分支/tag"占位**已预填该 tag 名**(合入 + 打 tag 后即生效),运维 `git clone` 该 tag
+  部署——不指向会动的分支(符合无 SSH"clone 固定 ref"前提)。
+- **#5 make check**:自有单测 **195 绿** + ruff + 行数门禁,已确认。
+- **#6 清理旧支**:A1/A2/B/C/soak/M5/PR-D 合入后均已删(本地+远端);本支合入后一并核删。
+- **纠正自述认可**:M5/PR-D/soak 实已在 main,本支是干净聚焦增量(非混装)。
+
+> 应答小结:入库建议全采纳;分支已改名 `feat/concurrency-deploy-launcher-ops`、A1 预填 tag
+> `concurrency-deploy-v1`。**待负责人合入(建议 squash)→ 我打 tag + 定稿 A1 + 核删旧支 → 交运维 clone tag。**
