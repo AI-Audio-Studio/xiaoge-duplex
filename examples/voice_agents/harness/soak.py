@@ -58,8 +58,10 @@ class SoakConfig:
     grace_s: float = 0.5
     agent_cmd: list[str] | None = None  # None=假 agent;真 agent 传启动命令
     report_path: str = ""  # 空=docs/reports/concurrency_soak_<ts>.md
-    rss_growth_limit_mb: float = 80.0  # 稳态后 RSS 相对基线增长上限(泄漏判据)
-    fd_growth_limit: int = 128  # 句柄增长上限
+    # 主进程静默基线→静默末态增长上限(泄漏判据)。实测假 agent 短跑 ~2-3MB / ~4 句柄,
+    # 取 ~20× 余量既稳(不假阳)又能兜住真泄漏(未释放上游=每漏 1 会话 +1 句柄,长跑累积)。
+    rss_growth_limit_mb: float = 60.0
+    fd_growth_limit: int = 64
 
 
 @dataclass
@@ -110,23 +112,29 @@ def _spawn_agent(cmd: list[str] | None):
     return _spawn
 
 
+def _fd_count(p: psutil.Process) -> int:
+    with contextlib.suppress(Exception):
+        return int(p.num_fds() if hasattr(p, "num_fds") else p.num_handles())
+    return 0
+
+
 def _sample(table: af.AffinityTable, proxy: Proxy, mgr: PoolManager) -> dict[str, Any]:
-    """进程树 RSS/句柄 + 池态 + 持有上游 + 会话表(泄漏观测点)。"""
-    proc = psutil.Process()
-    tree = [proc, *proc.children(recursive=True)]
-    rss = 0
-    fds = 0
+    """**主进程(常驻网关+池所在)RSS/句柄 = 泄漏判据**;整树 RSS/进程数 = 仅信息。
+    SK-1:agent 子进程随池回收增减(含 kill 后残留),整树求和会被"进程数波动"污染而假阳——
+    真正要查的常驻泄漏(会话/上游/socket 句柄)都在主进程,故 RSS/FD 只量主进程。"""
+    main = psutil.Process()
+    tree = [main, *main.children(recursive=True)]
+    tree_rss = 0
     for p in tree:
         with contextlib.suppress(Exception):
-            rss += p.memory_info().rss
-        with contextlib.suppress(Exception):
-            fds += p.num_fds() if hasattr(p, "num_fds") else p.num_handles()
+            tree_rss += p.memory_info().rss
     status = mgr.status()
     return {
         "t": round(time.monotonic(), 2),
-        "rss_mb": round(rss / 1e6, 1),
-        "fds": fds,
-        "procs": len(tree),
+        "rss_mb": round(main.memory_info().rss / 1e6, 1),  # 主进程(判据)
+        "fds": _fd_count(main),  # 主进程句柄(判据)
+        "tree_rss_mb": round(tree_rss / 1e6, 1),  # 整树(信息,含 agent 子树)
+        "tree_procs": len(tree),  # 进程数(信息,churn 中波动、不作判据)
         "pool_ready": status.get("ready", 0),
         "pool_assigned": status.get("assigned", 0),
         "held_upstreams": len(proxy._io),  # 宽限窗/活跃上游持有数
@@ -210,41 +218,49 @@ async def _stack(cfg: SoakConfig):  # noqa: ANN201
         await asyncio.sleep(0.3)
 
 
+async def _cooldown_to_quiescent(
+    cfg: SoakConfig, table: af.AffinityTable, proxy: Proxy, mgr: PoolManager
+) -> None:
+    """等宽限窗全超时 + 池复位 + 无持有上游/会话(静默态),再多留一拍让 socket 句柄释放收敛。"""
+    end = time.monotonic() + max(3.0, cfg.grace_s * 4 + 2.0)
+    while time.monotonic() < end:
+        if (
+            mgr.status()["ready"] == cfg.sessions
+            and len(proxy._io) == 0
+            and len(table._sessions) == 0
+        ):
+            break
+        await asyncio.sleep(0.2)
+    await asyncio.sleep(0.6)  # FD 释放收敛(TIME_WAIT/连接池回收)
+
+
 async def run_soak(cfg: SoakConfig) -> SoakResult:
     async with _stack(cfg) as (gw, table, proxy, mgr):
         loop = asyncio.get_event_loop()
+        # SK-1:泄漏判据 = **churn 前静默基线** vs **churn+冷却后静默末态**(同为静默态,可比;
+        # 真泄漏 = 资源未释放、末态显著高于基线)。churn 中样本仅作趋势信息、不入判据。
+        await asyncio.sleep(1.0)  # 栈进程/连接达稳态
+        baseline = _sample(table, proxy, mgr)
+        samples: list[dict[str, Any]] = [baseline]
+
         deadline = loop.time() + cfg.duration_s
         users = [asyncio.create_task(_churn_user(gw, deadline)) for _ in range(cfg.sessions)]
-        samples: list[dict[str, Any]] = []
-        # 预热一拍再采基线(避免把冷启动算作泄漏)。
-        await asyncio.sleep(min(cfg.sample_interval_s, cfg.duration_s / 4 + 0.5))
         while loop.time() < deadline:
-            samples.append(_sample(table, proxy, mgr))
             await asyncio.sleep(cfg.sample_interval_s)
+            samples.append(_sample(table, proxy, mgr))  # churn 中(信息趋势)
         await asyncio.gather(*users, return_exceptions=True)
-        # 冷却:让宽限窗全部超时 + 池回收复位,再采末态。
-        cooldown_end = time.monotonic() + max(3.0, cfg.grace_s * 4 + 2.0)
-        while time.monotonic() < cooldown_end:
-            if (
-                mgr.status()["ready"] == cfg.sessions
-                and len(proxy._io) == 0
-                and len(table._sessions) == 0
-            ):
-                break
-            await asyncio.sleep(0.2)
+
+        await _cooldown_to_quiescent(cfg, table, proxy, mgr)
         final = _sample(table, proxy, mgr)
         samples.append(final)
 
-    checks = _evaluate(cfg, samples, final)
+    checks = _evaluate(cfg, baseline, final)
     result = SoakResult(ok=all(checks.values()), samples=samples, checks=checks)
     result.report_path = _write_report(cfg, result)
     return result
 
 
-def _evaluate(
-    cfg: SoakConfig, samples: list[dict[str, Any]], final: dict[str, Any]
-) -> dict[str, bool]:
-    baseline = samples[0] if samples else final
+def _evaluate(cfg: SoakConfig, baseline: dict[str, Any], final: dict[str, Any]) -> dict[str, bool]:
     rss_growth = final["rss_mb"] - baseline["rss_mb"]
     fd_growth = final["fds"] - baseline["fds"]
     return {
@@ -274,19 +290,25 @@ def _write_report(cfg: SoakConfig, result: SoakResult) -> str:
         "| --- | --- |",
         *[f"| {k} | {'✅' if v else '❌'} |" for k, v in result.checks.items()],
         "",
-        f"- RSS:基线 {base.get('rss_mb')}MB → 末态 {fin.get('rss_mb')}MB "
+        "判据取 churn 前静默基线 vs churn+冷却后静默末态(同静默态可比,SK-1);"
+        "RSS/句柄只量**主进程**(常驻网关+池),整树数据仅信息。",
+        "",
+        f"- 主进程 RSS:基线 {base.get('rss_mb')}MB → 末态 {fin.get('rss_mb')}MB "
         f"(增长 {round(fin.get('rss_mb', 0) - base.get('rss_mb', 0), 1)}MB,限 {cfg.rss_growth_limit_mb})",
-        f"- 句柄:基线 {base.get('fds')} → 末态 {fin.get('fds')}",
+        f"- 主进程句柄:基线 {base.get('fds')} → 末态 {fin.get('fds')} "
+        f"(增长 {fin.get('fds', 0) - base.get('fds', 0)},限 {cfg.fd_growth_limit})",
         f"- 末态:会话表={fin.get('sessions')} 持有上游={fin.get('held_upstreams')} "
         f"池就绪={fin.get('pool_ready')}/{cfg.sessions}",
+        f"- 整树(信息):基线 {base.get('tree_procs')} proc/{base.get('tree_rss_mb')}MB → "
+        f"末态 {fin.get('tree_procs')} proc/{fin.get('tree_rss_mb')}MB(含 agent 子进程,随回收波动)",
         "",
-        "## 采样序列(RSS/句柄/池态/持有上游)",
+        "## 采样序列(主进程 RSS/句柄 + 池态/持有上游 + 整树信息)",
         "```json",
         json.dumps(result.samples, ensure_ascii=False, indent=1),
         "```",
         "",
-        "> 注:假 agent 浸泡查网关/池泄漏(RSS/句柄/会话/槽/上游);recordings 磁盘增速 / 转码积压"
-        "曲线需真 agent + 真录音,属目标机 4 路×2h 全量浸泡(§7)。",
+        "> 注:假 agent 浸泡查网关/池(主进程)泄漏(RSS/句柄/会话/槽/上游);recordings 磁盘增速 / "
+        "转码积压曲线需真 agent + 真录音,属目标机 4 路×2h 全量浸泡(§7)。",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
     return str(path)

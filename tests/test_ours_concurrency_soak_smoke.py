@@ -31,3 +31,9 @@ def test_soak_harness_smoke_no_leak() -> None:
         assert result.checks["pool_recovered"]
         assert Path(report).is_file()  # 报告已落盘
         assert len(result.samples) >= 2  # 至少基线 + 末态
+        # SK-1 回归守卫:判据只量主进程 → 静默基线→静默末态句柄增长应**很小**(实测 ~4)。
+        # 若退回整树求和,会被 churn 的 agent 子进程数污染(实测 +240),此断言即判红。
+        base, fin = result.samples[0], result.samples[-1]
+        assert fin["fds"] - base["fds"] <= 32, (
+            f"main-proc FD growth too large: {base['fds']}→{fin['fds']}"
+        )
