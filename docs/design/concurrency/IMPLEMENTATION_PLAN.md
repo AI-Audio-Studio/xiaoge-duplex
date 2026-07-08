@@ -1374,3 +1374,53 @@ HMAC 持久、N 初值)随交互推进,先起服务不阻塞。
 
 > 应答小结:OPS-1 复核通过、文档可交付;off 档 nit 已修(停用档不入队、queue_depth 恒 0)+ 补测;108 绿。
 > 运维交接文档(OPS_CHECKLIST + DEPLOYMENT)具备交付条件,分支 `docs/concurrency-deployment-ops` 待合入。
+
+### 评审组:交付同意 + 入库建议(2026-07-08)
+
+**off-档 nit 已修实测确认**:codec=off 时 `python -m poolmgr` 的 `/status` 现 `queue_depth: 0`
+(修前 7);全量自有单测 **195 passed**、ruff/行数门禁过。
+
+**同意交付**:运维交接文档(OPS_CHECKLIST + DEPLOYMENT)内容达标、OPS-1 已解、off-nit 已修。
+
+**入库前先纠正一处评审组自述**(上轮我口述"soak/M5/PR-D 都堆在本支、未上 main"——**有误**):
+`git cat-file` 实证 **M5、PR-D 集成、soak 均已在 main**。故本支 `docs/concurrency-deployment-ops`
+**不是混装大支**,而是干净聚焦的增量(**+649/-3、11 文件**):poolmgr `launcher.py`+`__main__.py`、
+gateway `__main__.py`(部署入口)、OPS_CHECKLIST/DEPLOYMENT(运维文档)、transcoder off-fix + 测、
+launcher 测。8 commit ahead、1 内部 merge(launcher)。
+
+**入库建议(工程卫生)**:
+1. **可作单个聚焦 PR 合 main**——主题="部署入口 + 运维交接 + off-fix",非混装,history 清晰。
+2. **改名**:分支/PR 名 `docs/…` 名不副实(实带生产代码 launcher/`__main__`);建议
+   `feat/concurrency-deploy-launcher-ops`,让历史反映它含部署入口而非仅文档。
+3. **squash-merge**:有 1 个内部 merge(launcher),squash 成单 commit(或按"入口/文档/off-fix"少数
+   逻辑 commit)入 main,history 干净、可 revert;评审轨已在 IMPLEMENTATION_PLAN 留档。
+4. **打 tag 供运维**:合 main 后在该 commit 打**不可变 tag**(如 `concurrency-deploy-v1`)。运维
+   无 SSH、往返慢——给**固定 SHA/tag**而非移动分支,部署可复现;把它填进 OPS_CHECKLIST **A1 的
+   "切到 dev 指定分支/tag:【dev 填】"** 占位,运维即 `git clone` 该 tag。
+5. **门禁**:合前跑一遍 `make check`(全量)——本轮已确认自有单测 195 绿 + lint + 行数门禁。
+6. **清理**:确认已上 main 的 `feat/concurrency-*` 分支(A1/A2/B/C/soak/M5/PR-D)可删(本地+远端)减杂。
+
+**交付路径**:入库(合 main + 打 tag)→ 用 tag 填 OPS_CHECKLIST A1 → 交运维 clone 该 tag 操作。
+**不建议**直接把运维指到本 feature 分支(分支会动/可能删,与"clone 固定 ref"的无 SSH 前提相悖)。
+
+> 评审组签署:off-nit 修复实测(queue_depth 0)、195 绿;**同意交付**;入库建议=聚焦单 PR/改名/
+> squash/打 tag 供运维 clone、tag 填 A1、清理旧支;纠正上轮"未上 main"自述(M5/PR-D/soak 实已在 main)。
+> 评审组只读,未改任何工程代码。
+
+### 设计者应答(入库建议,2026-07-08)——全采纳
+
+收到"同意交付"。6 条入库建议全采纳,分工如下:
+
+- **#2 改名(已做)**:分支 `docs/concurrency-deployment-ops` → **`feat/concurrency-deploy-launcher-ops`**
+  ——它带生产入口(`launcher.py`/`__main__.py`/gateway `__main__.py`),`feat/` 名副其实。
+- **#1 聚焦单 PR / #3 squash**:本支即单一主题增量(部署入口 + 运维交接 + off-fix);合入时建议
+  **squash-merge**(把 1 个内部 launcher merge 压平成单/少数逻辑 commit),由负责人在 GitHub 侧执行。
+- **#4 打 tag 供运维**:合 main 后在合并 commit 打**不可变 tag `concurrency-deploy-v1`**;
+  `OPS_CHECKLIST A1` 的"分支/tag"占位**已预填该 tag 名**(合入 + 打 tag 后即生效),运维 `git clone` 该 tag
+  部署——不指向会动的分支(符合无 SSH"clone 固定 ref"前提)。
+- **#5 make check**:自有单测 **195 绿** + ruff + 行数门禁,已确认。
+- **#6 清理旧支**:A1/A2/B/C/soak/M5/PR-D 合入后均已删(本地+远端);本支合入后一并核删。
+- **纠正自述认可**:M5/PR-D/soak 实已在 main,本支是干净聚焦增量(非混装)。
+
+> 应答小结:入库建议全采纳;分支已改名 `feat/concurrency-deploy-launcher-ops`、A1 预填 tag
+> `concurrency-deploy-v1`。**待负责人合入(建议 squash)→ 我打 tag + 定稿 A1 + 核删旧支 → 交运维 clone tag。**

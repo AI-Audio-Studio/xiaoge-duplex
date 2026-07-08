@@ -34,7 +34,8 @@
 > 运行目录:仓库内 `examples/voice_agents`(下称"运行目录")。包管理用 `uv`。
 
 - [ ] **A1 取代码**:`git clone`(或 pull)`github.com/cxqhh/xiaoge-duplex`,切到开发团队指定的
-  分支/tag:`【dev 填: ____】`。 → 结果:
+  **固定 tag**(勿用会动的分支):`git checkout concurrency-deploy-v1`(本增量合入 main 后打的不可变
+  tag;若开发另行通知了 tag/SHA 以通知为准:`【dev 确认: concurrency-deploy-v1】`)。 → 结果:
 - [ ] **A2 装依赖**(仓库根):`uv sync --all-extras`。 → 结果:
 - [ ] **A3 放 TLS 证书**:把证书/私钥放到目标机,路径记入 §C 的 `XG_SSL_CERT`/`XG_SSL_KEY`。 → 结果:
 - [ ] **A4 配环境变量**:按 §C 两张表,给**池管理器**与**网关**两个服务各配一份 env(systemd
