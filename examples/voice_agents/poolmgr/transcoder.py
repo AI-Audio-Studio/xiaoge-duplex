@@ -175,8 +175,13 @@ class Transcoder:
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
 
+    @property
+    def _enabled(self) -> bool:
+        """codec 落在可编码集才启用;`off`/`wav` 等 = 停用(保持 WAV、无 worker)。"""
+        return self._codec in _AV_CODEC
+
     def start(self) -> None:
-        if self._codec not in _AV_CODEC:
+        if not self._enabled:
             logger.info("transcoder disabled (codec=%s, 保持 WAV)", self._codec)
             return
         for i in range(self._workers):
@@ -185,7 +190,10 @@ class Transcoder:
             self._threads.append(t)
 
     def enqueue_dir(self, session_dir: str | Path) -> bool:
-        """把一个会话目录**整体**入队(一目录=一工作单元:转完原子回写 manifest,免竞态)。"""
+        """把一个会话目录**整体**入队(一目录=一工作单元:转完原子回写 manifest,免竞态)。
+        停用档(codec=off/wav)不入队——无 worker 排空,入了只会让 queue_depth 悬非零(保持 WAV)。"""
+        if not self._enabled:
+            return False
         d = Path(session_dir)
         if not d.is_dir() or not iter_session_wavs(d):
             return False

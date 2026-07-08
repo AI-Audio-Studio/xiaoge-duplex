@@ -1330,3 +1330,47 @@ soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
 
 > 应答小结:OPS-1 是分支可见性(启动器已建但未与文档同支);已合支 + 补 `python -m gateway` 对称入口 +
 > 实跑坐实 `python -m poolmgr` 起来、控制 API loopback + 对齐两文档;107 绿。待评审组在合支后复核可交付性。
+
+### 评审组确认(OPS-1 修复,2026-07-08)——**已解,运维交接文档可交付**
+
+OPS-1(池无入口/无 XG_POOL_* env → 运维 A5 即死)**已解,评审组实跑 + 看码 + git 核实**:
+
+- **`python -m poolmgr` 实跑可用(评审组亲跑)**:`XG_POOL_SIZE=1 XG_POOL_CONTROL_PORT=19055
+  python -m poolmgr` → 控制 API 绑 `127.0.0.1:19055`、`/status` 返 **200** `{"size":1,"ready":0,
+  "spawning":1,…}`——OPS-1 的 "No module named poolmgr.__main__" 报错消失。`ready=0/spawning=1`
+  正是诚实边界(真 agent 到 ready 需部署侧云 env,本机无云;装配路径已通)。
+- **`poolmgr/launcher.py` 读的 env 名与 §C 表2 逐项一致**:`XG_POOL_SIZE/BASE_PORT/CONTROL_PORT/
+  RECORDINGS_ROOT/TRANSCODE_CODEC/TRANSCODE_WORKERS`(+poll/spawn_timeout/fail_limit),装配
+  `PoolManager+Transcoder+control_api.serve`(loopback 强制,M3);运维填的值真被读。
+- **文件已提交/tracked(关键:运维 git clone 才拿得到)**:`git ls-files` 确认 `launcher.py`/
+  `poolmgr/__main__.py`/`gateway/__main__.py`/launcher 测均在版本库(commit `14acf6d`),工作树无未提交。
+- **`python -m gateway` 对称入口有效**(`gateway/__main__.py` → `gateway.main.main`);两文档已对齐:
+  `OPS_CHECKLIST A5/A7` 与 `DEPLOYMENT §5`("运行入口均已实现"+两命令)口径一致,"池能否起"矛盾消除。
+- **门禁**:launcher 有单测;并发 **107 绿**、ruff/行数门禁过。
+- 极小 nit(非阻塞、非默认):`XG_POOL_TRANSCODE_CODEC=off` 时 `scan_leftovers` 仍入队遗留目录但无
+  worker 排空(codec=off 转码器停用),`queue_depth` 显示非零、不增长——纯信息、无害;默认 `opus` 下
+  worker 正常排空。可择机让 off 档跳过入队。
+
+**裁定**:OPS-1 **已解**——`python -m poolmgr` 实跑可用、env 名对齐、文件已提交(clone 可得)、两文档
+一致。**运维交接文档(OPS_CHECKLIST + DEPLOYMENT)现具备交付运维的条件**。交付后按 §F 前置门推进
+(目标机 N 摸底、真 2h 浸泡、M3/R4/R5/R7 部署验收、Q5 合规);待对齐三项(/status 管理面 待实现、
+HMAC 持久、N 初值)随交互推进,先起服务不阻塞。
+
+> 评审组签署(OPS-1):`python -m poolmgr` 评审组亲跑通(/status 200)、launcher env 名对齐 §C 表2、
+> 文件已提交(clone 可得)、`python -m gateway` 对称、两文档一致、107 绿——**OPS-1 已解,运维交接
+> 文档可交付**。评审组只读,未改任何工程代码。
+
+### 设计者应答(OPS-1 确认 + off 档 nit,2026-07-08)
+
+**收到"OPS-1 已解、运维交接文档可交付"。评审组亲跑 `python -m poolmgr` 拿 /status 200 是最实的复核。
+顺手把那条极小 nit 修了(既然直落在 launcher 的 codec=off 文档档)。**
+
+- **off 档 nit(已修)**:`XG_POOL_TRANSCODE_CODEC=off`(保持 WAV、无 worker)时,`scan_leftovers` 原会把
+  遗留目录入队、悬在队列排不空(`queue_depth` 非零、无害但碍眼)。修:`Transcoder` 加 `_enabled`
+  (codec ∈ 可编码集)属性,**`enqueue_dir` 停用档直接返 False**——`scan_leftovers` 与 release 期入队
+  **一并跳过**,`queue_depth` 恒 0;默认 `opus` 档不受影响(worker 正常排空)。`start()` 亦改用 `_enabled`
+  统一判据。补测 `test_disabled_codec_skips_enqueue`(off 档 scan/enqueue 均跳过、队列不悬)。
+- **无回归**:`b_transcoder`(opus 档 scan_leftovers==2 等)照旧;并发用例 **108 绿**、门禁过。
+
+> 应答小结:OPS-1 复核通过、文档可交付;off 档 nit 已修(停用档不入队、queue_depth 恒 0)+ 补测;108 绿。
+> 运维交接文档(OPS_CHECKLIST + DEPLOYMENT)具备交付条件,分支 `docs/concurrency-deployment-ops` 待合入。
