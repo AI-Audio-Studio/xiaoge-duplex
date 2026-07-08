@@ -1259,3 +1259,49 @@ soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
 
 > 评审组签署:同意 SK-1 应答(protocol 记备不做与评审判断一致、gitignore 范围实测精准);soak
 > harness 达标可合入,授权归负责人;上线五门未减。评审组只读,未改任何工程代码。
+
+## 运维交接文档(OPS_CHECKLIST.md / DEPLOYMENT.md)· 评审组结论(2026-07-08)
+
+**问题:能否直接交运维操作?——暂不能。结构与网关半边达交接质量,但有一处阻塞级事实缺陷:
+池管理器无可运行入口、无 `XG_POOL_*` env 层——运维照 A5 会立刻失败,且无 SSH 无法现场救。
+先本机补齐入口(正属"本机能继续实现"),对齐两文档,即可交付。**
+
+### 一、达标部分(看码/实跑核实)
+- **结构好**:§A 操作 / §B 注意 / §C 填值 / §D 反馈 / §E 验证分工 / §F 前置门 / 待对齐——四问清晰;
+  "机上=运维、HTTPS=开发"的无 SSH 交互模型合理;红线(仅网关 HTTPS 对外、内部口只 127.0.0.1)醒目。
+- **网关半边真可部署**:A7 `python -m gateway.main` **实跑可用**;§C 表1 的 `XG_LISTEN_HOST/PORT`、
+  `XG_SSL_CERT/KEY`、`XG_POOL_API`、`XG_GRACE_SECONDS`、`XG_ACCESS_CODE`、`XG_HMAC_SECRET`、`XG_MSG_RATE`、
+  `XG_MAX_FRAME_BYTES` **逐项与 `gateway/config.py:from_env` 一致**。
+- **agent 注入注记准确**:§C"WEB_UI_HOST=127.0.0.1…XIAOGE_ADMIN_ROUTES=0 由池自动注入"与
+  `manager.default_agent_env` 一致。/status 管理面诚实标"待实现/待对齐"。
+
+### 二、OPS-1(阻塞,实测坐实)池管理器无运行入口 + 无 XG_POOL_* env——A5/A6/§C 表2 不可执行
+- **事实**:`cd examples/voice_agents && python -m poolmgr` → **`No module named poolmgr.__main__;
+  'poolmgr' is a package and cannot be directly executed`**(`poolmgr/` 无 `__main__.py`)。
+- **事实**:`poolmgr/` **无任何 `XG_POOL_*` env 解析**(全仓仅 `manager.default_spawn` 有
+  `dict(os.environ)` 继承给 agent);`XG_POOL_SIZE/BASE_PORT/CONTROL_PORT/RECORDINGS_ROOT/
+  TRANSCODE_CODEC/TRANSCODE_WORKERS` **代码从不读**——运维填了也被无视。
+- **事实**:唯一装配 `PoolManager + build_control_app + Transcoder` 的地方是 **`harness/soak.py`(测试)**,
+  **无生产 driver**。
+- **后果**:运维照 §A **走到 A5 即失败**(池起不来→A6 无 ready→A7 网关分不到 agent),而**无 SSH
+  无法现场排障**——正是本交接要避免的死局。
+- **文档自不一致**:`DEPLOYMENT.md §7"待实现"`列了 /status 管理面、远端 harness,却**未列池入口缺失**;
+  `OPS_CHECKLIST §A5` 又把 `python -m poolmgr` 当可执行步——两文档对"池能否起"口径矛盾。
+
+### 三、须先本机补齐(正属"本机能继续实现",不需服务器)
+1. **`poolmgr/__main__.py` 生产入口**:读 §C 表2 的 `XG_POOL_*` env → 构 `PoolTuning`/`PoolManager(size)` +
+   `control_api.serve(port)` + `Transcoder(codec, workers)` 装配起来(底层参数都已在,缺的只是 env→装配的
+   driver);env 名须与 §C 表2 一致。补冒烟:`python -m poolmgr` 起得来、`/status` 返 ready==N。
+2. **对齐两文档**:池入口实现后,`OPS_CHECKLIST A5/§C 表2` 与 `DEPLOYMENT §7` 口径一致;或在补齐前
+   把 A5/表2 显式标"待入口实现",避免交出去即踩坑。
+3. (次要)网关 `python -m gateway.main` 可跑但无 `gateway/__main__.py`;若想 `python -m gateway` 更顺,
+   加一个薄 `__main__.py`(非阻塞)。
+
+### 四、裁定
+- **暂不可直接交运维**——OPS-1(池无入口/无 env)是阻塞级、运维 A5 即死、无 SSH 不可救。
+- 网关半边 + 交互模型 + 安全红线**达交接质量**;补齐池入口(本机可做)+ 对齐两文档后,**即可交付运维**。
+- 交付后运维侧顺序/验证分工/前置门(目标机 N、真 2h 浸泡、M3/R4/R5/R7、Q5)框架已就绪。
+
+> 评审组签署(运维交接):结构与网关半边达标;**OPS-1 阻塞——`python -m poolmgr` 实测报错、无
+> `XG_POOL_*` env、唯一装配在 soak 测试里**,运维照 A5 即失败且无 SSH 不可救;先本机补池入口 + 对齐
+> 两文档再交。评审组只读,未改任何工程代码。
