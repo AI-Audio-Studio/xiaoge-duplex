@@ -17,6 +17,8 @@ examples/voice_agents/poolmgr/__init__.py
 examples/voice_agents/poolmgr/transcoder.py
 examples/voice_agents/poolmgr/manager.py
 examples/voice_agents/poolmgr/control_api.py
+examples/voice_agents/poolmgr/launcher.py
+examples/voice_agents/poolmgr/__main__.py
 examples/voice_agents/gateway/__init__.py
 examples/voice_agents/gateway/config.py
 examples/voice_agents/gateway/affinity.py
@@ -90,5 +92,6 @@ tests/test_ours_concurrency_c_main.py
 tests/test_ours_concurrency_d_integration.py
 tests/test_ours_concurrency_m5_admin_routes.py
 tests/test_ours_concurrency_soak_smoke.py
+tests/test_ours_concurrency_poolmgr_launcher.py
 tests/_fake_agent_server.py
 scripts/check_line_counts.py
