@@ -934,7 +934,7 @@ Q6/R6/B4/批量断开;A1-F1 #3 console 退出;目标机 N 摸底 + B5;Q5 合规)
 | 3 | D1 关闭码/重分配单入口 | ✅ | c_main(4001/409·规则1单入口)+ **d_integration D1**(真回收后旧cookie→409/4001→重分配) |
 | 4 | Q6 准入 | ✅ | c_main `test_access_gate_blocks_without_code` |
 | 5 | R6 安全四条 | ✅ | c_main(白名单404·cookie HttpOnly/SameSite)+ c_proxy(令牌桶·超帧断连) |
-| 6 | B4 healthz 千次专项 | 🧪 | b_manager(健康→不回收/死亡→回收);**千次探测 + 真实会话 KPI 无扰动 → soak** |
+| 6 | B4 healthz 千次专项 | 🧪 | b_manager(健康→不回收/死亡→回收);**soak harness 已就位**(`harness/soak.py`);千次探测 + 真实会话 KPI 无扰动 → 目标机真 agent 全量浸泡 |
 | 7 | M3 内网绑定 | ✅ / 🚀 | b_control_api(serve 强制 loopback)+ default_agent_env `WEB_UI_HOST=127.0.0.1`;**外网 nmap 不可达 → 部署验收** |
 | 8 | R2 转码归属 | ✅ | b_transcoder + b_manager(转码在池侧·per-dir 队列·崩溃不阻塞 alloc/在线) |
 | 9 | N1 分档校验 | ✅ | b_transcoder(D-21:FLAC 采样数逐一 / Opus 时长差≤0.07s;失败留 WAV 不删源) |
@@ -1113,3 +1113,149 @@ T1 要求路由 + tab 双验;建议补一条断言——`ADMIN_ROUTES=0` 下 `_I
 > 评审组签署(M5 + 前进):tab 门控补测判别性落地、重构行为等价、102 绿——M5 达标可合入,claim
 > 属实;编码阶段随 M5/PR-D 增量合入收官,其后转 soak/部署验收/前置门(非编码),两硬门未过不上线。
 > 评审组只读,未改任何工程代码。
+
+### 浸泡 harness 交付(§7,2026-07-07)——待评审
+
+编码阶段收官后第一项非编码活动的**工具**。§7 P-7"实施期落为脚本"现落地:
+
+- **`examples/voice_agents/harness/soak.py`**(319 行,CLI `python -m harness.soak`):拉起**真
+  PoolManager(spawn 假 agent 子进程)+ 真 control API + 真网关 + 真 sweep**,N 个虚拟用户长时高频
+  **churn**(新浏览器→GET/→/ws/audio→帧+回声→断→半数窗内 REATTACH/半数放任超时回收),周期
+  **采样进程树 RSS / 文件句柄 / 池态(ready·assigned)/ 持有上游(proxy 宽限窗)/ 会话表规模**;
+  churn 后冷却让宽限窗全超时 + 池复位,采末态。**泄漏判据**(全 PASS 方绿):会话表末态归零、
+  持有上游归零、池全回收复位、RSS 相对基线增长 ≤ 限、句柄增长 ≤ 限。报告(检查表 + 采样序列)
+  落 `docs/reports/concurrency_soak_<ts>.md`。
+- **假 agent 浸泡查网关/池泄漏**(RSS/句柄/会话/槽/上游),`--agent-cmd` 可换真 agent + 真 env/录音
+  在目标机做 §7 全量 **4 路×2h**(含 `recordings` 磁盘增速 / 转码积压曲线——需真录音,假 agent 恒 0)。
+- **冒烟**:`tests/test_ours_concurrency_soak_smoke.py`(2 会话×5s 真栈,断言泄漏检查全 PASS + 报告落盘),
+  锁 harness 本体可跑通;实测 RSS 增长 <1MB、句柄稳、末态全归零。并发用例 **103 绿**、lint-ours/行数门禁过。
+- **定位**:harness 是**工具**;B4 千次 + 真实会话 KPI 无扰动、N2 在线路 KPI 无扰动、`recordings` 磁盘/转码
+  积压 = **目标机真 agent 全量浸泡**的产出(需运维发令 + 目标机),与两前置门同批。分支 `feat/concurrency-soak-harness`。
+
+## 浸泡 harness(§7 soak · 分支 `feat/concurrency-soak-harness`)· 评审组结论(2026-07-07)
+
+**裁定:结构与会话/上游/池泄漏检查优秀,但 RSS/FD 泄漏判据设计有缺陷——harness 自身 smoke
+测在干净栈上"非确定性假阳失败"(实测),不可作 soak 门禁,合入前必修(SK-1)。**
+
+### 一、达标部分(看码 + 实测)
+- **真栈 churn**:`_stack` = 真 PoolManager(spawn 假 agent 子进程)+ 真控制 API + 真网关 + 真 sweep;
+  `_churn_user` 反复 GET/→/ws/audio→帧→断→半数窗内 REATTACH/半数超时回收——真实压连接/宽限窗/回收。
+- **会话/上游/池泄漏检查正确、确定性**:`no_session_leak`(`len(table._sessions)==0`)、
+  `no_held_upstream_leak`(`len(proxy._io)==0`)、`pool_recovered`(ready==N)——直接量网关/池状态,
+  实测三项稳定 PASS。warmup 后采基线 + cooldown 等宽限窗超时/池复位再采末态,防在途误判——设计好。
+- 依赖合规(`psutil>=7.0` 已在 livekit-agents/pyproject.toml);真录音磁盘增速/转码积压诚实标注
+  "需真 agent + 目标机 4 路×2h",不在本假 agent 短跑范围。
+
+### 二、SK-1(必修,实测坐实)RSS/FD 泄漏判据被"进程树瞬时进程数"污染 → smoke 非确定性假阳
+- **事实(评审组重跑)**:`test_soak_harness_smoke_no_leak` 首次(冷)运行**失败**——`fd_bounded=False`
+  (fds 543→783,增 240 > 限 128);同配置复跑则 PASS。根因:池 size=2 稳态=主进程+2 agent=**3 proc**,
+  churn 中有 **2 个 kill 后残留(未即时回收)的 agent 子进程**,而 `_sample` 的 RSS/FD **按整棵进程树
+  求和**——首次基线在冷态(3 proc)采、末态在 churn 后(5 proc)采,fd 增长几乎全来自"进程数 3→5",
+  非网关/池的真 FD 泄漏;复跑时基线已含残留(5 proc)、末态 5 proc → 增长≈0 → 侥幸 PASS。
+- **同病 rss_bounded**:RSS 也按树求和(基线 98.9→末态 149MB,+50MB 主要是那 2 个残留 agent 各 ~25MB),
+  本次 < 80 限侥幸过——同样被进程数污染,阈值一紧即假阳。
+- **后果**:harness **自身 smoke 测在干净栈上会间歇性判 FAIL**(实测首跑即 FAIL)——一个对干净栈
+  "喊狼来了"的 soak 门禁不可用,且会随机挂 CI。
+- **修法(建议)**:真正要查的泄漏在**常驻的网关/池管理器(主进程)**,agent 子进程按设计就该随
+  回收增减——**RSS/FD 应量主进程(或稳定集),不量 churn 的 agent 子树**;并把基线采在**进程树达
+  稳态之后**(非冷态),或在 cooldown 里等进程树 reap 收敛再采末态。修后 smoke 须稳定 PASS(多次)。
+- 顺带存疑(修 SK-1 时一并看):稳态为何常驻 5 proc(2 个 kill 后残留)——若是 reaper 回收滞后、
+  数量有界则非泄漏,但当前树级度量无法区分"有界滞后"与"真泄漏",正是应改量主进程的又一理由。
+
+### 三、裁定
+- 会话/上游/池泄漏检查 + 真栈 churn + 报告落盘**达标**;**SK-1(RSS/FD 判据树级污染→smoke 非确定性
+  假阳)合入前必修**——改量主进程/稳定集 + 稳态基线,修后 smoke 多次稳定 PASS 再复评。
+- 本 harness 修好后为**假 agent 短跑泄漏门禁**;真 4 路×2h(含磁盘/转码)仍属目标机活动,不变。
+
+> 评审组签署(soak harness):结构与会话/上游/池泄漏检查优秀且确定性;但 RSS/FD 判据按整棵进程树
+> 求和、被 churn 的 agent 子进程数污染,**smoke 测首跑实测 FAIL(fd 543→783,进程 3→5)、复跑 PASS
+> ——非确定性假阳**,合入前必修(量主进程/稳态基线)。评审组只读,未改任何工程代码。
+
+### 设计者应答(SK-1,2026-07-08):RSS/FD 改量主进程 + 静默基线,已修 + 多跑坐实
+
+**SK-1 属实,是设计缺陷不是参数问题——评审组用"首跑 FAIL / 复跑 PASS"实测坐实,这类非确定性
+门禁比漏测更坏。已按建议修,并补回归守卫锁死。**
+
+- **根因认同**:被测对象(SUT)= 常驻的**网关 + 池管理器**,二者都在**主进程**(asyncio + poolmgr
+  线程);agent 子进程是**负载**,随池回收增减(含 kill 后残留)。整树求和把"负载进程数波动"当
+  成 SUT 泄漏——所以首跑冷态(3 proc)基线 vs churn 后(5 proc)末态,增长几乎全来自进程数。
+- **修法(两处,均采纳建议)**:
+  1. **RSS/FD 只量主进程**(`_sample`:`psutil.Process()` 自身,非 `children` 求和);整树 RSS/进程数
+     降为**仅信息字段**(`tree_rss_mb`/`tree_procs`),不入判据。
+  2. **判据点改为"同静默态可比"**:基线采在 **churn 前静默态**(栈起、池 ready==N、无客户端),
+     末态采在 **churn + 冷却到静默后**(宽限窗全超时、池复位、无持有上游/会话,再留一拍让句柄释放
+     收敛)。真泄漏 = 资源未释放、末态显著高于基线;churn 中样本仅作趋势信息。
+- **实测坐实(3 次冷跑,确定性)**:主进程 RSS 基线 47.7 → 末态 50.4MB(增长 **~2.7MB**)、句柄
+  285 → 289(增长 **恰 4**),三跑一致;整树 5 proc 两态相同(信息)。判据限收紧到 RSS 60MB / FD 64
+  (~20× 余量:稳不假阳,又能兜住真泄漏——未释放上游=每漏 1 会话 +1 句柄,长跑累积破限)。
+- **回归守卫**:smoke 加断言"主进程句柄增长 ≤ 32"——**若退回整树求和(+240)即判红**,锁死 SK-1
+  不复发。smoke 连跑多次稳定 PASS(~9s)。并发用例 **103 绿**、lint-ours/format/行数门禁过(soak.py 341 行)。
+
+> 应答小结:SK-1 已修(RSS/FD 量主进程 + churn 前/后静默态可比基线),3 次冷跑确定性 PASS(RSS+2.7MB/
+> FD+4)、限收紧至 60MB/64、加"退回整树即判红"回归守卫;103 绿。待评审组复核判据修法与多跑稳定性。
+
+### 评审组确认(SK-1 修复 + 全功能影响核查,2026-07-08)
+
+**SK-1 已修且判别性确认;并按评审要求越出该点、就"整个功能是否真有泄漏"独立实测——结论:
+无累积泄漏(既非 SUT 主进程泄漏,亦非 agent 进程 reap 泄漏)。soak harness 达标可合入。**
+
+**一、SK-1 修复(看码 + 实跑)**:
+- `_sample` 判据改**只量主进程**(常驻网关+池所在)的 RSS/句柄;整树 RSS/进程数降为**信息字段
+  `tree_rss_mb`/`tree_procs`(仍采、仍落报告,只是不作判据)**——非隐藏,是正确地"不拿负载进程
+  波动当 SUT 泄漏"。基线/末态均在**静默态**(churn 前 ready==N 无客户端 / churn+冷却到宽限窗超时
+  +池复位+无上游会话)可比。
+- **确定性实测**:`test_soak_harness_smoke_no_leak` **连跑 3 次全 PASS**(修前首跑 FAIL);smoke 加
+  回归守卫(main-proc 句柄增长 ≤32,注明"退回整树 +240 即判红")——锁死不回潮。103 并发绿。
+
+**二、越点核查:整个功能在持续 churn 下是否真泄漏(评审组独立 40s 实测,size=3)**:
+- 我上轮存疑的"kill 后残留 agent 进程"——**实测证伪为累积泄漏**:`tree_procs` 全程**恒 7、不爬升**
+  (main+3 就绪/占用+~3 回收在途),是**有界 reap 滞后(~2N+1)**,非泄漏。
+- **SUT 主进程无泄漏**:`main_fds` 292→305 区间振荡、收于 298(不爬升);`main_rss` 47→53 振荡、
+  收于 51——句柄/内存均**有界**。这是生产相关的真泄漏点(未释放会话/上游/socket 都在主进程),干净。
+- **要点**:killed-agent 若真 reap 泄漏会体现在 `tree_procs`(信息字段,报告可见)而非主进程句柄
+  (stdout/stderr=DEVNULL 无管道,僵尸不占父句柄)——故 SK-1 改量主进程**不会掩盖**该类泄漏;而
+  实测该类泄漏**本就不存在**(40s churn 进程数恒定)。两头都用事实排除。
+
+**三、诚实边界(不变)**:假 agent 短跑覆盖网关/池泄漏门禁;真录音磁盘增速/转码积压需真 agent,
+仍属目标机 4 路×2h 全量浸泡。**低价值可选**:churn 仅浏览器会话,协议端(D-07 即断即杀)未入
+soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
+
+**裁定**:SK-1 修复达标(判据量主进程、静默可比、smoke 确定性+回归守卫);全功能 40s 实测无
+累积泄漏(主进程句柄/内存有界、agent 进程数有界)。**soak harness 达标可合入**,作假 agent 泄漏
+门禁;真 2h 目标机浸泡按序另做。
+
+> 评审组签署(SK-1 + 全功能):判据改量主进程后 smoke 3 跑确定性 PASS + 回归守卫锁死;越点 40s
+> 实测证伪"agent 进程累积泄漏"(tree_procs 恒 7)、主进程句柄/内存有界——**无泄漏,harness 达标
+> 可合入**。评审组只读,未改任何工程代码。
+
+### 设计者应答(SK-1 闭环确认,2026-07-08)
+
+**收到"达标可合入"。评审组越点做的 40s 独立实测尤其到位——不止复核我的修法,而是就"功能到底
+有没有泄漏"两头取证:主进程句柄/内存有界(生产真泄漏点),`tree_procs` 恒 7(证伪 agent reap 泄漏);
+并点明量主进程不会掩盖 reap 泄漏(DEVNULL 无管道、僵尸不占父句柄)。结论比我上轮"存疑残留进程"更
+干净,认可。无待办。**
+
+- **低价值可选(protocol 端不入 soak)——采纳"记备、不做"**:churn 仅浏览器会话;协议端 D-07
+  即断即杀路径已由 `test_r1c_protocol_client_immediate_kill_cross_process`(真跨进程)覆盖,soak 再补
+  价值低、且会增 harness 复杂度。**按评审判断不扩范围**;若日后 soak 扩为全形态压测再补,已在此记备。
+- 门禁不变:并发 103 绿、lint-ours/format/行数门禁过。soak harness 达标,待负责人批准合入。
+
+> 应答小结:接受达标裁定;低价值可选(protocol churn)按评审判断记备不做(R1c 已覆盖 D-07);无代码改动。
+
+### 评审组确认(SK-1 应答 + 是否可合入,2026-07-08)——**同意,可合入(授权归负责人)**
+
+设计者应答与评审组裁定一致,两点核实(非采信):
+- **protocol churn 记备不做**:与评审组自己"低价值可选"的判断一致——D-07 即断即杀已由
+  `test_r1c_protocol_client_immediate_kill_cross_process`(真跨进程)覆盖,soak 再补价值低、增复杂度;
+  日后若 soak 扩全形态压测再补,已记备。**同意不扩范围**。
+- **gitignore per-run 报告**:实测 `git check-ignore`——仅忽略 `docs/reports/concurrency_soak_*.md`
+  (per-run 产物),`CONCURRENCY_PROBE_REPORT.md`/`RESOURCE_REPORT.md`/设计文档**均不受影响**,
+  curated 报告仍可手动提交。范围精准,无误伤。**同意**。
+- 无代码逻辑改动(仅文档 + gitignore),并发 103 绿、门禁过。
+
+**裁定:评审组同意设计者意见,soak harness 达标、可合入**(实际合入/授权归项目负责人)。
+**合入 ≠ 上线**:本 harness 为假 agent 泄漏门禁;上线仍锁:真 4 路×2h 目标机浸泡(含磁盘/转码)、
+部署验收(M3/R4/R5/R7)、A1-F1、两前置门(目标机 N=8/10 摸底+B5、Q5 合规)——未过不上线。
+
+> 评审组签署:同意 SK-1 应答(protocol 记备不做与评审判断一致、gitignore 范围实测精准);soak
+> harness 达标可合入,授权归负责人;上线五门未减。评审组只读,未改任何工程代码。

@@ -185,5 +185,9 @@ runs/
 logs/
 qwen_voice_turn_metrics.log
 
+# Auto-generated per-run concurrency soak reports (harness/soak.py regenerates each run;
+# curated reports like RESOURCE_REPORT.md are committed manually)
+docs/reports/concurrency_soak_*.md
+
 # Large model artifacts (KWS etc.) — copied in locally, not source. See RUN.md.
 models/
