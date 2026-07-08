@@ -11,7 +11,7 @@
 | [CONCURRENCY_DESIGN.md](CONCURRENCY_DESIGN.md) | **规格(唯一现行版)** | v4 开发指导版:决策总账 D-01~D-23、架构、网关六规则、配置注入总表、20 条 checklist、实施计划 | **定稿**(设计充分) |
 | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) | **实施方案** | 把"做什么"细化为"怎么做+怎么验":P-1~P-9、三组件模块方案、agent 六处小改锚点、验收映射、PR 切分、harness/WP-0/摸底案头稿 | **评审通过**(W1~W4 落文) |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | **部署文档(PR-D)** | 并发架构上线部署 + 验证方案,针对**HTTPS-only / 无 SSH** 约束:职责切分、`/status` 使能面、远端 harness、运维对齐清单、五门映射 | **方案稿**(待评审+对齐运维) |
-| [OPS_CHECKLIST.md](OPS_CHECKLIST.md) | **运维交互单** | dev↔ops 唯一交互文件(运维经 GitHub 读/填/勾/回报):机器访问、部署包、env 注入、systemd、防火墙、待对齐项、验证协议、五门 | **进行中**(待运维回填) |
+| [OPS_CHECKLIST.md](OPS_CHECKLIST.md) | **运维交接手册** | **可直接转交运维工程师**的完整操作手册(自足,GitHub 读/填/勾/回报):系统概览、逐步操作(含 `python -m poolmgr`/`gateway.main` 命令)、注意事项、env 两表、反馈项、验证分工、五门、待对齐 | **进行中**(待运维回填) |
 | [IMPL_REVIEW_KICKOFF.md](IMPL_REVIEW_KICKOFF.md) | **实施前评审(第一门)** | 评审召集 + 评审组结论 + 设计者应答;开工建议"两段放行" | **第一门已过**(待第二门) |
 | [CONCURRENCY_PROBE_REPORT.md](CONCURRENCY_PROBE_REPORT.md) | **实测数据** | 外部容量摸底第一轮(N=1/2/4 打真机)+ 评审 PB-1~PB-5 + 应答;Q1-N 输入 | 第一轮收口(N≤4 下界 >4) |
 | [CONCURRENCY_REVIEW_ARCHIVE.md](CONCURRENCY_REVIEW_ARCHIVE.md) | **溯源存档** | v1~v3 全文 + 附 A~W 全部评审往返原文(签署未改) | **只读**,不再追加 |
