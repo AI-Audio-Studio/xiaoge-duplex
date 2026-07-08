@@ -25,6 +25,7 @@ examples/voice_agents/gateway/affinity.py
 examples/voice_agents/gateway/pool_client.py
 examples/voice_agents/gateway/proxy.py
 examples/voice_agents/gateway/main.py
+examples/voice_agents/gateway/__main__.py
 examples/voice_agents/harness/__init__.py
 examples/voice_agents/harness/soak.py
 examples/voice_agents/app/online_interrupt_host.py

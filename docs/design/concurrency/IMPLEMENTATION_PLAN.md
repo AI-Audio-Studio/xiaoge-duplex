@@ -1305,3 +1305,28 @@ soak——该路径已 R1c 集成测覆盖,soak 补之价值低,记备。
 > 评审组签署(运维交接):结构与网关半边达标;**OPS-1 阻塞——`python -m poolmgr` 实测报错、无
 > `XG_POOL_*` env、唯一装配在 soak 测试里**,运维照 A5 即失败且无 SSH 不可救;先本机补池入口 + 对齐
 > 两文档再交。评审组只读,未改任何工程代码。
+
+### 设计者应答(OPS-1,2026-07-08):池入口已补(实为分支可见性问题)+ 两文档已对齐
+
+**OPS-1 属实(以评审组当时所见分支为准),但修复本轮已建——只是落在**独立分支**上、未与运维文档
+同支,故评审在文档分支上跑 `python -m poolmgr` 才报错。已把启动器合入同支、实跑验证、并对齐两文档。**
+
+- **根因 = 分支可见性**:本会话已建 `poolmgr/launcher.py` + `poolmgr/__main__.py`(启动器),但落在
+  **`feat/concurrency-poolmgr-launcher`**;运维文档落在 **`docs/concurrency-deployment-ops`**——两者皆基于
+  main、互不含对方。评审在文档分支上验证,自然见不到启动器 → `python -m poolmgr` 报错。**评审的
+  §三 处方与已建启动器逐条吻合**(`__main__.py` 读 `XG_POOL_*` → `PoolTuning/PoolManager/Transcoder/
+  control_api.serve` 装配,env 名与 §C 表2 一致)。
+- **处置**:①**把启动器合入运维文档同支**——单次 checkout 即可部署;②(次要采纳)补 `gateway/__main__.py`
+  使 `python -m gateway` 与 `python -m poolmgr` 对称,OPS_CHECKLIST A7 同步。
+- **实跑坐实(本机)**:合支后 `cd examples/voice_agents && XG_POOL_SIZE=1 … python -m poolmgr` →
+  **`pool manager starting: N=1 … control=127.0.0.1:19000`** + 起转码器 + `pool control API on
+  http://127.0.0.1:19000` + 开始 spawn agent——**OPS-1 报错消失**,`XG_POOL_*` 生效、控制 API 绑 loopback。
+- **诚实边界**:`python -m poolmgr` 起**真 agent** 到 ready(§A6 `/status` ready==N)需部署侧 agent 运行 env
+  (LIVEKIT/provider/模型),本机无云不能端到端;但**装配路径由 soak 冒烟以假 agent 证到 ready==N**,加
+  上本机"entry 解析 + 起 + 控制 API served"实跑,池入口成立无疑。启动器测 `test_ours_concurrency_poolmgr_launcher`
+  (4 例:env 默认/覆盖、build_manager status 反映 N 无 spawn、codec=off 可装配)。
+- **两文档对齐**:`DEPLOYMENT §5` 补 `python -m poolmgr`/`python -m gateway` 命令 + "运行入口均已实现"注,
+  与 `OPS_CHECKLIST A5/A7/§C 表2` 一致;不再有"池能否起"口径矛盾。并发用例 **107 绿**、门禁过。
+
+> 应答小结:OPS-1 是分支可见性(启动器已建但未与文档同支);已合支 + 补 `python -m gateway` 对称入口 +
+> 实跑坐实 `python -m poolmgr` 起来、控制 API loopback + 对齐两文档;107 绿。待评审组在合支后复核可交付性。

@@ -94,8 +94,11 @@
 ## 5. 部署步骤(ops 机上)+ 验证协议(dev 经 HTTPS)
 
 **A. ops 机上(按序)**:①放证书 + 配 `XG_SSL_*`;②注入 §7.2 env(网关 + 池);③起**池管理器**
-(control_api 绑 127.0.0.1:19000)→ 待就绪数=N;④起**网关**(TLS 终结,对外口);⑤防火墙仅放行对外
-HTTPS、内部口 loopback-only;⑥确认 systemd 自拉。
+`python -m poolmgr`(读 `XG_POOL_*`;control_api 绑 127.0.0.1:19000)→ 待就绪数=N;④起**网关**
+`python -m gateway`(TLS 终结,对外口);⑤防火墙仅放行对外 HTTPS、内部口 loopback-only;⑥确认 systemd 自拉。
+> 运行入口(均已实现,运行目录 `examples/voice_agents`):`python -m poolmgr`(启动器
+> `poolmgr/launcher.py`,`XG_POOL_*` env)、`python -m gateway`(`gateway/main.py`,`XG_*` env)。
+> **逐步操作手册见 [OPS_CHECKLIST.md](OPS_CHECKLIST.md)**。
 
 **B. dev 经 HTTPS 验证**:①**功能冒烟**——页面加载、准入口令、通话(/ws/audio 回声)、四打断、聆听、
 双标签页拒绝、繁忙页;②**M3 外部 nmap**——公网只见 HTTPS 口,191xx/19000/网关内口不可达;③读
