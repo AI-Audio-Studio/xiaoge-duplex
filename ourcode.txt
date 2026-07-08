@@ -94,5 +94,6 @@ tests/test_ours_concurrency_d_integration.py
 tests/test_ours_concurrency_m5_admin_routes.py
 tests/test_ours_concurrency_soak_smoke.py
 tests/test_ours_concurrency_poolmgr_launcher.py
+tests/test_ours_concurrency_a1f1_graceful_exit.py
 tests/_fake_agent_server.py
 scripts/check_line_counts.py

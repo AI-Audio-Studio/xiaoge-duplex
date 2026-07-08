@@ -1424,3 +1424,26 @@ launcher 测。8 commit ahead、1 内部 merge(launcher)。
 
 > 应答小结:入库建议全采纳;分支已改名 `feat/concurrency-deploy-launcher-ops`、A1 预填 tag
 > `concurrency-deploy-v1`。**待负责人合入(建议 squash)→ 我打 tag + 定稿 A1 + 核删旧支 → 交运维 clone tag。**
+
+---
+
+## A1-F1 收口(#3 优雅退出效力,2026-07-08)——待评审
+
+编码收官后本机可做项。**结论:A1-F1 达标闭环——#3 drain 路径成立、进程退出由池 kill 保证、触发器
+纪律已单测。** 分支 `feat/concurrency-a1f1-exit-efficacy`。
+
+- **机制(看码)**:#3 触发在 `webpanel/server.py::_request_graceful_exit`——网关为真实会话注入
+  `X-XG-Session`,断开时经 agent 循环 `call_soon_threadsafe(ctx.shutdown(...))`。`ctx.shutdown` →
+  `_on_shutdown`(livekit `job.py:655`)→ 在 job/proc 运行时(`job_proc_lazy_main.py:278`)解 `_shutdown_fut`
+  → 跑 **drain(录音收尾等 shutdown 回调)** → 向监督者发 `Exiting`。**console 与 proc 共用此 drain 路径**。
+- **进程退出供池回收 = 池保证,非 agent 自退(A1-F1(b))**:池 `default_kill`(terminate→wait(5)→
+  **SIGKILL 兜底**)在 release/recycle 时确保进程死、端口释放——已由 `b_manager`(真进程 _FAKE_AGENT
+  SIGTERM 兜底)+ `d_integration`(超时/断开→回收换 pid)实测。故 console 是否**自动**退出不阻塞:
+  即便不自退,池也回收。
+- **触发器纪律(新单测,本机)**:`test_ours_concurrency_a1f1_graceful_exit`(3 例)——①有 `X-XG-Session`
+  → 触发 `ctx.shutdown("gateway session ended")`;②**无标记(PC/console 形态头缺失)→ 从不触发**
+  (锁"PC 形态不变");③ctx 缺失 / loop 未运行 → 安全 no-op(不抛)。不依赖真 livekit 运行时。
+- **诚实边界**:真 agent console 下 `ctx.shutdown` 触发后进程是否**自动**退出(而非仅 drain)未在本机
+  端到端跑(需真 agent+云/模型);但**无论自退与否,池 kill 都兜底回收**,故非上线阻塞。若日后目标机
+  端到端观测到 console 自退不生效,亦无影响(池 kill 已保证)——记备。并发用例全绿、门禁过
+  (本支已 rebase 到含部署/启动器/off-fix 的当前 main)。
