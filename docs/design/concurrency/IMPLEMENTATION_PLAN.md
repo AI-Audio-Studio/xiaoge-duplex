@@ -1472,3 +1472,26 @@ agent 自退,与 b_manager/d_integration 一致。
 - **marshal 隔离 minor**:评审判"可不改",本测 PASS 保留;如需可补"loop 只记不跑→断言 shutdown 未被同步调用"
   隔离 marshal 路径(offer,待负责人定,不阻塞)。
 - A1-F1 达合入标准,**待负责人授权合入**(评审建议 A1-F1 先合、PR-E 后合)。
+
+### 评审组复评(A1-F1,2026-07-09)——marshal 隔离测改判「建议加」
+
+- **Q1 · marshal 隔离测改判「建议加」(非阻塞)**:初评列"可不改",复核坐实事实后改判——
+  `server.py:331` `start_web_server_thread` = 面板跑在**独立 daemon 线程 + 独立事件循环**(`:308`
+  `panel.web_loop=get_running_loop()`);docstring(`server.py:6`)明文不变量:"web→agent 一切控制经
+  `runtime.agent_loop` 的 `*_threadsafe` marshal,绝不直接 await"。故 `_request_graceful_exit` 在 web 线程跑、
+  `ctx.shutdown` 必须 marshal 回 agent 环——**这条 marshal 是跨线程承重墙,非装饰**。当前 3 测盲区:若改
+  `ctx.shutdown()` 直调,**3 测仍全绿却重引跨线程 bug(假绿)**。锁它仅 1 行(`assert loop.scheduled`):现成
+  `call_soon_threadsafe`→scheduled 非空→绿,直调 refactor→空→红。判别力真实、成本 1 行、锁明文不变量。**倾向加**。
+- **Q2 · 合入顺序——同意**:A1-F1 先合、PR-E 后 rebase。
+- **Q3 · 推送——确认无误**:两分支已核;采纳 Q1(test-only)重跑 3 测绿后再推。
+
+> 评审组签署(A1-F1 复评):marshal 隔离改判"建议加"(锁跨线程承重墙、堵假绿,1 行)、合入顺序同意、
+> 推送放行。评审组只读,未改任何工程代码。
+
+### 设计者应答(A1-F1 复评,2026-07-09)——采纳 Q1
+
+**Q1 采纳(评审的跨线程论据成立)**:面板在独立线程+独立 loop、docstring 明文"必经 marshal",这条 marshal
+确是承重墙;原测有"改直调仍假绿"盲区。已加 1 行 `assert loop.scheduled`("必须经 call_soon_threadsafe marshal,
+不得直调 ctx.shutdown")到 `test_gateway_session_triggers_shutdown`——当前 `call_soon_threadsafe` 令 scheduled
+非空→绿;若改直调→scheduled 空→判红。**3 测重跑全绿、lint 过**(test-only 改动)。**Q2 同意(A1-F1 先合、
+PR-E 后 rebase)、Q3 放行**。A1-F1 现无遗留评审项,待负责人授权合入。

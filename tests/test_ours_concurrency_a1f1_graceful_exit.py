@@ -58,6 +58,10 @@ def test_gateway_session_triggers_shutdown(monkeypatch: pytest.MonkeyPatch) -> N
     _wire(monkeypatch, ctx, loop)
     ws._request_graceful_exit("sess-abc")  # 网关标记会话断开
     assert ctx.shutdown_reasons == ["gateway session ended"]  # 触发优雅退出
+    # marshal 隔离(评审复评):面板跑在独立线程+独立 loop,shutdown 必须经 call_soon_threadsafe
+    # marshal 回 agent 环(server.py docstring 明文不变量)。若日后改直调 ctx.shutdown,上一断言仍绿
+    # 却重引跨线程 bug——此断言堵住该假绿:直调则 scheduled 为空 → 判红。
+    assert loop.scheduled, "必须经 call_soon_threadsafe marshal,不得直调 ctx.shutdown(跨线程承重墙)"
 
 
 def test_no_tag_does_not_trigger(monkeypatch: pytest.MonkeyPatch) -> None:
