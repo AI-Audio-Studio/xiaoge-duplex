@@ -1447,3 +1447,28 @@ launcher 测。8 commit ahead、1 内部 merge(launcher)。
   端到端跑(需真 agent+云/模型);但**无论自退与否,池 kill 都兜底回收**,故非上线阻塞。若日后目标机
   端到端观测到 console 自退不生效,亦无影响(池 kill 已保证)——记备。并发用例全绿、门禁过
   (本支已 rebase 到含部署/启动器/off-fix 的当前 main)。
+
+### 评审组结论(A1-F1,2026-07-09)——**通过,可合入**
+
+事实核验全绿:`_request_graceful_exit`(`server.py:134`)函数体与测试断言逐条吻合;**真实接线已确认(非孤儿
+单测)**——`proxy.py:73` 对真会话上游注 `X-XG-Session` → agent `server.py:85` 读头 → `server.py:130` 断开调
+`_request_graceful_exit` → marshal shutdown,整链存在。3 测判别力覆盖(有标记触发 / 无标记 PC 形态不触发 /
+ctx 缺失·loop 停·loop 缺失安全 no-op)。rebase 干净(0 落后/1 领先)、两处冲突"保留两边"合理。"进程退出供池
+回收"收窄成立——真退出由池 `default_kill`(SIGTERM→等 5s→**SIGKILL 兜底**,`manager.py:292`)保证,不依赖
+agent 自退,与 b_manager/d_integration 一致。
+
+- **一条 watch(非阻塞,记入浸泡门)**:SIGTERM→SIGKILL 的 **5s 窗口 vs 录音 drain 耗时**——高载下若 drain > 5s,
+  回收 SIGKILL 会截断录音收尾。**记入 PR-E · E-2 浸泡验收**(真机 2h 浸泡验 drain 完成 < 5s,端到端,单测不覆盖)。
+- **次要(可不改)**:`_FakeLoop.call_soon_threadsafe` 内联执行 → 未单独隔离"经 loop marshal"与"直接调
+  shutdown";但 loop 门控(loop 未运行→不触发)已验证,可接受。
+
+> 评审组签署(A1-F1):真实接线确认、3 测判别、rebase 干净、池 kill 兜底成立——**通过,可合入**;watch
+> (drain<5s)入浸泡门、marshal 隔离 minor 可不改。评审组只读,未改任何工程文件。
+
+### 设计者应答(A1-F1 评审,2026-07-09)
+
+**接受"通过,可合入"。两条非阻塞项处置:**
+- **drain<5s watch**:采纳,已写入 PR-E · E-2 浸泡验收(真机 2h 浸泡端到端验证 drain 完成 < 5s;单测不覆盖、靠浸泡门兜)。
+- **marshal 隔离 minor**:评审判"可不改",本测 PASS 保留;如需可补"loop 只记不跑→断言 shutdown 未被同步调用"
+  隔离 marshal 路径(offer,待负责人定,不阻塞)。
+- A1-F1 达合入标准,**待负责人授权合入**(评审建议 A1-F1 先合、PR-E 后合)。
