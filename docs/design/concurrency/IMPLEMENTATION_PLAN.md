@@ -1424,3 +1424,74 @@ launcher 测。8 commit ahead、1 内部 merge(launcher)。
 
 > 应答小结:入库建议全采纳;分支已改名 `feat/concurrency-deploy-launcher-ops`、A1 预填 tag
 > `concurrency-deploy-v1`。**待负责人合入(建议 squash)→ 我打 tag + 定稿 A1 + 核删旧支 → 交运维 clone tag。**
+
+---
+
+## A1-F1 收口(#3 优雅退出效力,2026-07-08)——待评审
+
+编码收官后本机可做项。**结论:A1-F1 达标闭环——#3 drain 路径成立、进程退出由池 kill 保证、触发器
+纪律已单测。** 分支 `feat/concurrency-a1f1-exit-efficacy`。
+
+- **机制(看码)**:#3 触发在 `webpanel/server.py::_request_graceful_exit`——网关为真实会话注入
+  `X-XG-Session`,断开时经 agent 循环 `call_soon_threadsafe(ctx.shutdown(...))`。`ctx.shutdown` →
+  `_on_shutdown`(livekit `job.py:655`)→ 在 job/proc 运行时(`job_proc_lazy_main.py:278`)解 `_shutdown_fut`
+  → 跑 **drain(录音收尾等 shutdown 回调)** → 向监督者发 `Exiting`。**console 与 proc 共用此 drain 路径**。
+- **进程退出供池回收 = 池保证,非 agent 自退(A1-F1(b))**:池 `default_kill`(terminate→wait(5)→
+  **SIGKILL 兜底**)在 release/recycle 时确保进程死、端口释放——已由 `b_manager`(真进程 _FAKE_AGENT
+  SIGTERM 兜底)+ `d_integration`(超时/断开→回收换 pid)实测。故 console 是否**自动**退出不阻塞:
+  即便不自退,池也回收。
+- **触发器纪律(新单测,本机)**:`test_ours_concurrency_a1f1_graceful_exit`(3 例)——①有 `X-XG-Session`
+  → 触发 `ctx.shutdown("gateway session ended")`;②**无标记(PC/console 形态头缺失)→ 从不触发**
+  (锁"PC 形态不变");③ctx 缺失 / loop 未运行 → 安全 no-op(不抛)。不依赖真 livekit 运行时。
+- **诚实边界**:真 agent console 下 `ctx.shutdown` 触发后进程是否**自动**退出(而非仅 drain)未在本机
+  端到端跑(需真 agent+云/模型);但**无论自退与否,池 kill 都兜底回收**,故非上线阻塞。若日后目标机
+  端到端观测到 console 自退不生效,亦无影响(池 kill 已保证)——记备。并发用例全绿、门禁过
+  (本支已 rebase 到含部署/启动器/off-fix 的当前 main)。
+
+### 评审组结论(A1-F1,2026-07-09)——**通过,可合入**
+
+事实核验全绿:`_request_graceful_exit`(`server.py:134`)函数体与测试断言逐条吻合;**真实接线已确认(非孤儿
+单测)**——`proxy.py:73` 对真会话上游注 `X-XG-Session` → agent `server.py:85` 读头 → `server.py:130` 断开调
+`_request_graceful_exit` → marshal shutdown,整链存在。3 测判别力覆盖(有标记触发 / 无标记 PC 形态不触发 /
+ctx 缺失·loop 停·loop 缺失安全 no-op)。rebase 干净(0 落后/1 领先)、两处冲突"保留两边"合理。"进程退出供池
+回收"收窄成立——真退出由池 `default_kill`(SIGTERM→等 5s→**SIGKILL 兜底**,`manager.py:292`)保证,不依赖
+agent 自退,与 b_manager/d_integration 一致。
+
+- **一条 watch(非阻塞,记入浸泡门)**:SIGTERM→SIGKILL 的 **5s 窗口 vs 录音 drain 耗时**——高载下若 drain > 5s,
+  回收 SIGKILL 会截断录音收尾。**记入 PR-E · E-2 浸泡验收**(真机 2h 浸泡验 drain 完成 < 5s,端到端,单测不覆盖)。
+- **次要(可不改)**:`_FakeLoop.call_soon_threadsafe` 内联执行 → 未单独隔离"经 loop marshal"与"直接调
+  shutdown";但 loop 门控(loop 未运行→不触发)已验证,可接受。
+
+> 评审组签署(A1-F1):真实接线确认、3 测判别、rebase 干净、池 kill 兜底成立——**通过,可合入**;watch
+> (drain<5s)入浸泡门、marshal 隔离 minor 可不改。评审组只读,未改任何工程文件。
+
+### 设计者应答(A1-F1 评审,2026-07-09)
+
+**接受"通过,可合入"。两条非阻塞项处置:**
+- **drain<5s watch**:采纳,已写入 PR-E · E-2 浸泡验收(真机 2h 浸泡端到端验证 drain 完成 < 5s;单测不覆盖、靠浸泡门兜)。
+- **marshal 隔离 minor**:评审判"可不改",本测 PASS 保留;如需可补"loop 只记不跑→断言 shutdown 未被同步调用"
+  隔离 marshal 路径(offer,待负责人定,不阻塞)。
+- A1-F1 达合入标准,**待负责人授权合入**(评审建议 A1-F1 先合、PR-E 后合)。
+
+### 评审组复评(A1-F1,2026-07-09)——marshal 隔离测改判「建议加」
+
+- **Q1 · marshal 隔离测改判「建议加」(非阻塞)**:初评列"可不改",复核坐实事实后改判——
+  `server.py:331` `start_web_server_thread` = 面板跑在**独立 daemon 线程 + 独立事件循环**(`:308`
+  `panel.web_loop=get_running_loop()`);docstring(`server.py:6`)明文不变量:"web→agent 一切控制经
+  `runtime.agent_loop` 的 `*_threadsafe` marshal,绝不直接 await"。故 `_request_graceful_exit` 在 web 线程跑、
+  `ctx.shutdown` 必须 marshal 回 agent 环——**这条 marshal 是跨线程承重墙,非装饰**。当前 3 测盲区:若改
+  `ctx.shutdown()` 直调,**3 测仍全绿却重引跨线程 bug(假绿)**。锁它仅 1 行(`assert loop.scheduled`):现成
+  `call_soon_threadsafe`→scheduled 非空→绿,直调 refactor→空→红。判别力真实、成本 1 行、锁明文不变量。**倾向加**。
+- **Q2 · 合入顺序——同意**:A1-F1 先合、PR-E 后 rebase。
+- **Q3 · 推送——确认无误**:两分支已核;采纳 Q1(test-only)重跑 3 测绿后再推。
+
+> 评审组签署(A1-F1 复评):marshal 隔离改判"建议加"(锁跨线程承重墙、堵假绿,1 行)、合入顺序同意、
+> 推送放行。评审组只读,未改任何工程代码。
+
+### 设计者应答(A1-F1 复评,2026-07-09)——采纳 Q1
+
+**Q1 采纳(评审的跨线程论据成立)**:面板在独立线程+独立 loop、docstring 明文"必经 marshal",这条 marshal
+确是承重墙;原测有"改直调仍假绿"盲区。已加 1 行 `assert loop.scheduled`("必须经 call_soon_threadsafe marshal,
+不得直调 ctx.shutdown")到 `test_gateway_session_triggers_shutdown`——当前 `call_soon_threadsafe` 令 scheduled
+非空→绿;若改直调→scheduled 空→判红。**3 测重跑全绿、lint 过**(test-only 改动)。**Q2 同意(A1-F1 先合、
+PR-E 后 rebase)、Q3 放行**。A1-F1 现无遗留评审项,待负责人授权合入。
