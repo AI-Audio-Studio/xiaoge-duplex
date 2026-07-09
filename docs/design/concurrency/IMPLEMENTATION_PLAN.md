@@ -1495,3 +1495,71 @@ agent 自退,与 b_manager/d_integration 一致。
 不得直调 ctx.shutdown")到 `test_gateway_session_triggers_shutdown`——当前 `call_soon_threadsafe` 令 scheduled
 非空→绿;若改直调→scheduled 空→判红。**3 测重跑全绿、lint 过**(test-only 改动)。**Q2 同意(A1-F1 先合、
 PR-E 后 rebase)、Q3 放行**。A1-F1 现无遗留评审项,待负责人授权合入。
+
+---
+
+## PR-E:部署后使能与验证方案(/status + 远端 harness + R5 时间戳 + 部署卫生)· 方案(待评审 + 负责人批准)
+
+> **本节是方案(零工程代码)**,过评审 + 负责人批准后才写码。触发:运维已在阿里云 `60.205.197.165`
+> (24C/122G,ulimit 65535,`/data` 6.7TB)部署并验证回填(OPS_CHECKLIST §A–§E,commit `2b00437`/`f292fef`);
+> 机上门 **R4/M3 PASS、pool ready=4、网关 10099 TLS**。运维已答关键待对齐:**`/status` 同意受控暴露(admin
+> token,dev 签发、ops 保管,高优先)**——HTTPS-only 验证的地基由此解锁。
+
+### 背景实测要点(来自回填,方案据此)
+- **服务实跑自 `xiaoge-duplex-main`(zip 版),非 tag 检出 `xiaoge-duplex-v1`(uv sync 后台跑)**——称逻辑一致、未核验。
+- **池管理器仍 nohup、未上 systemd**(网关已上);故 R4 自拉只验网关一半,**池崩不自拉**。
+- **R5 实测坐实**:录音目录名 + timeline 时间戳用**本地时间(CST)**——看码确认:`record_settings.py:83`、
+  `audio_recorder.py:204` 的 `time.strftime('%Y%m%d_%H%M%S')`(无时间参→localtime)、`runtime.py:128` `time.localtime`。
+  NTP 同步正常,但**存储非 UTC**(与 R5"UTC 存储"不符)。
+- 自签证书 + IP 直连(无域名);`XG_ACCESS_CODE` 空(无准入);HMAC 每重启失效;录音无清理策略。
+
+### E-1 · 网关 `/status` 管理面(HTTPS,admin token 受控)—— 主体
+- **端点**:`GET /status`(网关,对外 HTTPS)。**鉴权**:`XG_ADMIN_TOKEN`(dev 签发、ops 保管);请求带
+  `X-Admin-Token`(或 `Authorization: Bearer`);缺/错 → **404**(不暴露端点存在,R6 不泄漏拓扑)。
+- **聚合内容**(网关自采 + 拉池内部控制口 `/status` 聚合):
+  - 池态:`size/ready/assigned/spawning`(现成)+ 转码 `queue_depth/oldest_task_age_s`(现成)。
+  - 资源:**网关主进程** RSS/句柄(psutil,SK-1 正解量主进程)+ 池管理器/agent 树 RSS/进程数(池侧采,信息)。
+  - 会话:活跃/待定(宽限窗)会话数、`held_upstreams`(proxy 持有上游数)。
+  - 录音磁盘:`recordings` 用量 + 可用(池侧采);转码积压趋势。
+  - 时钟:`ntp_synced`、`now_utc`(R5 观测)。运行元:uptime、systemd restart 数(R4 观测)、版本/commit。
+  - R7 监控七项(§11):逐项值 + 越阈标志。
+- **不泄漏拓扑**:只回状态/计数/摘要,不回原始内部端口/进程号/路径。
+- **落地**:池 `control_api /status` 扩录音磁盘 + 资源字段;网关加 `/status`(token 门 + 聚合);均可本机真集成测。
+
+### E-2 · 远端 harness(`--remote`,经 HTTPS 打目标机)
+- `harness/soak.py`(及 probe 复用)加 **`--remote <https-url> --admin-token <tok> [--insecure]`**:不本机 spawn,
+  N 个虚拟用户经 **`wss://60.205.197.165:10099`** 打真网关(自签证书→`--insecure` 放行);客户端采
+  felt_latency/错误率/繁忙率;服务端**轮询网关 `/status`**取资源/池态/转码积压(替代本机 psutil 树采样)。
+- **产出**:目标机 **N 摸底**(阶梯 2→4→8→10,P-9 判据)、真载荷浸泡客户端侧、功能冒烟——全经 HTTPS。
+- 注意:运维回填 `XG_POOL_SPAWN_TIMEOUT_S=240`(agent 冷启慢),摸底/浸泡的 ready 等待与超时需据此放宽。
+
+### E-3 · R5 时间戳"系统时间自适应"(采纳负责人建议)
+- **现状(看码坐实)**:录音目录名/timeline 用 localtime,与 R5"UTC 存储"不符。**先请运维确认实跑一致**
+  (代码为 local,应一致)。
+- **设计**:抽单一时间戳助手(拟 `common/runtime.record_stamp()`),**env 自适应**——`XIAOGE_RECORD_TZ`
+  = `utc` | `local`(建议**默认 `utc`** 满足审计 R5;可设 `local` 保留旧本地口径)。三处调用点
+  (`record_settings`/`audio_recorder`/`runtime` timeline)统一走它。展示层(如面板)按需转本地。
+- **待产品决策**:审计是否**必须 UTC**?默认改 UTC 会变更命名约定(旧录音 local 名、新 UTC 名并存)——可接受否?
+  或默认保 `local`、服务器注入 `utc`(类 M3"注入不依赖默认")。方案倾向后者:**代码默认 local(PC 形态不变)、
+  池 `default_agent_env` 注 `XIAOGE_RECORD_TZ=utc`**——与 §7.2 一贯口径一致、单机行为不变、服务器合规。
+
+### E-4 · 部署卫生(运维动作,写入方案 + OPS_CHECKLIST 跟进)
+1. **服务改跑 tag 版**:待 `xiaoge-duplex-v1` 的 `uv sync` 完成,把服务切到 `xiaoge-duplex-v1`(=tag
+   `concurrency-deploy-v1`)运行,并**核验与 zip 版一致**(`git status`/diff 或校验和);当前跑 zip 版不可长期。
+2. **池上 systemd**:池管理器从 nohup 迁到 `xiaoge-poolmgr.service`(维护窗口,切换期 pool 重建 ~30–60s);
+   之后 R4 自拉覆盖池 + 网关两者(补跑 kill 池 → 自拉验证)。
+
+### 开放决策(方案随附,过评审 + 拍板)
+- **产品**:R5 UTC 是否强制(定 E-3 默认)· HMAC 是否需会话持久(prod 固定 secret)· `XG_ACCESS_CODE` 是否设 ·
+  录音保留期/清理策略(Q5)· 真证书 + 域名(上线)。
+- **运维**:确认录音命名实跑口径 · `/status` admin token 保管/轮换 · SSH 22 是否限源 IP。
+
+### 验收(经 HTTPS / 机上)
+- E-1:本机真集成测(token 门 404、聚合字段);目标机经 HTTPS 读 `/status` 得池态/资源/时钟。
+- E-2:`--remote` 打目标机跑通 N=2 冒烟 + 读 `/status`;再上 N 阶梯摸底。
+- E-3:单测(env=utc→UTC 名、env=local→本地名、默认口径);池注入表加 `XIAOGE_RECORD_TZ=utc` 断言。
+- E-4:运维回填(服务跑 tag 版确认、池 systemd R4 自拉 PASS)。
+
+### 边界
+- 本方案交付后,**上线仍锁五门**(目标机 N 摸底 + B5、真 2h 浸泡、M3、R4/R5/R7、Q5);E 项是"能自动化验证
+  这五门"的使能,非上线本身。**零工程代码,待评审 + 负责人批准后按 E-1..E-4 写码**(各带红→绿测、门禁)。
