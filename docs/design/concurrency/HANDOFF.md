@@ -22,6 +22,10 @@
 
 ## 2. 先读这些(顺序)
 
+**交接范围 = 整个 `docs/design/concurrency/` 文件夹**——R4/R5/R6/R7 门、§7.2 注入表、§11 监控七项、P-9 判据
+都定义在 `CONCURRENCY_DESIGN.md` 内,`README.md` 是索引;**勿只交 PR-E 片段**,否则 R 号/§/P 无处解析。
+打包时**剔除 `GATEWAY_MOBILE_REVIEW.md`**(无关的网关移动端评审,见 §7 末)。
+
 全部在 `docs/design/concurrency/`(先读该目录 [README.md](README.md) 的关系图):
 
 | 顺序 | 文件 | 干嘛的 |
@@ -117,19 +121,40 @@ M5(asr/tts 隐藏 404)· 浸泡 harness(含 SK-1 修)· 部署启动器(`python 
 
 ---
 
-## 7. 立刻该做什么(路线图)
+## 7. 立刻该做什么(执行序 + 决策依赖 + 分工)
 
-1. **推 + 合两条已过分支**:push a1f1 + PR-E → 负责人授权 → **A1-F1 先合、PR-E rebase 后合**。
-2. **PR-E 编码**(负责人批准后,按 E-1→E-2→E-3→E-4,各先红后绿 + 门禁):
-   - **先 E-1 `/status`**(地基)→ 再 E-2 `--remote`(能经 HTTPS 打目标机)。
-3. **切服务到 tag 版 + 池上 systemd**(E-4,运维动作,写进 OPS_CHECKLIST 跟进)——之后 R4/M3/R5 回填才算数。
-4. **经 HTTPS 做目标机验证**:N=2→4→8→10 摸底(客户端 KPI + `/status` 资源)、真 2h 浸泡、R5(注 `utc` 后)、
-   R7 接入。
-5. **过五门 → 负责人授权上线**。上线前还需产品/运维拍**开放决策**(§8)。
-6. **(并行/另议)网关移动端问题**:见 [GATEWAY_MOBILE_REVIEW.md](GATEWAY_MOBILE_REVIEW.md) 的 GW-1~GW-4——
-   **GW-1 是真安全口子**(准入口令挡不住 `/ws/audio` 无 cookie 路,任意脚本可拿一路会话);GW-2/GW-3(移动
-   静默掉线下会话立不住 / REATTACH 名存实亡)、GW-4(`clients/PROTOCOL.md` 未同步 wire 契约)。**须网关侧 +
-   需求方先出结论**;Android SDK 方案见 `docs/project/ANDROID_SDK_PLAN.md`。
+> 本节采纳评审组 2026-07-09"交接说明"——不改方案实质,只把"照着做"的排序/依赖显式化,避免返工。
+
+**第 0 步 · 推 + 合两条已过分支**:push a1f1 + PR-E → 负责人授权 → **A1-F1 先合、PR-E rebase 后合**。
+
+**执行序(⚠️ 必须先做 E-4.1,否则量的是未核验产物、数据不作数)**:
+1. **E-4.1 先行(运维)**:把服务从 zip 版(`xiaoge-duplex-main`)**切到 tag `concurrency-deploy-v1` + 核验等价**
+   (`git status`/diff 或校验和)。**在此之前,R4/M3/R5 回填与任何 E-2 远端摸底数据都不作数**。
+2. **E-4.2(运维)**:池管理器上 systemd(补 R4 池侧自拉;当前只有网关上了 systemd)。
+3. **E-1(`/status`,研发)** → **E-2(`--remote` 摸底/浸泡,研发)** → **E-3(R5 时间戳,研发)**;
+   **E-1 是 E-2 远端采样的前置**(远端读服务端资源/池态靠 `/status`)。各带先红后绿测 + 门禁。
+4. **经 HTTPS 做目标机验证**:N=2→4→8→10 摸底(客户端 KPI + `/status` 资源)、真 2h 浸泡(含 drain<5s)、
+   R5(注 `utc` 后)、R7 接入。
+5. **过五门 → 负责人授权上线**。
+
+**决策依赖(先要来再定稿——见 §8):**
+| E 项 | 卡在哪个开放决策 | 不定的后果 |
+| --- | --- | --- |
+| **E-1 定稿** | `/status` **admin token 保管/轮换**(运维) | token 无归属 → 端点无法安全暴露 → E-1 落不了地 |
+| **E-3 默认** | **R5 是否强制 UTC**(产品) | 默认 tz 未定 → `record_stamp()` 与注入 `XIAOGE_RECORD_TZ` 口径悬空 |
+| **上线(非本期)** | HMAC 持久 · `XG_ACCESS_CODE` · Q5 保留期 · 真证书+域名 · SSH 限源 | 属上线门入参,**不阻塞 E 编码** |
+
+**分工**:**E-1/E-2/E-3 = 研发写码**(各先红后绿测 + 门禁);**E-4 = 运维动作**(tag 切换、systemd),研发驱动、
+运维执行回填。
+
+**边界重申**:方案通过 ≠ 编码放行(仍需负责人批准);**合入 ≠ 上线,上线仍锁五门**(目标机 N 摸底 + B5、真 2h
+浸泡、M3、R4/R5/R7、Q5)。
+
+> **另一条线(不在本期 E 范围)**:[GATEWAY_MOBILE_REVIEW.md](GATEWAY_MOBILE_REVIEW.md) 的 GW-1~GW-4 是**网关面向
+> 移动/Android 客户端**的评审(GW-1 是真安全口子:准入口令挡不住 `/ws/audio` 无 cookie 路;GW-2/GW-3 移动静默
+> 掉线下会话立不住 / REATTACH 名存实亡;GW-4 `clients/PROTOCOL.md` 未同步 wire 契约)——**须网关侧 + 需求方先出
+> 结论**,Android 方案见 `docs/project/ANDROID_SDK_PLAN.md`。**它与并发上线正交,打包并发交接时剔除**(但接手人
+> 应知其存在)。
 
 ---
 
