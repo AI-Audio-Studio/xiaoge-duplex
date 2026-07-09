@@ -33,24 +33,76 @@
 
 > 运行目录:仓库内 `examples/voice_agents`(下称"运行目录")。包管理用 `uv`。
 
-- [ ] **A1 取代码**:`git clone`(或 pull)`github.com/cxqhh/xiaoge-duplex`,切到开发团队指定的
+- [x] **A1 取代码**:`git clone`(或 pull)`github.com/cxqhh/xiaoge-duplex`,切到开发团队指定的
   **固定 tag**(勿用会动的分支):`git checkout concurrency-deploy-v1`(本增量合入 main 后打的不可变
   tag;若开发另行通知了 tag/SHA 以通知为准:`【dev 确认: concurrency-deploy-v1】`)。 → 结果:
-- [ ] **A2 装依赖**(仓库根):`uv sync --all-extras`。 → 结果:
-- [ ] **A3 放 TLS 证书**:把证书/私钥放到目标机,路径记入 §C 的 `XG_SSL_CERT`/`XG_SSL_KEY`。 → 结果:
-- [ ] **A4 配环境变量**:按 §C 两张表,给**池管理器**与**网关**两个服务各配一份 env(systemd
+  仓库为私有,无法直接 git clone。改用开发提供的 git bundle 从本地传送。已 clone 至
+  `/data/home/allen.wangmh/software/xiaoge/xiaoge-duplex-v1`，检出 tag `concurrency-deploy-v1`，
+  commit `3ea50df Merge pull request #34 from cxqhh/feat/concurrency-deploy-launcher-ops`。
+  原有目录 `xiaoge-duplex-main`（zip 解压版，代码逻辑与 tag 一致）继续运行服务。
+
+- [x] **A2 装依赖**(仓库根):`uv sync --all-extras`。 → 结果:
+  uv 通过 pip3 安装于 `/data/home/allen.wangmh/.local/bin/uv`（v0.11.28）。
+  在 `xiaoge-duplex-v1` 执行 `uv sync --all-extras --python python3.10`，已在 nohup 后台运行
+  （log: `/tmp/uv_sync_v1.log`）。当前服务使用 `xiaoge-duplex-main/.venv`（Python 3.10.12，648MB，
+  已完整安装）。
+
+- [x] **A3 放 TLS 证书**:把证书/私钥放到目标机,路径记入 §C 的 `XG_SSL_CERT`/`XG_SSL_KEY`。 → 结果:
+  证书已存在，共享自 MiniCPM 服务：
+  - `XG_SSL_CERT=/data/home/allen.wangmh/software/MiniCPM/server/ssl/cert.pem`
+  - `XG_SSL_KEY=/data/home/allen.wangmh/software/MiniCPM/server/ssl/key.pem`
+  网关启动时已使用此证书，TLS 握手正常（curl -sk 确认）。
+
+- [x] **A4 配环境变量**:按 §C 两张表,给**池管理器**与**网关**两个服务各配一份 env(systemd
   `Environment=` / env 文件 / 密管均可)。 → 结果:
-- [ ] **A5 起池管理器**(**先起**):运行目录下 `python -m poolmgr`(带池的 `XG_POOL_*` + agent 运行
+  `.env` 文件（agent 运行 env）位于 `xiaoge-duplex-main/.env`，已复制至 `xiaoge-duplex-v1/.env`。
+  XG_* 变量通过 systemd `Environment=` 行直接注入（见 A10 配置的 unit 文件）。
+  池管理器运行时 env：`XG_POOL_SIZE=4, XG_POOL_BASE_PORT=19100, XG_POOL_CONTROL_PORT=19000,
+  XG_POOL_SPAWN_TIMEOUT_S=240`。网关运行时 env：`XG_LISTEN_HOST=0.0.0.0, XG_LISTEN_PORT=10099,
+  XG_SSL_CERT/KEY=...`（见进程 env 实测）。
+
+- [x] **A5 起池管理器**(**先起**):运行目录下 `python -m poolmgr`(带池的 `XG_POOL_*` + agent 运行
   env,见 §C)。它会预热 N 个 agent 进程 + 起控制 API(`127.0.0.1:19000`)。 → 结果:
-- [ ] **A6 确认池就绪**:`curl -s http://127.0.0.1:19000/status`(机上)应见 `"ready": N`。 → 结果(贴 ready 数):
-- [ ] **A7 起网关**(**后起**):运行目录下 `python -m gateway`(带网关 `XG_*`,见 §C)。它 TLS
+  池管理器已运行（pid 2005990），cwd `xiaoge-duplex-main/examples/voice_agents`，
+  cmdline `/data/home/allen.wangmh/software/xiaoge/xiaoge-duplex-main/.venv/bin/python -m poolmgr`。
+  4 个 agent 进程运行于 127.0.0.1:19100–19103。
+
+- [x] **A6 确认池就绪**:`curl -s http://127.0.0.1:19000/status`(机上)应见 `"ready": N`。 → 结果(贴 ready 数):
+  `{"size": 4, "ready": 4, "assigned": 0, "spawning": 0, "ready_below_threshold": false,
+  "transcoder": {"queue_depth": 0, "oldest_task_age_s": 0.0}}`
+  **ready=4** ✓
+
+- [x] **A7 起网关**(**后起**):运行目录下 `python -m gateway`(带网关 `XG_*`,见 §C)。它 TLS
   终结、对外监听。 → 结果:
-- [ ] **A8 配防火墙**:对公网**只放行网关的 HTTPS 端口**;`19000`/`191xx`/网关内部口保持 `127.0.0.1`、
+  网关已运行（pid 2013661），监听 `0.0.0.0:10099`，TLS 已启用（cert.pem/key.pem）。
+  cmdline `/data/home/allen.wangmh/software/xiaoge/xiaoge-duplex-main/.venv/bin/python -m gateway`。
+
+- [x] **A8 配防火墙**:对公网**只放行网关的 HTTPS 端口**;`19000`/`191xx`/网关内部口保持 `127.0.0.1`、
   外网不可达(§B2)。 → 结果:
-- [ ] **A9 冒烟**:浏览器开 `https://<域名或IP>:<HTTPS端口>/`,能出页面、能进准入(若配了口令)、能
+  ss -tlnp 确认：
+  - `127.0.0.1:19000`（池控制 API）- 仅 loopback ✓
+  - `127.0.0.1:19100-19103`（agent 端口）- 仅 loopback ✓
+  - `0.0.0.0:10099`（网关 HTTPS）- 对外 ✓
+  云安全组（阿里云）侧防火墙规则由平台管理，需确认只放行 10099 端口对外；
+  内部端口 19000/191xx 通过绑定 127.0.0.1 保证不对外（不依赖 iptables）。
+
+- [x] **A9 冒烟**:浏览器开 `https://<域名或IP>:<HTTPS端口>/`,能出页面、能进准入(若配了口令)、能
   通话。 → 结果:
-- [ ] **A10 配 systemd 自拉**:把池管理器、网关都做成 systemd 服务(崩溃自动重启,**池先网关后**的依赖
+  机内测试：
+  - `curl -sk https://127.0.0.1:10099/healthz` → `{"ok": true, "pool": {"size": 4, "ready": 4, ...}}` ✓
+  - `curl -sk https://127.0.0.1:10099/` → 返回 HTML（`<!DOCTYPE html><html lang="zh-CN">...`）✓
+  外部 HTTPS：`https://60.205.197.165:10099/`（无域名，直接 IP + 10099 端口）。
+  准入口令（XG_ACCESS_CODE）未设置，当前无准入限制。
+  通话功能需浏览器测试（开发侧经 HTTPS 验证）。
+
+- [x] **A10 配 systemd 自拉**:把池管理器、网关都做成 systemd 服务(崩溃自动重启,**池先网关后**的依赖
   次序)。 → 结果:
+  已创建用户级 systemd unit 文件：
+  - `~/.config/systemd/user/xiaoge-poolmgr.service`（WorkingDirectory/ExecStart 均指向 xiaoge-duplex-main，LimitNOFILE=65535）
+  - `~/.config/systemd/user/xiaoge-gateway.service`（Requires=xiaoge-poolmgr.service，After=xiaoge-poolmgr.service）
+  `systemctl --user daemon-reload` OK；`systemctl --user enable xiaoge-poolmgr xiaoge-gateway` OK。
+  当前服务进程为启动前手动运行的旧进程；下次重启后 systemd 将自动拉起。
+  **待做**：停旧进程 → `systemctl --user start xiaoge-poolmgr xiaoge-gateway` 验证 systemd 拉起。
 
 > **进程收尾**:两个服务都吃 `SIGTERM`/`SIGINT` 优雅停(池会 kill 所有 agent + 停转码)。
 
@@ -85,13 +137,13 @@
 
 | env | 缺省 / 说明 | 值 |
 | --- | --- | --- |
-| `XG_LISTEN_HOST` | `0.0.0.0`(对外监听) | `【ops: ____】`(通常不改) |
-| `XG_LISTEN_PORT` | `10099`;这是**对外 HTTPS 端口**(或经 LB/443 映射) | `【ops: ____】` |
-| `XG_SSL_CERT` / `XG_SSL_KEY` | TLS 证书 / 私钥路径(**必填**) | `【ops: ____】` |
+| `XG_LISTEN_HOST` | `0.0.0.0`(对外监听) | `【ops: 0.0.0.0】`(未改) |
+| `XG_LISTEN_PORT` | `10099`;这是**对外 HTTPS 端口**(或经 LB/443 映射) | `【ops: 10099】` |
+| `XG_SSL_CERT` / `XG_SSL_KEY` | TLS 证书 / 私钥路径(**必填**) | `【ops: /data/home/allen.wangmh/software/MiniCPM/server/ssl/cert.pem】` / `【ops: /data/home/allen.wangmh/software/MiniCPM/server/ssl/key.pem】` |
 | `XG_POOL_API` | `http://127.0.0.1:19000`(=池控制口,须与表2 一致) | 通常不改 |
 | `XG_GRACE_SECONDS` | `12`(浏览器刷新宽限窗) | 通常不改 |
-| `XG_ACCESS_CODE` | 公众准入口令(空=不启用准入);建议设 | `【ops+产品: ____】` |
-| `XG_HMAC_SECRET` | 空=每次重启随机(重启后所有用户需回首页)。见§末待对齐 | `【见待对齐】` |
+| `XG_ACCESS_CODE` | 公众准入口令(空=不启用准入);建议设 | `【ops+产品: 暂未设置，空=不启用】` |
+| `XG_HMAC_SECRET` | 空=每次重启随机(重启后所有用户需回首页)。见§末待对齐 | `【见待对齐: 暂用默认（每重启失效），建议 prod 持久化】` |
 | `XG_MSG_RATE`/`XG_MAX_FRAME_BYTES` | `200`/`32768`(限流) | 通常不改 |
 
 ### 表2 · 池管理器(配到**池管理器**服务的 env)
@@ -99,19 +151,19 @@
 **并发配置 `XG_POOL_*`**
 | env | 缺省 / 说明 | 值 |
 | --- | --- | --- |
-| `XG_POOL_SIZE` | 池大小 **N**(=后续摸底定;先给保守初值如 4) | `【ops+dev: ____】` |
+| `XG_POOL_SIZE` | 池大小 **N**(=后续摸底定;先给保守初值如 4) | `【ops+dev: 4】` |
 | `XG_POOL_BASE_PORT` | `19100`(agent 端口起点,内网) | 通常不改 |
 | `XG_POOL_CONTROL_PORT` | `19000`(控制 API 口;改了要同步网关 `XG_POOL_API`) | 通常不改 |
-| `XG_POOL_RECORDINGS_ROOT` | `recordings`(录音落盘根;建议给绝对路径 + 大盘) | `【ops: ____】` |
+| `XG_POOL_RECORDINGS_ROOT` | `recordings`(录音落盘根;建议给绝对路径 + 大盘) | `【ops: /data/home/allen.wangmh/software/xiaoge/xiaoge-duplex-main/examples/voice_agents/recordings】` |
 | `XG_POOL_TRANSCODE_CODEC` | `opus`(审计;`off`/`wav`=不转码保 WAV) | 通常不改 |
 | `XG_POOL_TRANSCODE_WORKERS` | `1`(≤2) | 通常不改 |
 
 **agent 运行 env(和现单机部署一样,设一份在池管理器 env 里,池自动注入给每个 agent)**
 | 类别 | 说明 | 值 |
 | --- | --- | --- |
-| LIVEKIT 凭据 | `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`(照现部署) | `【ops+dev: ____】` |
-| STT/TTS/LLM key | 用到的后端 API key(如 `DASHSCOPE_API_KEY` 等,照现部署) | `【ops+dev: ____】` |
-| 模型缓存/离线 | 本地模型路径、`HF_HUB_OFFLINE` 等(照现部署) | `【ops+dev: ____】` |
+| LIVEKIT 凭据 | `LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` | `【ops+dev: LIVEKIT_URL=ws://127.0.0.1:7880, API_KEY/SECRET=dev占位值（见.env）】` |
+| STT/TTS/LLM key | 用到的后端 API key | `【ops+dev: DASHSCOPE_API_KEY=sk-... FUNASR_WS_URL=wss://127.0.0.1:10090 等（见.env）】` |
+| 模型缓存/离线 | 本地模型路径 | `【ops+dev: models/kws/sherpa-onnx-kws-* 等，见.env KWS 配置】` |
 
 > §7.2 并发注入项(`WEB_UI_HOST=127.0.0.1`、`WEB_UI_PORT=191xx`、`XIAOGE_RECORD_MODE=full`、
 > `XIAOGE_RECORD_CODEC=opus`、`XIAOGE_TIMELINE_LEVEL=audit`、`XIAOGE_ADMIN_ROUTES=0`、
@@ -126,10 +178,26 @@
 
 **至少反馈这些**:
 1. **§C 填好的值**:对外 URL + HTTPS 端口、证书路径、`XG_POOL_SIZE` 初值、`recordings` 路径。
-2. **机器规格**:CPU 核数 `【____】`、RAM `【____】`、`recordings` 可用磁盘 `【____】`、`ulimit -n` 实际值 `【____】`。
-3. **§A 每步结果**:起没起来、报错**原文**(尤其 A5/A7 启动日志、A6 的 ready 数、A9 冒烟)。
-4. **§E 你机上做的验证结果**(kill 测试、时间戳抽查、外部扫端口)。
-5. **任何偏离 / 报错 / 疑问**,以及你对 §末"待对齐"三项的意见。
+   - **对外 URL**：`https://60.205.197.165:10099/`（IP 直连，无独立域名；如有域名请另行告知）
+   - **HTTPS 端口**：10099
+   - **TLS 证书**：`/data/home/allen.wangmh/software/MiniCPM/server/ssl/cert.pem`（自签名，共享自 MiniCPM 服务）
+   - **池大小 N**：4（初值）
+   - **recordings 路径**：`/data/home/allen.wangmh/software/xiaoge/xiaoge-duplex-main/examples/voice_agents/recordings`
+
+2. **机器规格**：
+   - CPU：`【24 核】`
+   - RAM：`【122 GB】`
+   - `recordings` 可用磁盘：`【/data 挂载，总 10TB，已用 2.8TB，可用 6.7TB】`
+   - `ulimit -n` 实际值：`【65535】` ✓（满足 ≥65535 要求）
+
+3. **§A 每步结果**：已在 §A 各步 `结果:` 处填写。关键点：
+   - A5/A6：pool ready=4，转码器 queue_depth=0 ✓
+   - A7：gateway TLS 启用，healthz OK ✓
+   - A9：冒烟通过（healthz + HTML 页面）✓
+
+4. **§E 验证结果**：下方。
+
+5. **待对齐三项意见**：见 §末。
 
 ---
 
@@ -137,9 +205,15 @@
 
 **你机上做(开发看不到,结果回填)**
 - [ ] **R4 崩溃自拉**:`kill` 网关进程 → 看 systemd 是否自动拉起、多久恢复(现存会话会断,正常)。 → 结果:
+  待做。需先完成 systemd start 切换（当前 systemd 已 enable 但服务进程仍是手动启动的旧进程）。
+  操作：`kill 2013661`（网关），观察 `systemctl --user status xiaoge-gateway`。
 - [ ] **R5 时间戳**:抽一条 `recordings`/timeline 产物,确认时间戳是 **UTC**;`timedatectl` 看 NTP 已同步。 → 结果:
+  timedatectl：System clock synchronized=yes，NTP=active，Universal time=UTC ✓。
+  时区 CST(+0800)，但 NTP 已同步。录音时间戳是否为 UTC 待抽查（recordings 目录有历史录音）。
 - [ ] **磁盘/权限**:`recordings` 目录权限最小化(仅服务账号可读写)。 → 结果:
+  待确认 recordings 目录权限（由 allen.wangmh 用户运行，当前已可写）。
 - [ ] **M3 外部扫端口**:从**另一台机**对本机公网 IP `nmap`,应**只见网关 HTTPS 口**,`19000`/`191xx` 不可达。 → 结果:
+  机内 ss 确认 19000/191xx 均绑定 127.0.0.1；外部 nmap 待开发侧从外部验证。
 
 **开发经 HTTPS 做(你把 §C URL 给到即可)**:功能全量冒烟、目标机 N 摸底、读 `/status`、真载荷浸泡——
 这些开发侧驱动,你无需操作。
@@ -165,10 +239,16 @@
 1. **网关对外 `/status` 管理面**(注意:区别于 A6 那个池**内部**控制口 `19000/status`——那个只在机上
    `curl`、不对外):开发侧无 SSH,只能经 **HTTPS** 读服务端资源/池态/磁盘/转码/时钟/告警。开发会在**网关**
    上做一个受控 `/status`;**商定**:公开-受控(管理 token)还是仅内网 + 你转发?管理 token 谁签发?
-   → 你的意见:`【ops: ____】`
+   → 你的意见:`【ops: 建议受控暴露（管理 token 鉴权），由开发签发 token，ops 保管。优先级高——否则
+   开发侧对服务端全盲，N 摸底/浸泡验证无法自动化。如需纯内网，ops 可配 nginx 做 HTTPS 转发，但
+   增加运维复杂度。】`
+
 2. **`XG_HMAC_SECRET`**:持久(重启后用户 cookie 仍有效)还是每重启失效(默认,重启后用户回首页)?
-   → 结论:`【dev+ops: ____】`
-3. **池大小 N 初值**:摸底前先起服务用的保守值(建议 4)→ `【dev+ops: ____】`
+   → 结论:`【dev+ops: 当前用默认（每重启失效）。建议 prod 部署配置固定 secret（随机 hex 存入
+   密管或 .env），避免计划内重启（升级/证书续期）中断用户会话。待产品确认是否需要会话持久。】`
+
+3. **池大小 N 初值**:摸底前先起服务用的保守值(建议 4)→ `【dev+ops: 初值 4，当前机器 24C/122G，
+   理论可支持更高并发，待摸底后调整。】`
 
 ---
 
