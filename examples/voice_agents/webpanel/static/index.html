@@ -120,7 +120,12 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
 <!-- 隐藏状态镜像 + 配置控件(暂从界面移除,保留以维持 JS 现状,后续可放回面板) -->
 <div class="sbar">
   <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbVoice"></span><span id="sbMsgs"></span>
-  <!--BACKEND_TABS-->
+  <button id="tabFunasr" class="asr-tab"></button>
+  <button id="tabQwen3" class="asr-tab"></button>
+  <button id="tabQwen3Stream" class="asr-tab"></button>
+  <button id="tabTtsQwen" class="asr-tab"></button>
+  <button id="tabTtsCosy" class="asr-tab"></button>
+  <button id="tabTtsHttp" class="asr-tab"></button>
 </div>
 <script>
 var ws=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null, serverBusy=false;
@@ -140,8 +145,9 @@ function conn(){
     sysMsg('已连接到语音助手');
     if(rt){clearTimeout(rt);rt=null;}
   };
-  ws.onclose = function(){
+  ws.onclose = function(e){
     stConn=false; updateStatus();
+    if(e.code===4001){location.reload();return;}
     if(serverBusy) return;
     sysMsg('连接断开，5 秒后重连…');
     rt = setTimeout(conn, 5000);

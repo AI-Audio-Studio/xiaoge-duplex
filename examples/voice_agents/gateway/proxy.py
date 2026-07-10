@@ -165,13 +165,16 @@ class Proxy:
         self, client_ws: aiohttp.web.WebSocketResponse, session: af.Session
     ) -> None:
         """反代 /ws 状态通道:简单双向泵(**无宽限窗**——状态通道无独立于页面的复用语义,
-        任一端断即收)。"""
+        任一端断即收)。断开后对 IDLE 会话调 on_state_disconnect → sweep 回收槽位。"""
+        sid = session.session_id
         sess = await self._client()
         try:
             up = await sess.ws_connect(f"http://127.0.0.1:{session.port}/ws", heartbeat=30)
         except Exception:
             await client_ws.close(code=1011, message=b"upstream unavailable")
+            self._table.on_state_disconnect(sid)
             return
+        self._table.on_state_connect(sid)  # 状态连接建立:清零 idle 计时
 
         async def _pump(src: Any, dst: Any) -> None:
             with contextlib.suppress(Exception):
@@ -185,11 +188,14 @@ class Proxy:
 
         c2u = asyncio.create_task(_pump(client_ws, up))
         u2c = asyncio.create_task(_pump(up, client_ws))
-        await asyncio.wait({c2u, u2c}, return_when=asyncio.FIRST_COMPLETED)
-        for t in (c2u, u2c):
-            t.cancel()
-        with contextlib.suppress(Exception):
-            await up.close()
+        try:
+            await asyncio.wait({c2u, u2c}, return_when=asyncio.FIRST_COMPLETED)
+            for t in (c2u, u2c):
+                t.cancel()
+            with contextlib.suppress(Exception):
+                await up.close()
+        finally:
+            self._table.on_state_disconnect(sid)  # CancelledError 时也必须执行,否则 state_idle_since 停在 0.0 永不 sweep
 
     # ── HTTP 反代(POST /api/*)─────────────────────────────────────────────────
     async def proxy_http(

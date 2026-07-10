@@ -63,6 +63,9 @@ class Session:
     # 活跃 /ws/audio 连接的 conn_id 集合(双标签页检测 R3 = 非空即拒;C-1:唯有登记过 conn_id
     # 的连接才能 disconnect,被拒连接拿不到 conn_id → 无法误递减错杀真会话)。
     audio_conns: set[str] = field(default_factory=set)
+    # IDLE 泄漏防护:状态通道(/ws)最后断开的时刻;0.0=未断过或已有活跃状态连接。
+    # sweep_expired 用此判断 IDLE 会话是否超过宽限窗——不改变 state,不入 PENDING_DISCONNECT。
+    state_idle_since: float = 0.0
 
 
 class AffinityTable:
@@ -79,7 +82,14 @@ class AffinityTable:
         self, session_id: str, proc_id: str, port: int, *, browser: bool = True
     ) -> Session:
         """池 alloc 后登记新会话(IDLE)。browser=False 为协议客户端(规则3):断开即杀不入宽限窗。"""
-        s = Session(session_id=session_id, proc_id=proc_id, port=port, state=IDLE, browser=browser)
+        s = Session(
+            session_id=session_id,
+            proc_id=proc_id,
+            port=port,
+            state=IDLE,
+            browser=browser,
+            state_idle_since=0.0,  # 0.0 = 从未连接/从未断开,不触发 sweep;on_state_disconnect 首次调用后才开始计时
+        )
         with self._lock:
             self._sessions[session_id] = s
         return s
@@ -135,14 +145,38 @@ class AffinityTable:
             s.state = PENDING_DISCONNECT
             s.grace_deadline = self._clock() + (self._grace if s.browser else 0.0)
 
+    def on_state_connect(self, session_id: str) -> None:
+        """状态通道(/ws)建立:清零 state_idle_since(连接活跃期不计入 IDLE 泄漏计时)。"""
+        with self._lock:
+            s = self._sessions.get(session_id)
+            if s is not None:
+                s.state_idle_since = 0.0
+
+    def on_state_disconnect(self, session_id: str) -> None:
+        """状态通道(/ws)断开:若会话仍 IDLE(音频从未连接) → 记录断开时刻(state_idle_since),
+        由 sweep_expired 在宽限窗超时后回收——**不立即转 PENDING**,让浏览器 5 s 内重连走
+        REATTACH 路径(T2)而非打到已 CLOSED 会话(D-07: 协议客户端 deadline=now 不变)。
+        有音频的会话由 on_audio_disconnect 主导,此处直接忽略。"""
+        with self._lock:
+            s = self._sessions.get(session_id)
+            if s is None or s.state != IDLE:
+                return
+            s.state_idle_since = self._clock()
+
     def sweep_expired(self) -> list[Session]:
-        """宽限窗超时的 PENDING → CLOSED 并移出表,返回需网关 release+关上游的会话。"""
+        """宽限窗超时的 PENDING → CLOSED 并移出表,返回需网关 release+关上游的会话。
+        同时回收 IDLE 会话:状态通道断开超过宽限窗时间(state_idle_since > 0 且超期)→ CLOSED。"""
         now = self._clock()
         with self._lock:
             expired = [
                 s
                 for s in self._sessions.values()
-                if s.state == PENDING_DISCONNECT and now >= s.grace_deadline
+                if (s.state == PENDING_DISCONNECT and now >= s.grace_deadline)
+                or (
+                    s.state == IDLE
+                    and s.state_idle_since > 0.0
+                    and now - s.state_idle_since >= self._grace
+                )
             ]
             for s in expired:
                 s.state = CLOSED
