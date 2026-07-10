@@ -165,7 +165,21 @@ def _posix_readchar() -> str:
     import tty
 
     fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except termios.error as exc:
+        import errno as _errno
+
+        if exc.args[0] not in (_errno.ENOTTY, _errno.EINVAL):
+            raise  # fd 无效/权限不足等真实错误,不应静默吞掉
+        # stdin 不是 TTY(后台进程 /dev/null)。带超时轮询而非永久阻塞,
+        # 确保 SIGTERM 在主线程或非主线程均可打断(每 1s 返回一次让信号检查)。
+        import threading as _threading
+
+        _stop = _threading.Event()
+        while not _stop.wait(timeout=1.0):
+            pass
+        return ""  # unreachable
     term = termios.tcgetattr(fd)
     try:
         term[3] &= ~(termios.ICANON | termios.ECHO)

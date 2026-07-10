@@ -274,7 +274,11 @@ def default_spawn(proc_id: str, port: int) -> subprocess.Popen[bytes]:
     env = dict(os.environ)
     env.update(default_agent_env(proc_id, port, metrics_dir=agent_dir.parents[1] / ".run"))
     return subprocess.Popen(  # noqa: S603
-        [sys.executable, "web_ui_agent.py", "console"], cwd=str(agent_dir), env=env
+        [sys.executable, "web_ui_agent.py", "console"]
+        + __import__("shlex").split(os.environ.get("XIAOGE_AGENT_CONSOLE_ARGS", "")),
+        cwd=str(agent_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,  # no TTY in background; prevents EBADF in keyboard thread
     )
 
 
