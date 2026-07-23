@@ -21,12 +21,19 @@ async def _ws_broadcast(data: str) -> None:
         panel.ws_clients.discard(ws)
 
 
+# 转写类消息同步发给 /ws/audio 客户端(嵌入式/SDK 形态只连音频通道也能拿到字幕)。
+_AUDIO_FORWARD_TYPES = frozenset({"user_partial", "message"})
+
+
 def broadcast(msg: dict) -> None:
     """Thread-safe broadcast from any thread to all WebSocket clients."""
     loop = panel.web_loop
     if loop is None or not loop.is_running():
         return
-    asyncio.run_coroutine_threadsafe(_ws_broadcast(json.dumps(msg, ensure_ascii=False)), loop)
+    data = json.dumps(msg, ensure_ascii=False)
+    asyncio.run_coroutine_threadsafe(_ws_broadcast(data), loop)
+    if msg.get("type") in _AUDIO_FORWARD_TYPES and panel.audio_ws_clients:
+        asyncio.run_coroutine_threadsafe(_ws_audio_ctrl_broadcast(data), loop)
 
 
 async def _ws_audio_broadcast(data: bytes) -> None:

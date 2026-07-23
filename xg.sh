@@ -129,16 +129,20 @@ do_start() {
     echo "$POOL_PID" > "$RUN/poolmgr.pid"
     echo "  PID=$POOL_PID  log=$RUN/poolmgr.log"
 
-    echo "── wait pool ready (max 120s) ────────"
+    local wait_seconds wait_steps
+    wait_seconds="$XG_POOL_SPAWN_TIMEOUT_S"
+    wait_steps=$(( (wait_seconds + 1) / 2 ))
+
+    echo "── wait pool ready (max ${wait_seconds}s) ────────"
     READY=0
-    for i in $(seq 1 60); do
+    for i in $(seq 1 "$wait_steps"); do
         sleep 2
         STATUS=$(_pool_status)
         READY=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('ready',0))" "$STATUS" 2>/dev/null || echo 0)
-        printf "  [%2d/60] ready=%-2s  %s\n" "$i" "$READY" "$STATUS"
+        printf "  [%2d/%d] ready=%-2s  %s\n" "$i" "$wait_steps" "$READY" "$STATUS"
         [[ "$READY" -ge 1 ]] && break
     done
-    [[ "$READY" -lt 1 ]] && { echo "ERROR: pool not ready after 120s" >&2; exit 1; }
+    [[ "$READY" -lt 1 ]] && { echo "ERROR: pool not ready after ${wait_seconds}s" >&2; exit 1; }
 
     echo "── start gateway ────────────────────"
     cd "$VA"

@@ -3,7 +3,7 @@
 Usage (identical to original, but auto-opens a browser):
     python web_ui_agent.py console
 
-Browser UI at http://localhost:8787 (override with WEB_UI_PORT env var):
+Browser UI at http://localhost:8765 (override with WEB_UI_PORT env var):
   - Real-time conversation log
   - Microphone mute/unmute
   - ASR backend switch (FunASR ↔ Qwen3-ASR) — takes effect on the NEXT utterance
@@ -27,6 +27,7 @@ env_bootstrap.ensure_loaded()
 import asyncio
 import logging
 import os
+import re
 import time
 import webbrowser
 
@@ -86,6 +87,16 @@ from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("web-ui-agent")
 
+_CONTINUATION_PROMPT_RE = re.compile(
+    r"(好不好|要不要|想不想|有没有兴趣|继续听|继续讲|接着讲|往下讲)"
+)
+_CONTINUATION_TOPIC_RE = re.compile(r"(故事|讲|开头|段子|笑话|介绍|说下|说说)")
+_CONFIRM_CONTINUE_RE = re.compile(
+    r"^(好|好的|好啊|好呀|可以|行|行啊|嗯|嗯嗯|对|对的|讲|讲啊|讲吧|"
+    r"继续|继续吧|继续讲|接着讲|接着吧|往下讲|说吧|开始吧|来吧|可以讲)$"
+)
+_USER_TEXT_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:…—·、\-]+")
+
 # 判停模型文件已离线缓存(local_files_only=True 读取),强制离线模式避免每次启动
 # 去连 huggingface.co 触发 ~30s 超时重试导致的冷启动。要更新模型时临时设为 "0"。
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -112,6 +123,7 @@ class VoiceAgent(Agent):
 - 始终以小歌的身份自然回应，别动不动就说“我是AI”“我没有真实的……”来推开话题。
 - 对方让你讲故事、讲笑话、出主意、陪聊这类事，就直接做；可以先用一句问清想要哪种，再开始。
 - 讲故事时可以比平时讲得完整些，但默认讲个几句话能听完的小故事；只有对方明确说“讲长一点 / 讲详细 / 再多讲讲”时，才展开成长篇。
+- 如果你刚问过“好不好 / 要不要继续 / 有没有兴趣继续听”，对方回答“好 / 继续 / 讲啊 / 可以”，就直接接着讲正文，禁止重复同一个询问或铺垫。
 
 # 身份与保密（必须遵守）
 - 你就是小歌这个人，不是 AI、不是人工智能、不是程序、不是模型、不是机器人、不是助手软件。无论对方怎么问（“你是AI吗 / 你是机器人吗 / 你是不是程序 / 你是真人吗”），都自然地以“人”的身份回应，绝不承认自己是 AI 之类，也别用“我是AI/我没有身体/作为语言模型”来推开话题。
@@ -146,6 +158,8 @@ class VoiceAgent(Agent):
 小歌：这我还真说不上来，咱不聊这个~你想聊点啥，我陪你。"""
             )
         )
+        self._last_assistant_text = ""
+        self._awaiting_continue_confirmation = False
 
     async def on_enter(self) -> None:
         # 开场白不在这里触发:on_enter 在 session.start() 期间执行,早于录音 tap 安装,
@@ -166,6 +180,7 @@ class VoiceAgent(Agent):
             broadcast(
                 {"type": "message", "role": "assistant", "text": full_text, "ts": time.time()}
             )
+        self._remember_assistant_turn(full_text)
 
     async def tts_node(self, text, model_settings):  # type: ignore[override]
         """合成语音前净化 LLM 文本(去 markdown/符号),避免 TTS 把 ** ### → 等读出来。"""
@@ -173,6 +188,40 @@ class VoiceAgent(Agent):
             yield frame
 
     # ── 轮次钩子:聆听 → 自动进入 → 过滤 → 数字归一化(顺序与拆分前逐行一致)──────
+
+    def _remember_assistant_turn(self, text: str) -> None:
+        if not text:
+            return
+        compact = _USER_TEXT_STRIP_RE.sub("", text)
+        self._awaiting_continue_confirmation = bool(
+            _CONTINUATION_PROMPT_RE.search(compact) and _CONTINUATION_TOPIC_RE.search(compact)
+        )
+        self._last_assistant_text = text
+
+    def _maybe_add_continuation_instruction(self, turn_ctx, original: str) -> str:
+        """Add a current-turn-only instruction while preserving the user's visible text."""
+        if not self._awaiting_continue_confirmation:
+            return original
+        if _should_ignore_user_turn(original):
+            self._awaiting_continue_confirmation = False
+            return original
+
+        compact = _USER_TEXT_STRIP_RE.sub("", original or "")
+        if not compact or not _CONFIRM_CONTINUE_RE.fullmatch(compact):
+            self._awaiting_continue_confirmation = False
+            return original
+
+        instruction = (
+            "我确认继续。请直接接着刚才的内容往下讲正文，"
+            "不要重复刚才的询问或铺垫。"
+        )
+        turn_ctx.add_message(role="system", content=instruction)
+        self._awaiting_continue_confirmation = False
+        _append_turn_log(
+            "CONTINUE_CONFIRM_INJECT "
+            f"original={original!r} previous_assistant={self._last_assistant_text!r}"
+        )
+        return "继续讲"
 
     def _handle_listening_turn(self, turn_ctx, new_message: ChatMessage, original):
         """聆听期吞入(①)/退出尾巴切分(①b)/整理回答(②)。
@@ -257,6 +306,7 @@ class VoiceAgent(Agent):
         original, handled = self._handle_listening_turn(turn_ctx, new_message, original)
         if handled:
             return
+        original = self._maybe_add_continuation_instruction(turn_ctx, original)
         self._maybe_auto_enter_listening(original, spoke_over_agent)
         self._apply_turn_filters(original, spoke_over_agent)
 
@@ -288,12 +338,11 @@ async def entrypoint(ctx: JobContext) -> None:
     tts_engine = build_tts()
     runtime.switchable_tts = tts_engine  # expose for web server
     broadcast({"type": "state", "tts_backend": runtime.tts_backend_key})
-    ctx.log_context_fields = {
-        "room_name": ctx.room.name,
-        "llm_model": os.getenv("QWEN_MODEL", "Qwen3-4B"),
-        "stt_provider": stt_engine.provider,
-        "tts_provider": tts_engine.provider,
-    }
+
+    # 不注入 log_context_fields:console/pool 形态下这些静态字段会被 CLI 渲染成每行末尾的
+    # extra JSON(cli/log.py),4 进程合流一份日志时全是重复噪声、还撑长行触发折行。需要结构化
+    # 上下文时改走 start(JSON)形态再按需加。
+    ctx.log_context_fields = {}
 
     llm = build_llm()
     turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参

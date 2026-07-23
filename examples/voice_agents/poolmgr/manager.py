@@ -43,6 +43,9 @@ def default_agent_env(
         "XIAOGE_RECORD_CODEC": "opus",
         "XIAOGE_TIMELINE_LEVEL": "audit",
         "XIAOGE_ADMIN_ROUTES": "0",  # M5/D-19:asr/tts 显式隐藏(不依赖代码默认,防 shell 环境泄漏)
+        # console 默认 DEBUG,会把 livekit 的 tts/llm 帧级 DEBUG 全刷进合流日志;我们自己的
+        # 轮次日志都是 INFO,故拉到 INFO 即可保留诊断、砍掉帧噪声。要排障时临时设 DEBUG。
+        "LIVEKIT_LOG_LEVEL": os.getenv("LIVEKIT_LOG_LEVEL", "INFO"),
     }
     if metrics_dir is not None:
         env["TURN_METRICS_LOG"] = str(metrics_dir / f"turn_metrics_{proc_id}.log")

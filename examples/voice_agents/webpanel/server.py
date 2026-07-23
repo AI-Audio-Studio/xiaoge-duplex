@@ -59,7 +59,10 @@ async def _send_busy_and_close(ws: aiohttp.web.WebSocketResponse) -> None:
 
 
 async def _handle_index(request: aiohttp.web.Request) -> aiohttp.web.Response:
-    if WEB_AUDIO:
+    # The gateway already enforces affinity and double-tab exclusion. Direct/local access
+    # has no trusted marker, so it retains the original busy guard.
+    gateway_session = request.headers.get("X-XG-Session")
+    if WEB_AUDIO and not gateway_session:
         primary = panel.ws_primary_client
         audio_primary = panel.audio_ws_primary_client
         if (primary is not None and not primary.closed) or (
@@ -148,24 +151,37 @@ def _request_graceful_exit(session_tag: str | None) -> None:
 async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketResponse:
     ws = aiohttp.web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
+    gateway_session = request.headers.get("X-XG-Session")
     lock = panel.connection_lock
+    old_state_ws = None
     if WEB_AUDIO and lock is not None:
         async with lock:
             if (
-                panel.ws_primary_client is not None
-                and not panel.ws_primary_client.closed
-                or panel.audio_ws_primary_client is not None
+                not gateway_session
+                and panel.audio_ws_primary_client is not None
                 and not panel.audio_ws_primary_client.closed
             ):
-                logger.info("state WS rejected: server busy")
+                logger.info("state WS rejected: audio in progress")
                 await _send_busy_and_close(ws)
                 return ws
+            old_state_ws = (
+                panel.ws_primary_client
+                if panel.ws_primary_client is not None and not panel.ws_primary_client.closed
+                else None
+            )
+            if old_state_ws is not None:
+                panel.ws_clients.discard(old_state_ws)
             panel.ws_primary_client = ws
             panel.ws_clients.add(ws)
     else:
         if WEB_AUDIO:
             panel.ws_primary_client = ws
         panel.ws_clients.add(ws)
+    if old_state_ws is not None:
+        try:
+            await old_state_ws.close(code=aiohttp.WSCloseCode.GOING_AWAY)
+        except Exception:
+            pass
 
     # Push current state immediately on connect
     stt = runtime.switchable_stt

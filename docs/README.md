@@ -9,6 +9,7 @@
 | --- | --- |
 | [guide/RUN.md](guide/RUN.md) | 本地构建 / 启动 / 关闭 / 配置管理 |
 | [guide/ARCHITECTURE.md](guide/ARCHITECTURE.md) | 系统架构总览与一轮对话生命周期（配 [diagrams/](diagrams/)） |
+| [guide/CLIENT_INTEGRATION.md](guide/CLIENT_INTEGRATION.md) | 云侧对接指南（自研协议客户端：WS 端点 / 音频参数 / 消息协议 / 关闭码 / 认证现状） |
 
 ## 设计 & 评审 · [design/](design/)
 按特性分组，每个特性的设计 / 评审 / 重构放在同一子目录。

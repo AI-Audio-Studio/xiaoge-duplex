@@ -169,7 +169,11 @@ class Proxy:
         sid = session.session_id
         sess = await self._client()
         try:
-            up = await sess.ws_connect(f"http://127.0.0.1:{session.port}/ws", heartbeat=30)
+            up = await sess.ws_connect(
+                f"http://127.0.0.1:{session.port}/ws",
+                headers={"X-XG-Session": session.session_id},
+                heartbeat=30,
+            )
         except Exception:
             await client_ws.close(code=1011, message=b"upstream unavailable")
             self._table.on_state_disconnect(sid)
@@ -205,6 +209,8 @@ class Proxy:
         sess = await self._client()
         url = f"http://127.0.0.1:{session.port}{request.rel_url}"
         fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+        # Never trust a client-supplied affinity marker; overwrite it after authentication.
+        fwd["X-XG-Session"] = session.session_id
         body = await request.read()
         async with sess.request(request.method, url, data=body, headers=fwd) as up:
             data = await up.read()
