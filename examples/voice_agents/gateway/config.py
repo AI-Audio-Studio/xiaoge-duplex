@@ -25,6 +25,13 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.getenv(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class GatewayConfig:
     listen_host: str = "0.0.0.0"  # 对外(公网);内部进程仍绑 127.0.0.1(池管理器注入)
@@ -37,6 +44,16 @@ class GatewayConfig:
     hmac_secret: str = field(default="")  # 空 → 进程内随机(重启失效,R4)
     msg_rate_per_s: float = 200.0  # 每连接消息速率上限(R6)
     max_frame_bytes: int = 32_768  # 单帧大小上限(R6)
+    # apikey 准入(协议客户端/模式A):有效集合 = DB(sys_api_key,status='0') ∪ 静态列表。
+    # required=1 强制(缺/错拒);=0 兼容/观察(恒放行,仅日志)。DB 空各字段=不查库。
+    api_key_required: bool = False
+    api_keys_static: str = ""  # 逗号分隔的静态补充/兜底 key(可空)
+    api_key_db_host: str = ""
+    api_key_db_port: int = 3306
+    api_key_db_user: str = ""
+    api_key_db_password: str = ""
+    api_key_db_name: str = ""
+    api_key_refresh_sec: float = 60.0  # 后台刷新有效集合的周期
 
     @classmethod
     def from_env(cls) -> GatewayConfig:
@@ -51,6 +68,14 @@ class GatewayConfig:
             hmac_secret=os.getenv("XG_HMAC_SECRET", "").strip() or secrets.token_hex(16),
             msg_rate_per_s=_env_float("XG_MSG_RATE", 200.0),
             max_frame_bytes=_env_int("XG_MAX_FRAME_BYTES", 32_768),
+            api_key_required=_env_bool("XG_API_KEY_REQUIRED", False),
+            api_keys_static=os.getenv("XG_API_KEYS", "").strip(),
+            api_key_db_host=os.getenv("XG_API_KEY_DB_HOST", "").strip(),
+            api_key_db_port=_env_int("XG_API_KEY_DB_PORT", 3306),
+            api_key_db_user=os.getenv("XG_API_KEY_DB_USER", "").strip(),
+            api_key_db_password=os.getenv("XG_API_KEY_DB_PASSWORD", ""),
+            api_key_db_name=os.getenv("XG_API_KEY_DB_NAME", "").strip(),
+            api_key_refresh_sec=_env_float("XG_API_KEY_REFRESH_SEC", 60.0),
         )
 
     @property
@@ -60,3 +85,11 @@ class GatewayConfig:
     @property
     def access_required(self) -> bool:
         return bool(self.access_code)
+
+    @property
+    def api_key_db_enabled(self) -> bool:
+        return bool(self.api_key_db_host and self.api_key_db_name and self.api_key_db_user)
+
+    @property
+    def api_keys_static_set(self) -> frozenset[str]:
+        return frozenset(k.strip() for k in self.api_keys_static.split(",") if k.strip())

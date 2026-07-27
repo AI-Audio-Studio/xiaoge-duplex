@@ -19,6 +19,7 @@
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
 | 服务器并发改造 | **[design/concurrency/](design/concurrency/README.md) 子目录索引(先读)** —— 汇总 5 个文件(规格 v4 / 实施方案 / 实施前评审 / 摸底实测 / 评审存档)+ 关系图 + 维护规则;第一门已过,待负责人批准第二门,零代码 |
+| 指令控制 & apikey 鉴权 | [design/command-auth/COMMAND_AUTH_DESIGN.md](design/command-auth/COMMAND_AUTH_DESIGN.md)(简单版:apikey 请求头鉴权 + command 指令下发/回执协议) |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |

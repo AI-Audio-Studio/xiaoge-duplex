@@ -21,6 +21,7 @@ _AGENT_DIR = Path(__file__).resolve().parents[1] / "examples" / "voice_agents"
 sys.path.insert(0, str(_AGENT_DIR))
 
 from gateway import affinity as af, main as gwmain  # noqa: E402
+from gateway.apikey import ApiKeyStore  # noqa: E402
 from gateway.config import GatewayConfig  # noqa: E402
 from gateway.proxy import Proxy  # noqa: E402
 
@@ -51,7 +52,8 @@ def _mk(
 ) -> tuple[aiohttp.web.Application, af.AffinityTable, Proxy]:
     table = af.AffinityTable(grace_seconds=grace, secret=config.hmac_secret)
     proxy = Proxy(config, table)
-    app = gwmain.build_gateway_app(config, table, proxy, pool)  # type: ignore[arg-type]
+    apikeys = ApiKeyStore(config)  # 默认 required=False → 兼容模式恒放行,不影响既有断言
+    app = gwmain.build_gateway_app(config, table, proxy, pool, apikeys)  # type: ignore[arg-type]
     return app, table, proxy
 
 
@@ -70,19 +72,36 @@ def _dead_port() -> int:
     return port
 
 
+def _fake_agent_http_app(body: str = "<html>PANEL</html>") -> aiohttp.web.Application:
+    """假 agent HTTP 面板:任意路径返回固定 HTML —— 供反代根路由(GET /)集成测取回上游页。"""
+
+    async def any_path(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        return aiohttp.web.Response(text=body, content_type="text/html")
+
+    app = aiohttp.web.Application()
+    app.router.add_route("*", "/{tail:.*}", any_path)
+    return app
+
+
 # ── 规则1:GET / 分配 / 繁忙 / 刷新 ────────────────────────────────────────────
 def test_root_allocs_and_sets_cookie() -> None:
     async def _main() -> None:
+        agent = TestServer(_fake_agent_http_app("<html>PANEL</html>"))
+        await agent.start_server()
         cfg = GatewayConfig(hmac_secret="s")
-        pool = _FakePool([{"session_id": "sess1", "proc_id": "p1", "port": 19100}])
-        app, _, _ = _mk(cfg, pool)
-        async with TestClient(TestServer(app)) as cli:
-            r = await cli.get("/")
-            assert r.status == 200
-            assert gwmain.COOKIE in r.cookies  # 种亲和 cookie(规则1)
-            assert "小歌" in await r.text()
-            setck = "; ".join(r.headers.getall("Set-Cookie", []))  # R6②:cookie 属性
-            assert "HttpOnly" in setck and "SameSite=Strict" in setck
+        pool = _FakePool([{"session_id": "sess1", "proc_id": "p1", "port": agent.port}])
+        app, _, proxy = _mk(cfg, pool)
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                r = await cli.get("/")
+                assert r.status == 200
+                assert gwmain.COOKIE in r.cookies  # 种亲和 cookie(规则1)
+                assert "PANEL" in await r.text()  # 反代取回上游 agent 面板
+                setck = "; ".join(r.headers.getall("Set-Cookie", []))  # R6②:cookie 属性
+                assert "HttpOnly" in setck and "SameSite=Strict" in setck
+        finally:
+            await proxy.aclose()
+            await agent.close()
 
     _run(_main())
 
@@ -101,31 +120,44 @@ def test_root_busy_when_pool_full() -> None:
 
 def test_root_refresh_with_cookie_does_not_realloc() -> None:
     async def _main() -> None:
+        agent = TestServer(_fake_agent_http_app("<html>PANEL</html>"))
+        await agent.start_server()
         cfg = GatewayConfig(hmac_secret="s")
         pool = _FakePool([{"session_id": "sess1", "proc_id": "p1", "port": 19100}])
-        app, table, _ = _mk(cfg, pool)
-        table.register("sess1", "p1", 19100)  # 已有会话
+        app, table, proxy = _mk(cfg, pool)
+        table.register("sess1", "p1", agent.port)  # 已有会话,端口指向假 agent
         cookie = table.cookie_for("sess1")
-        async with TestClient(TestServer(app)) as cli:
-            r = await cli.get("/", cookies={gwmain.COOKIE: cookie})
-            assert r.status == 200  # 刷新回页,不重分配
-            assert len(pool._seats) == 1  # 池未被再分配(规则2:两通道不分家)
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                r = await cli.get("/", cookies={gwmain.COOKIE: cookie})
+                assert r.status == 200 and "PANEL" in await r.text()  # 刷新反代回页,不重分配
+                assert len(pool._seats) == 1  # 池未被再分配(规则2:两通道不分家)
+        finally:
+            await proxy.aclose()
+            await agent.close()
 
     _run(_main())
 
 
-def test_root_double_tab_page(monkeypatch: Any = None) -> None:
-    """规则6 页级:同 cookie 会话已有活跃音频连接 → 返回'另一窗口通话'提示页。"""
+def test_root_refresh_allowed_even_with_active_audio() -> None:
+    """规则6(docstring 6):根页面允许刷新——双标签页拒绝下移到 WS 层。同 cookie 会话即便
+    已有活跃音频连接,GET / 仍反代回页(200),不返回页级 409。"""
 
     async def _main() -> None:
+        agent = TestServer(_fake_agent_http_app("<html>PANEL</html>"))
+        await agent.start_server()
         cfg = GatewayConfig(hmac_secret="s")
-        app, table, _ = _mk(cfg, _FakePool([]))
-        table.register("sess1", "p1", 19100)
+        app, table, proxy = _mk(cfg, _FakePool([]))
+        table.register("sess1", "p1", agent.port)
         table.on_audio_connect("sess1")  # 变 ACTIVE + 有活跃音频连接
         cookie = table.cookie_for("sess1")
-        async with TestClient(TestServer(app)) as cli:
-            r = await cli.get("/", cookies={gwmain.COOKIE: cookie})
-            assert r.status == 409 and "另一窗口" in await r.text()
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                r = await cli.get("/", cookies={gwmain.COOKIE: cookie})
+                assert r.status == 200 and "PANEL" in await r.text()  # 允许刷新,不落 409
+        finally:
+            await proxy.aclose()
+            await agent.close()
 
     _run(_main())
 
@@ -133,21 +165,27 @@ def test_root_double_tab_page(monkeypatch: Any = None) -> None:
 # ── Q6 准入(D-18)──────────────────────────────────────────────────────────────
 def test_access_gate_blocks_without_code() -> None:
     async def _main() -> None:
+        agent = TestServer(_fake_agent_http_app("<html>PANEL</html>"))
+        await agent.start_server()
         cfg = GatewayConfig(hmac_secret="s", access_code="letmein")
-        pool = _FakePool([{"session_id": "s1", "proc_id": "p1", "port": 19100}])
-        app, _, _ = _mk(cfg, pool)
-        async with TestClient(TestServer(app)) as cli:
-            r = await cli.get("/")
-            assert r.status == 401 and "口令" in await r.text()  # 准入门
-            assert len(pool._seats) == 1  # 未分配(准入前置于 alloc)
-            # 错误口令 → 仍 401,不泄漏拓扑
-            bad = await cli.post("/access", data={"code": "nope"})
-            assert bad.status == 401
-            # 正确口令 → 种准入 cookie,随后放行分配
-            ok = await cli.post("/access", data={"code": "letmein"}, allow_redirects=False)
-            assert ok.status == 302 and gwmain.ACCESS_COOKIE in ok.cookies
-            r2 = await cli.get("/")  # 客户端已带准入 cookie
-            assert r2.status == 200 and gwmain.COOKIE in r2.cookies
+        pool = _FakePool([{"session_id": "s1", "proc_id": "p1", "port": agent.port}])
+        app, _, proxy = _mk(cfg, pool)
+        try:
+            async with TestClient(TestServer(app)) as cli:
+                r = await cli.get("/")
+                assert r.status == 401 and "口令" in await r.text()  # 准入门
+                assert len(pool._seats) == 1  # 未分配(准入前置于 alloc)
+                # 错误口令 → 仍 401,不泄漏拓扑
+                bad = await cli.post("/access", data={"code": "nope"})
+                assert bad.status == 401
+                # 正确口令 → 种准入 cookie,随后放行分配
+                ok = await cli.post("/access", data={"code": "letmein"}, allow_redirects=False)
+                assert ok.status == 302 and gwmain.ACCESS_COOKIE in ok.cookies
+                r2 = await cli.get("/")  # 客户端已带准入 cookie → 分配 + 反代回页
+                assert r2.status == 200 and gwmain.COOKIE in r2.cookies
+        finally:
+            await proxy.aclose()
+            await agent.close()
 
     _run(_main())
 
@@ -193,6 +231,43 @@ def test_ws_audio_invalid_cookie_rejected() -> None:
             ws = await cli.ws_connect("/ws/audio", headers={"Cookie": f"{gwmain.COOKIE}=bogus"})
             msg = await ws.receive()
             assert msg.type == aiohttp.WSMsgType.CLOSE and ws.close_code == 4001
+            await ws.close()
+
+    _run(_main())
+
+
+# ── apikey 准入(模式A):required=1 强制;缺/错拒 4401,命中放行 ──────────────────
+def test_ws_audio_apikey_missing_rejected_4401() -> None:
+    """required=1 且无 cookie(模式A):不带 apikey → 4401,且未触达 pool.alloc()。"""
+
+    async def _main() -> None:
+        cfg = GatewayConfig(hmac_secret="s", api_key_required=True, api_keys_static="sk-good")
+        pool = _FakePool([{"session_id": "s1", "proc_id": "p1", "port": 19100}])
+        app, _, _ = _mk(cfg, pool)
+        async with TestClient(TestServer(app)) as cli:
+            ws = await cli.ws_connect("/ws/audio")  # 无 cookie、无 apikey
+            first = await ws.receive()  # 关闭前先下发错误文本帧
+            assert first.type == aiohttp.WSMsgType.TEXT and '"code":1001' in first.data
+            close = await ws.receive()
+            assert close.type == aiohttp.WSMsgType.CLOSE and ws.close_code == 4401
+            assert len(pool._seats) == 1  # 校验前置于 alloc,未占座
+            await ws.close()
+
+    _run(_main())
+
+
+def test_ws_audio_apikey_valid_passes_gate() -> None:
+    """required=1:带命中 apikey 通过准入门 → 继续 alloc(空池 → 1013 busy,非 4401),证明放行。"""
+
+    async def _main() -> None:
+        cfg = GatewayConfig(hmac_secret="s", api_key_required=True, api_keys_static="sk-good")
+        app, _, _ = _mk(cfg, _FakePool([]))  # 空池:过门后 alloc 返回 None → busy
+        async with TestClient(TestServer(app)) as cli:
+            ws = await cli.ws_connect("/ws/audio", headers={"X-API-Key": "sk-good"})
+            first = await ws.receive()  # 过门后池满 → busy 文本帧,而非 1001 鉴权失败
+            assert first.type == aiohttp.WSMsgType.TEXT and first.data == '{"type":"busy"}'
+            close = await ws.receive()
+            assert close.type == aiohttp.WSMsgType.CLOSE and ws.close_code == 1013  # 过门 → 池满
             await ws.close()
 
     _run(_main())
@@ -263,14 +338,16 @@ def test_upstream_fail_releases_session_not_leak_or_lock() -> None:
 
     async def _main() -> None:
         cfg = GatewayConfig(hmac_secret="s")
-        pool = _FakePool([{"session_id": "s1", "proc_id": "p1", "port": _dead_port()}])
+        pool = _FakePool([])  # 会话直接登记(端口无人监听),不经反代根路由
         app, table, proxy = _mk(cfg, pool, grace=0.1)  # 小宽限窗,便于快速验 release
+        table.register("s1", "p1", _dead_port())  # 端口此刻无人监听 → /ws/audio 上游连不上
+        cookie = table.cookie_for("s1")
         sweep = asyncio.create_task(gwmain._sweep_loop(table, proxy, pool, interval=0.03))
         try:
             async with TestClient(TestServer(app)) as cli:
-                r = await cli.get("/")  # 浏览器分配 + 种 cookie(TestClient 自动存)
-                assert r.status == 200 and gwmain.COOKIE in r.cookies
-                ws = await cli.ws_connect("/ws/audio")  # 携 cookie → FRESH → 上游连不上
+                ws = await cli.ws_connect(  # 携 cookie → FRESH → 上游连不上
+                    "/ws/audio", headers={"Cookie": f"{gwmain.COOKIE}={cookie}"}
+                )
                 msg = await ws.receive()
                 assert msg.type == aiohttp.WSMsgType.CLOSE  # 网关回 1011 关闭
                 with contextlib.suppress(Exception):
@@ -282,9 +359,7 @@ def test_upstream_fail_releases_session_not_leak_or_lock() -> None:
                     await asyncio.sleep(0.02)
                 assert "s1" in pool.released  # 已 release(未泄漏)
                 assert table.get("s1") is None  # 已移出表(未永停 ACTIVE)
-                # cookie 未锁死:再 GET / 不落"另一窗口通话"页(会话已清、按新用户走繁忙/分配)
-                r2 = await cli.get("/")
-                assert "另一窗口" not in await r2.text()
+                assert table.resolve(cookie) is None  # cookie 不再命中(未锁死用户)
         finally:
             sweep.cancel()
             with contextlib.suppress(asyncio.CancelledError):

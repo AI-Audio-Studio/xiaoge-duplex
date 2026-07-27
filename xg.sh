@@ -40,6 +40,21 @@ _setup_env() {
     export XG_GRACE_SECONDS="${XG_GRACE_SECONDS:-12}"
     export XG_POOL_SIZE="${XG_POOL_SIZE:-4}"
     export XG_POOL_SPAWN_TIMEOUT_S="${XG_POOL_SPAWN_TIMEOUT_S:-240}"
+    # apikey 准入(模式A/协议客户端):有效集合 = DB(sys_api_key,status='0') ∪ 静态列表。
+    # required=0 兼容/观察(恒放行仅日志),=1 强制(缺/错拒)。非敏感 DB 参数走 .env。
+    export XG_API_KEY_REQUIRED="${XG_API_KEY_REQUIRED:-0}"
+    export XG_API_KEYS="${XG_API_KEYS:-}"
+    export XG_API_KEY_DB_HOST="${XG_API_KEY_DB_HOST:-}"
+    export XG_API_KEY_DB_PORT="${XG_API_KEY_DB_PORT:-3306}"
+    export XG_API_KEY_DB_USER="${XG_API_KEY_DB_USER:-}"
+    export XG_API_KEY_DB_PASSWORD="${XG_API_KEY_DB_PASSWORD:-}"
+    export XG_API_KEY_DB_NAME="${XG_API_KEY_DB_NAME:-}"
+    export XG_API_KEY_REFRESH_SEC="${XG_API_KEY_REFRESH_SEC:-60}"
+    # DB 口令可能含 # / 空格,_load_env 会在 # 处截断且删空格;故口令从独立文件整行读取
+    # ($BASE/.xg_db_password,权限 600,勿提交)。已由环境显式注入则不覆盖。
+    if [[ -z "$XG_API_KEY_DB_PASSWORD" && -f "$BASE/.xg_db_password" ]]; then
+        export XG_API_KEY_DB_PASSWORD="$(head -n1 "$BASE/.xg_db_password" | tr -d '\r\n')"
+    fi
     # 服务器无麦克风,agent 用文字模式(实际音频走 WEB_AUDIO /ws/audio);本地有麦克风留空即可
     export XIAOGE_AGENT_CONSOLE_ARGS="${XIAOGE_AGENT_CONSOLE_ARGS:---text}"
     export PYTHONUTF8=1

@@ -7,7 +7,7 @@
 3. `GET /ws/audio` 无 cookie = 协议客户端:直接分配;池满回 WS busy(即断即杀,无宽限窗)。
 4. `GET /ws` 无 cookie:明确拒绝(4001)。
 5. 宽限窗(D-16):由 proxy 持有上游 + 本模块 sweep 循环驱动超时收尾。
-6. 双标签页(R3):同 cookie 已有活跃音频 → 提示页 / WS 拒绝。
+6. 双标签页(R3):根页面允许刷新;同 cookie 已有活跃音频时由 WS 层拒绝第二路音频。
 
 安全(§6.2):`/api/*` 白名单(mic/asr/tts,余 404);亲和 cookie Secure+HttpOnly+SameSite=Strict;
 每连接帧大小+速率上限(proxy);错误响应不泄漏内部拓扑。
@@ -26,6 +26,7 @@ from typing import Any
 import aiohttp.web as web
 
 from gateway import affinity as af
+from gateway.apikey import ApiKeyStore
 from gateway.config import GatewayConfig
 from gateway.pool_client import PoolClient
 from gateway.proxy import Proxy
@@ -45,7 +46,6 @@ _BUSY_HTML = (  # 规则1 池满:静态繁忙页 + 自动重试(不依赖 WS 内
     _PAGE + "<h3>当前繁忙</h3><p>座位已满,正在重试…</p>"
     "<script>setTimeout(()=>location.reload(),5000)</script>"
 )
-_DOUBLE_TAB_HTML = _PAGE + "<h3>已在另一窗口通话</h3><p>请关闭其它标签页后重试。</p>"
 _ACCESS_HTML = (  # D-18 最低准入表单
     _PAGE + "<h3>请输入访问口令</h3>"
     "<form method=post action=/access><input name=code type=password autofocus>"
@@ -81,26 +81,30 @@ class _Router:
     """六路由规则的处理器集合(持 config/table/proxy/pool,便于 TestClient 集成测)。"""
 
     def __init__(
-        self, config: GatewayConfig, table: af.AffinityTable, proxy: Proxy, pool: PoolClient
+        self,
+        config: GatewayConfig,
+        table: af.AffinityTable,
+        proxy: Proxy,
+        pool: PoolClient,
+        apikeys: ApiKeyStore,
     ) -> None:
         self._cfg = config
         self._table = table
         self._proxy = proxy
         self._pool = pool
+        self._apikeys = apikeys
 
     async def root(self, request: web.Request) -> web.Response:  # 规则1 / 6
         if not _access_ok(request, self._cfg):  # Q6 准入前置(D-18)
             return _html(_ACCESS_HTML, status=401)
         session = self._table.resolve(request.cookies.get(COOKIE, ""))
         if session is not None:  # 已有会话(刷新)——不重分配(规则2:两通道永不分家)
-            if session.state == af.ACTIVE and session.audio_conns:  # 规则6:双标签页
-                return _html(_DOUBLE_TAB_HTML, status=409)
-            return _html(_ENTRY_HTML)
+            return await self._proxy.proxy_http(request, session)
         info = await self._pool.alloc()  # 新用户 → 分配
         if info is None:  # 池满 → 繁忙页(规则1)
             return _html(_BUSY_HTML, status=503)
-        self._table.register(info["session_id"], info["proc_id"], info["port"])
-        resp = _html(_ENTRY_HTML)
+        session = self._table.register(info["session_id"], info["proc_id"], info["port"])
+        resp = await self._proxy.proxy_http(request, session)
         _set_affinity_cookie(resp, self._table.cookie_for(info["session_id"]) or "", self._cfg)
         return resp
 
@@ -129,7 +133,13 @@ class _Router:
             if session is None:  # 规则2:cookie 无效/进程亡 → 强制回页
                 await ws.close(code=4001, message=b"affinity-lost")
                 return ws
-        else:  # 规则3:协议客户端,直接分配(共池)
+        else:  # 规则3:协议客户端(模式A),apikey 准入 → 直接分配(共池)
+            presented = request.headers.get("X-API-Key") or request.query.get("apikey")
+            if not self._apikeys.authorize(presented):
+                with contextlib.suppress(Exception):
+                    await ws.send_str('{"type":"error","code":1001,"message":"auth failed"}')
+                await ws.close(code=4401, message=b"unauthorized")
+                return ws
             info = await self._pool.alloc()
             if info is None:  # 池满 → WS busy(PROTOCOL 语义)
                 with contextlib.suppress(Exception):
@@ -177,10 +187,14 @@ class _Router:
 
 
 def build_gateway_app(
-    config: GatewayConfig, table: af.AffinityTable, proxy: Proxy, pool: PoolClient
+    config: GatewayConfig,
+    table: af.AffinityTable,
+    proxy: Proxy,
+    pool: PoolClient,
+    apikeys: ApiKeyStore,
 ) -> web.Application:
     """装配路由(与启动/ TLS 解耦,便于 TestClient 集成测)。"""
-    r = _Router(config, table, proxy, pool)
+    r = _Router(config, table, proxy, pool, apikeys)
     app = web.Application()
     app.router.add_get("/", r.root)
     app.router.add_post("/access", r.access)
@@ -205,17 +219,21 @@ async def _sweep_loop(
             logger.exception("sweep iteration failed")
 
 
-def _build_components(config: GatewayConfig) -> tuple[af.AffinityTable, Proxy, PoolClient]:
+def _build_components(
+    config: GatewayConfig,
+) -> tuple[af.AffinityTable, Proxy, PoolClient, ApiKeyStore]:
     table = af.AffinityTable(grace_seconds=config.grace_seconds, secret=config.hmac_secret)
     proxy = Proxy(config, table)
     pool = PoolClient(config.pool_api)
-    return table, proxy, pool
+    apikeys = ApiKeyStore(config)
+    return table, proxy, pool, apikeys
 
 
 async def run_gateway(config: GatewayConfig) -> None:
     """启动网关:装配 app + sweep 循环 + TLS 终结,常驻直到取消。"""
-    table, proxy, pool = _build_components(config)
-    app = build_gateway_app(config, table, proxy, pool)
+    table, proxy, pool, apikeys = _build_components(config)
+    await apikeys.refresh()  # 启动即载一次有效集合(失败保留空快照,由刷新循环补齐)
+    app = build_gateway_app(config, table, proxy, pool, apikeys)
     runner = web.AppRunner(app)
     await runner.setup()
     ssl_ctx: ssl.SSLContext | None = None
@@ -227,12 +245,14 @@ async def run_gateway(config: GatewayConfig) -> None:
     scheme = "https" if config.tls_enabled else "http"
     logger.info("gateway listening on %s://%s:%d", scheme, config.listen_host, config.listen_port)
     sweep = asyncio.create_task(_sweep_loop(table, proxy, pool))
+    refresh = asyncio.create_task(apikeys.run_refresh_loop())  # apikey 有效集合后台刷新
     try:
         await asyncio.Event().wait()  # 常驻
     finally:
-        sweep.cancel()
-        with contextlib.suppress(Exception):
-            await sweep
+        for task in (sweep, refresh):
+            task.cancel()
+            with contextlib.suppress(Exception):
+                await task
         await proxy.aclose()
         await pool.close()
         await runner.cleanup()

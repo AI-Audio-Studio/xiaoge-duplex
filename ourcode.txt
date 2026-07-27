@@ -21,6 +21,7 @@ examples/voice_agents/poolmgr/launcher.py
 examples/voice_agents/poolmgr/__main__.py
 examples/voice_agents/gateway/__init__.py
 examples/voice_agents/gateway/config.py
+examples/voice_agents/gateway/apikey.py
 examples/voice_agents/gateway/affinity.py
 examples/voice_agents/gateway/pool_client.py
 examples/voice_agents/gateway/proxy.py
