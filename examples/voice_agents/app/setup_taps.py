@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from audio_recorder import AudioRecorder
+from common.qa_log import QAPairLog
 from common.runtime import append_turn_log as _log, ms as _ms
 from common.text_rules import (
     LEADING_PUNCT_RE,
@@ -56,6 +57,7 @@ class SessionWiring:
     timeline: Any = None
     record_settings: Any = None  # RecordSettings(RECORD_MODE/TIMELINE_LEVEL 解析,PR-A2)
     record_dir: Any = None  # 录音/审计产物落盘目录(instrumentation 算一次,recording 复用)
+    qa_log: QAPairLog = field(default_factory=QAPairLog)
     turn_trace: dict[str, float] = field(default_factory=lambda: {"started_at": time.time()})
     # vad_speaking/vad_off_ts:用于在线软打断的 VAD 佐证(防短幽灵词/接话误打断)。
     online_state: dict[str, object] = field(
@@ -105,6 +107,7 @@ def setup_stt(ctx: JobContext) -> tuple[Any, Any, bool]:
 
 def _log_user_item(w: SessionWiring, item: ChatMessage) -> None:
     """TURN_USER 指标日志 + 用户气泡广播。"""
+    w.qa_log.add_user(item.text_content or "")
     w.turn_trace["started_at"] = item.metrics.get("started_speaking_at", time.time())
     line = (
         "TURN_USER "
@@ -131,6 +134,7 @@ def _log_user_item(w: SessionWiring, item: ChatMessage) -> None:
 
 def _log_assistant_item(w: SessionWiring, item: ChatMessage) -> None:
     """TURN_ASSISTANT 指标日志(文本已由 transcription_node 广播,此处不再广播)。"""
+    w.qa_log.add_assistant(item.text_content or "")
     wall_clock_e2e = None
     started_at = w.turn_trace.get("started_at")
     assistant_started = item.metrics.get("started_speaking_at")

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -32,16 +33,16 @@ SPAWNING, READY, ASSIGNED, RECYCLING = "spawning", "ready", "assigned", "recycli
 def default_agent_env(
     proc_id: str, port: int, *, metrics_dir: Path | None = None
 ) -> dict[str, str]:
-    """每进程 env 注入表(v4 §7.2)。内网绑定 + 服务器录音/审计组合 full+opus+audit。"""
+    """每进程 env 注入表(v4 §7.2)。部署环境可覆盖录音模式和审计级别。"""
     env = {
         "WEB_AUDIO": "1",
         "WEB_UI_HOST": "127.0.0.1",  # M3:显式内网绑定,不依赖代码默认
         "WEB_UI_PORT": str(port),
         "XIAOGE_KWS_ENABLE_NATIVE": "0",  # D-06:服务器形态默认关 KWS
         "XIAOGE_SESSION_ID": proc_id,  # #1/#4:目录/日志会话短 id(进程实例=会话)
-        "XIAOGE_RECORD_MODE": "full",  # D-14:近期部署组合
+        "XIAOGE_RECORD_MODE": os.getenv("XIAOGE_RECORD_MODE", "full"),
         "XIAOGE_RECORD_CODEC": "opus",
-        "XIAOGE_TIMELINE_LEVEL": "audit",
+        "XIAOGE_TIMELINE_LEVEL": os.getenv("XIAOGE_TIMELINE_LEVEL", "audit"),
         "XIAOGE_ADMIN_ROUTES": "0",  # M5/D-19:asr/tts 显式隐藏(不依赖代码默认,防 shell 环境泄漏)
         # console 默认 DEBUG,会把 livekit 的 tts/llm 帧级 DEBUG 全刷进合流日志;我们自己的
         # 轮次日志都是 INFO,故拉到 INFO 即可保留诊断、砍掉帧噪声。要排障时临时设 DEBUG。

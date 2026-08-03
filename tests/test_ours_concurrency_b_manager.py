@@ -14,6 +14,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "examples" / "voice_agents"
 sys.path.insert(0, str(_AGENT_DIR))
 
@@ -348,3 +350,13 @@ def test_env_injection_table() -> None:
     assert env["XIAOGE_TIMELINE_LEVEL"] == "audit"  # D-14 近期组合
     assert env["XIAOGE_ADMIN_ROUTES"] == "0"  # M5/D-19 显式隐藏 asr/tts
     assert "abc123" in env["TURN_METRICS_LOG"]
+
+
+def test_env_injection_respects_recording_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XIAOGE_RECORD_MODE", "off")
+    monkeypatch.setenv("XIAOGE_TIMELINE_LEVEL", "off")
+
+    env = default_agent_env("abc123", 19105)
+
+    assert env["XIAOGE_RECORD_MODE"] == "off"
+    assert env["XIAOGE_TIMELINE_LEVEL"] == "off"
