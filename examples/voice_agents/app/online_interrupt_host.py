@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -64,9 +65,8 @@ def _judge_online_interrupt(w: SessionWiring, min_chars: int, accum: str) -> Non
     if should_ignore_user_turn(accum):
         state["fired_at"] = now
         state["accum"] = ""
+        _clear_browser_playout()
         session.interrupt(force=True)
-        broadcast({"type": "clear"})
-        broadcast_audio_ctrl({"type": "clear"})
         _log(f"STOP_ONLINE_EARLY text={accum!r} -> force_interrupt")
         if w.timeline is not None:
             w.timeline.emit("interrupt.online", {"text": accum, "kind": "stop"}, source="online")
@@ -86,10 +86,25 @@ def _judge_online_interrupt(w: SessionWiring, min_chars: int, accum: str) -> Non
             return
         state["fired_at"] = now
         state["accum"] = ""
+        _clear_browser_playout()
         session.interrupt()
-        broadcast({"type": "clear"})
-        broadcast_audio_ctrl({"type": "clear"})
         _log(f"OVERLAP_ONLINE_INTERRUPT text={accum!r} chars={meaningful} -> interrupt")
+
+
+def _clear_browser_playout() -> None:
+    # KWS/在线打断触发时,音乐也要立即停(若在播);fire-and-forget,不阻塞打断路径。
+    player = runtime.music_player
+    if player is not None and player.is_playing:
+        try:
+            asyncio.get_running_loop().create_task(player.stop())
+        except Exception:
+            pass
+    output = runtime.ws_audio_output
+    if output is not None:
+        output.clear_buffer()
+        return
+    broadcast({"type": "clear"})
+    broadcast_audio_ctrl({"type": "clear"})
 
 
 def setup_online_interrupt(ctx: JobContext, w: SessionWiring) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 
 from webpanel.bridge import broadcast_audio, broadcast_audio_ctrl
@@ -58,6 +59,7 @@ class WebSocketAudioOutput(io.AudioOutput):
     """Forward TTS audio to /ws/audio clients, optionally wrapping local output."""
 
     TARGET_RATE = 16_000
+    DEFAULT_CLEAR_SUPPRESS_TAIL_MS = 350
 
     def __init__(self, next_output: io.AudioOutput | None = None) -> None:
         sample_rate = next_output.sample_rate if next_output is not None else self.TARGET_RATE
@@ -74,6 +76,20 @@ class WebSocketAudioOutput(io.AudioOutput):
         self._capture_start: float = 0.0
         self._flush_task: asyncio.Task[None] | None = None
         self._interrupted_ev: asyncio.Event = asyncio.Event()
+        self._drop_audio_until: float = 0.0
+
+    @property
+    def _clear_suppress_tail_s(self) -> float:
+        raw = os.getenv("XIAOGE_CLEAR_SUPPRESS_TAIL_MS")
+        if raw is None:
+            return self.DEFAULT_CLEAR_SUPPRESS_TAIL_MS / 1000.0
+        try:
+            return max(0.0, int(raw)) / 1000.0
+        except ValueError:
+            return self.DEFAULT_CLEAR_SUPPRESS_TAIL_MS / 1000.0
+
+    def _suppressing_stale_audio(self) -> bool:
+        return time.monotonic() < self._drop_audio_until
 
     def _to_pcm16(self, frame: rtc.AudioFrame) -> bytes:
         if frame.sample_rate == self.TARGET_RATE and frame.num_channels == 1:
@@ -97,6 +113,9 @@ class WebSocketAudioOutput(io.AudioOutput):
             except Exception as exc:
                 logger.debug("local audio output skipped: %s", exc)
         await super().capture_frame(frame)
+        if self._suppressing_stale_audio():
+            logger.debug("drop stale websocket audio frame after clear")
+            return
         pcm = self._to_pcm16(frame)
         if pcm:
             broadcast_audio(pcm)
@@ -113,6 +132,7 @@ class WebSocketAudioOutput(io.AudioOutput):
             self._flush_task = asyncio.create_task(self._headless_wait_for_playout())
 
     def clear_buffer(self) -> None:
+        self._drop_audio_until = time.monotonic() + self._clear_suppress_tail_s
         if self.next_in_chain is not None:
             self.next_in_chain.clear_buffer()
         elif self._pushed_duration > 0:

@@ -19,8 +19,11 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import json
 import logging
 import ssl
+import time
+from pathlib import Path
 from typing import Any
 
 import aiohttp.web as web
@@ -39,9 +42,10 @@ ACCESS_COOKIE = "xg_access"  # 准入凭证 cookie(D-18)
 # 池管理器服务器形态注入 0 → 不注册 → 404;本地默认显示);网关照常反代、取回 agent 的 404 原样回。
 _API_WHITELIST = {"mic", "asr", "tts"}
 _SWEEP_INTERVAL_S = 2.0
+_PENDING_SESSION_TTL_S = 30.0
 
 _PAGE = "<!doctype html><meta charset=utf-8><title>小歌</title>"
-_ENTRY_HTML = _PAGE + "<h3>小歌</h3><p>已就绪。</p>"  # 生产环境托管完整面板;此处最小占位
+_ENTRY_HTML = _PAGE + "<h3>小歌</h3><p>已就绪。</p>"  # 静态文件异常时的兜底页
 _BUSY_HTML = (  # 规则1 池满:静态繁忙页 + 自动重试(不依赖 WS 内 busy)
     _PAGE + "<h3>当前繁忙</h3><p>座位已满,正在重试…</p>"
     "<script>setTimeout(()=>location.reload(),5000)</script>"
@@ -53,8 +57,36 @@ _ACCESS_HTML = (  # D-18 最低准入表单
 )
 
 
+class _PathOnlyAccessLogger(web.AbstractAccessLogger):
+    """Log the path but never the query string, which may contain rejected secrets."""
+
+    def log(self, request: web.BaseRequest, response: web.StreamResponse, time: float) -> None:
+        self.logger.info(
+            "%s %s %s %s %.3fs",
+            request.remote or "-",
+            request.method,
+            request.path,
+            response.status,
+            time,
+        )
+
+
 def _html(body: str, status: int = 200) -> web.Response:
     return web.Response(text=body, content_type="text/html", status=status)
+
+
+def _index_html(*, debug_query_token: bool) -> str:
+    try:
+        html = (
+            Path(__file__).resolve().parents[1] / "webpanel" / "static" / "index.html"
+        ).read_text(encoding="utf-8")
+        return html.replace(
+            "var DEMO_QUERY_TOKEN_ENABLED=false;",
+            f"var DEMO_QUERY_TOKEN_ENABLED={str(debug_query_token).lower()};",
+        )
+    except Exception:
+        logger.exception("failed to read webpanel index")
+        return _ENTRY_HTML
 
 
 # ── Q6 准入(D-18)──────────────────────────────────────────────────────────────
@@ -77,6 +109,54 @@ def _set_affinity_cookie(resp: web.Response, value: str, config: GatewayConfig) 
     )
 
 
+def _bearer_token(request: web.Request) -> str:
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.removeprefix("Bearer ").strip()
+    return ""
+
+
+def _api_key_from_request_headers(request: web.Request) -> str:
+    presented = request.headers.get("X-API-Key") or request.headers.get("X-Api-Key")
+    if presented:
+        return presented.strip()
+    auth = request.headers.get("Authorization", "").strip()
+    if auth.startswith("ApiKey "):
+        return auth.removeprefix("ApiKey ").strip()
+    return ""
+
+
+async def _api_key_from_create_session_request(request: web.Request) -> str:
+    presented = _api_key_from_request_headers(request)
+    if presented:
+        return presented
+    try:
+        body = await request.json()
+    except Exception:
+        return ""
+    credential = body.get("credential")
+    if isinstance(credential, str):
+        return credential.strip()
+    if isinstance(credential, dict):
+        for key in ("api_key", "apikey", "key"):
+            value = credential.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    for key in ("api_key", "apikey"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+async def _is_legacy_webpanel_create_session(request: web.Request) -> bool:
+    try:
+        body = await request.json()
+    except Exception:
+        return False
+    return body.get("device_id") == "web-panel-x3" and body.get("connect_reason") != "call_button"
+
+
 class _Router:
     """六路由规则的处理器集合(持 config/table/proxy/pool,便于 TestClient 集成测)。"""
 
@@ -93,19 +173,17 @@ class _Router:
         self._proxy = proxy
         self._pool = pool
         self._apikeys = apikeys
+        self._token_sessions: dict[str, str] = {}
+        self._token_issued_at: dict[str, float] = {}
+        self._active_session_ws: set[str] = set()
 
     async def root(self, request: web.Request) -> web.Response:  # 规则1 / 6
         if not _access_ok(request, self._cfg):  # Q6 准入前置(D-18)
             return _html(_ACCESS_HTML, status=401)
-        session = self._table.resolve(request.cookies.get(COOKIE, ""))
-        if session is not None:  # 已有会话(刷新)——不重分配(规则2:两通道永不分家)
-            return await self._proxy.proxy_http(request, session)
-        info = await self._pool.alloc()  # 新用户 → 分配
-        if info is None:  # 池满 → 繁忙页(规则1)
-            return _html(_BUSY_HTML, status=503)
-        session = self._table.register(info["session_id"], info["proc_id"], info["port"])
-        resp = await self._proxy.proxy_http(request, session)
-        _set_affinity_cookie(resp, self._table.cookie_for(info["session_id"]) or "", self._cfg)
+        # R5.2.2: 页面加载本身不占池；只有 create_session 才分配 agent。
+        resp = _html(_index_html(debug_query_token=self._cfg.webpanel_debug_query_token))
+        resp.headers["Cache-Control"] = "no-store"
+        resp.del_cookie(COOKIE, path="/")
         return resp
 
     async def access(self, request: web.Request) -> web.Response:  # D-18 口令校验
@@ -134,7 +212,7 @@ class _Router:
                 await ws.close(code=4001, message=b"affinity-lost")
                 return ws
         else:  # 规则3:协议客户端(模式A),apikey 准入 → 直接分配(共池)
-            presented = request.headers.get("X-API-Key") or request.query.get("apikey")
+            presented = _api_key_from_request_headers(request)
             if not self._apikeys.authorize(presented):
                 with contextlib.suppress(Exception):
                     await ws.send_str('{"type":"error","code":1001,"message":"auth failed"}')
@@ -173,6 +251,102 @@ class _Router:
         await self._proxy.handle_ws_state(ws, session)
         return ws
 
+    async def create_session(self, request: web.Request) -> web.Response:
+        if await _is_legacy_webpanel_create_session(request):
+            return web.json_response({"code": "call_required"}, status=403)
+        presented = await _api_key_from_create_session_request(request)
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        await self._cleanup_pending_sessions()
+        info = await self._pool.alloc()
+        if info is None:
+            await self._cleanup_pending_sessions(force=True)
+            info = await self._alloc_after_cleanup()
+        if info is None:
+            return web.json_response({"code": "resource_exhausted"}, status=503)
+        session = self._table.register(
+            info["session_id"], info["proc_id"], info["port"], browser=False
+        )
+        resp = await self._proxy.proxy_http(request, session)
+        if resp.status != 200:
+            self._table.close(session.session_id)
+            await self._pool.release(session.session_id, "create_session rejected")
+            return resp
+        try:
+            body = json.loads(resp.body or b"{}")
+            token = str(body.get("access_token") or "")
+        except Exception:
+            body = {}
+            token = ""
+        if not token:
+            self._table.close(session.session_id)
+            await self._pool.release(session.session_id, "create_session bad response")
+            return web.json_response({"code": "protocol_error"}, status=502)
+        self._token_sessions[token] = session.session_id
+        self._token_issued_at[token] = time.monotonic()
+        scheme = "wss" if request.secure else "ws"
+        body["ws_url"] = f"{scheme}://{request.host}/ws/session"
+        resp = web.json_response(body)
+        _set_affinity_cookie(resp, self._table.cookie_for(session.session_id) or "", self._cfg)
+        return resp
+
+    async def ws_session(self, request: web.Request) -> web.WebSocketResponse:
+        token = "" if "access_token" in request.query else _bearer_token(request)
+        return await self._serve_ws_session(request, token)
+
+    async def debug_ws_session(self, request: web.Request) -> web.WebSocketResponse:
+        token = request.query.get("access_token", "").strip()
+        return await self._serve_ws_session(request, token)
+
+    async def _serve_ws_session(
+        self, request: web.Request, token: str
+    ) -> web.WebSocketResponse:
+        await self._cleanup_pending_sessions()
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        session_id = self._token_sessions.get(token)
+        session = self._table.get(session_id or "") if session_id else None
+        if session is None:
+            await ws.close(code=4401, message=b"auth_failed")
+            return ws
+        if session.session_id in self._active_session_ws:
+            await ws.close(code=4009, message=b"duplicate_connection")
+            return ws
+        self._active_session_ws.add(session.session_id)
+        self._token_issued_at.pop(token, None)
+        try:
+            await self._proxy.handle_ws_session(ws, session, request, access_token=token)
+        finally:
+            self._active_session_ws.discard(session.session_id)
+            self._token_sessions.pop(token, None)
+            self._token_issued_at.pop(token, None)
+            self._table.close(session.session_id)
+            await self._pool.release(session.session_id, "ws session ended")
+        return ws
+
+    async def _cleanup_pending_sessions(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        expired = [
+            (token, session_id)
+            for token, session_id in self._token_sessions.items()
+            if token in self._token_issued_at
+            and (force or now - self._token_issued_at[token] >= _PENDING_SESSION_TTL_S)
+        ]
+        for token, session_id in expired:
+            self._token_sessions.pop(token, None)
+            self._token_issued_at.pop(token, None)
+            if self._table.close(session_id) is not None:
+                await self._pool.release(session_id, "create_session pending timeout")
+
+    async def _alloc_after_cleanup(self) -> dict[str, Any] | None:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            info = await self._pool.alloc()
+            if info is not None:
+                return info
+            await asyncio.sleep(0.25)
+        return None
+
     async def api(self, request: web.Request) -> web.Response:  # 规则2 + §6.2 ① 白名单
         top = request.match_info.get("tail", "").split("/", 1)[0]
         if top not in _API_WHITELIST:  # 未知路径默认拒绝,不泄漏拓扑
@@ -191,14 +365,19 @@ def build_gateway_app(
     table: af.AffinityTable,
     proxy: Proxy,
     pool: PoolClient,
-    apikeys: ApiKeyStore,
+    apikeys: ApiKeyStore | None = None,
 ) -> web.Application:
     """装配路由(与启动/ TLS 解耦,便于 TestClient 集成测)。"""
+    apikeys = apikeys or ApiKeyStore(config)
     r = _Router(config, table, proxy, pool, apikeys)
     app = web.Application()
     app.router.add_get("/", r.root)
     app.router.add_post("/access", r.access)
+    app.router.add_post("/create_session", r.create_session)
     app.router.add_get("/healthz", r.healthz)
+    app.router.add_get("/ws/session", r.ws_session)
+    if config.webpanel_debug_query_token:
+        app.router.add_get("/debug/ws/session", r.debug_ws_session)
     app.router.add_get("/ws", r.ws_state)
     app.router.add_get("/ws/audio", r.ws_audio)
     app.router.add_route("*", "/api/{tail:.*}", r.api)
@@ -234,7 +413,7 @@ async def run_gateway(config: GatewayConfig) -> None:
     table, proxy, pool, apikeys = _build_components(config)
     await apikeys.refresh()  # 启动即载一次有效集合(失败保留空快照,由刷新循环补齐)
     app = build_gateway_app(config, table, proxy, pool, apikeys)
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log_class=_PathOnlyAccessLogger)
     await runner.setup()
     ssl_ctx: ssl.SSLContext | None = None
     if config.tls_enabled:

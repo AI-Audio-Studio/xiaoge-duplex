@@ -54,6 +54,9 @@ class GatewayConfig:
     api_key_db_password: str = ""
     api_key_db_name: str = ""
     api_key_refresh_sec: float = 60.0  # 后台刷新有效集合的周期
+    # 浏览器原生 WebSocket 不能设置 Authorization。仅测试环境可显式打开隔离 debug 端点；
+    # 正式 /ws/session 始终 Bearer-only。
+    webpanel_debug_query_token: bool = False
 
     @classmethod
     def from_env(cls) -> GatewayConfig:
@@ -76,6 +79,7 @@ class GatewayConfig:
             api_key_db_password=os.getenv("XG_API_KEY_DB_PASSWORD", ""),
             api_key_db_name=os.getenv("XG_API_KEY_DB_NAME", "").strip(),
             api_key_refresh_sec=_env_float("XG_API_KEY_REFRESH_SEC", 60.0),
+            webpanel_debug_query_token=_env_bool("XG_WEBPANEL_DEBUG_QUERY_TOKEN", False),
         )
 
     @property

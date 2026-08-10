@@ -157,6 +157,13 @@ class LiveTranscript:
         except Exception:
             pass
 
+    def reset_turn(self, reason: str = "handled") -> None:
+        """Clear the current display turn after an upstream handler consumes it."""
+        try:
+            self._close(reason)
+        except Exception:
+            pass
+
     # ── 单一判定点:开新轮 vs 续用当前气泡(以后联动判停只改这里)──────────
     def _maybe_open(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
@@ -171,13 +178,13 @@ class LiveTranscript:
             self._last_ts = now  # 连续说话:沿用同一气泡
 
     def _close(self, reason: str) -> None:
-        if not self._open:
-            return
+        was_open = self._open
         self._open = False
         self._committed = ""  # 本轮结束:清空累计(下条 interim 开新轮)
         self._seg = ""
         self._prefix = ""
-        self._debug("close", {"reason": reason})
+        self._last_ts = 0.0
+        self._debug("close" if was_open else "reset", {"reason": reason})
 
     def _emit(self, msg: dict[str, Any]) -> None:
         try:

@@ -33,10 +33,14 @@ _load_env() {
 _setup_env() {
     _load_env
     export XG_LISTEN_HOST="${XG_LISTEN_HOST:-0.0.0.0}"
-    export XG_LISTEN_PORT="${WEB_UI_PORT:-10099}"
+    export XG_LISTEN_PORT="${XG_LISTEN_PORT:-${WEB_UI_PORT:-10099}}"
     export XG_SSL_CERT="${XG_SSL_CERT:-/data/home/allen.wangmh/software/MiniCPM/server/ssl/cert.pem}"
     export XG_SSL_KEY="${XG_SSL_KEY:-/data/home/allen.wangmh/software/MiniCPM/server/ssl/key.pem}"
-    export XG_POOL_API="${XG_POOL_API:-http://127.0.0.1:19000}"
+    export XG_POOL_CONTROL_HOST="${XG_POOL_CONTROL_HOST:-127.0.0.1}"
+    export XG_POOL_CONTROL_PORT="${XG_POOL_CONTROL_PORT:-19000}"
+    export XG_POOL_API="${XG_POOL_API:-http://${XG_POOL_CONTROL_HOST}:${XG_POOL_CONTROL_PORT}}"
+    export XG_POOL_BASE_PORT="${XG_POOL_BASE_PORT:-19100}"
+    export XG_POOL_PORT_SPAN="${XG_POOL_PORT_SPAN:-100}"
     export XG_GRACE_SECONDS="${XG_GRACE_SECONDS:-12}"
     export XG_POOL_SIZE="${XG_POOL_SIZE:-4}"
     export XG_POOL_SPAWN_TIMEOUT_S="${XG_POOL_SPAWN_TIMEOUT_S:-240}"
@@ -66,7 +70,7 @@ _setup_env() {
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 _pool_status() {
-    curl -s --connect-timeout 1 http://127.0.0.1:19000/status 2>/dev/null || echo '{}'
+    curl -s --connect-timeout 1 "$XG_POOL_API/status" 2>/dev/null || echo '{}'
 }
 
 _pool_ready() {
@@ -75,16 +79,52 @@ _pool_ready() {
 }
 
 _kill_agents() {
-    # agent 进程监听 19100-19199 端口
-    local pids
+    # agent 进程监听 XG_POOL_BASE_PORT 起始的端口段
+    local start end pids
+    start="${XG_POOL_BASE_PORT:-19100}"
+    end=$((start + ${XG_POOL_PORT_SPAN:-100} - 1))
     pids=$(ss -tnlp 2>/dev/null \
-        | awk '/191[0-9]{2}/ { if (match($0, /pid=([0-9]+)/, m)) print m[1] }' \
+        | awk -v start="$start" -v end="$end" '
+            {
+                port = ""
+                if (match($4, /:[0-9]+$/)) {
+                    port = substr($4, RSTART + 1, RLENGTH - 1)
+                }
+                if (port >= start && port <= end && match($0, /pid=([0-9]+)/, m)) {
+                    print m[1]
+                }
+            }' \
         | sort -u)
     if [[ -n "$pids" ]]; then
         echo "  killing agents: $(echo "$pids" | tr '\n' ' ')"
         echo "$pids" | xargs kill -9 2>/dev/null || true
     else
         echo "  no agent processes"
+    fi
+}
+
+_kill_pid_file() {
+    local pid_file=$1 label=$2 pid
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        if kill -KILL "$pid" 2>/dev/null; then
+            echo "  $label process killed: $pid"
+        else
+            echo "  $label process kill failed: $pid"
+        fi
+    else
+        echo "  $label not running"
+    fi
+    rm -f "$pid_file"
+}
+
+_pid_state() {
+    local pid_file=$1 pid
+    pid=$(cat "$pid_file" 2>/dev/null || true)
+    if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        echo "pid=$pid  running"
+    else
+        echo "pid=${pid:-'-'}  NOT RUNNING"
     fi
 }
 
@@ -99,30 +139,20 @@ _wait_port_free() {
 # ── stop ─────────────────────────────────────────────────────────────────────
 
 do_stop() {
+    _setup_env
     echo "── gateway ──────────────────────────"
     # 先停 systemd（防止 Restart= 重拉起）
     systemctl --user stop xiaoge-gateway.service 2>/dev/null && echo "  systemd gateway stopped" || true
-    # 按进程名 kill（兜住 PID 文件过时的情况）
-    if pkill -KILL -f 'python.*-m gateway' 2>/dev/null; then
-        echo "  gateway process killed"
-    else
-        echo "  gateway not running"
-    fi
-    rm -f "$RUN/gateway.pid"
+    _kill_pid_file "$RUN/gateway.pid" "gateway"
 
     echo "── poolmgr ──────────────────────────"
-    if pkill -KILL -f 'python.*-m poolmgr' 2>/dev/null; then
-        echo "  poolmgr process killed"
-    else
-        echo "  poolmgr not running"
-    fi
-    rm -f "$RUN/poolmgr.pid"
+    _kill_pid_file "$RUN/poolmgr.pid" "poolmgr"
 
     echo "── agents ───────────────────────────"
     _kill_agents
 
-    echo "── wait port 19000 free ─────────────"
-    _wait_port_free 19000
+    echo "── wait port $XG_POOL_CONTROL_PORT free ─────────────"
+    _wait_port_free "$XG_POOL_CONTROL_PORT"
     echo "done."
 }
 
@@ -133,7 +163,7 @@ do_start() {
     mkdir -p "$RUN"
 
     if [[ "$(_pool_ready)" -gt 0 ]]; then
-        echo "ERROR: poolmgr already running on :19000. Run: $0 stop" >&2
+        echo "ERROR: poolmgr already running on :$XG_POOL_CONTROL_PORT. Run: $0 stop" >&2
         exit 1
     fi
 
@@ -174,6 +204,7 @@ do_start() {
 # ── status ────────────────────────────────────────────────────────────────────
 
 do_status() {
+    _setup_env
     local STATUS READY ASSIGNED SPAWNING
     STATUS=$(_pool_status)
     READY=$(python3    -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('ready','-'))"    "$STATUS" 2>/dev/null || echo '?')
@@ -182,19 +213,25 @@ do_status() {
 
     echo "pool:    ready=$READY  assigned=$ASSIGNED  spawning=$SPAWNING"
 
-    local GW_PID GW_ST
-    GW_PID=$(cat "$RUN/gateway.pid" 2>/dev/null || echo '-')
-    pgrep -f 'python.*-m gateway' &>/dev/null && GW_ST="running" || GW_ST="NOT RUNNING"
-    echo "gateway: pid=$GW_PID  $GW_ST"
+    echo "gateway: $(_pid_state "$RUN/gateway.pid")"
 
-    local PM_PID PM_ST
-    PM_PID=$(cat "$RUN/poolmgr.pid" 2>/dev/null || echo '-')
-    pgrep -f 'python.*-m poolmgr' &>/dev/null && PM_ST="running" || PM_ST="NOT RUNNING"
-    echo "poolmgr: pid=$PM_PID  $PM_ST"
+    echo "poolmgr: $(_pid_state "$RUN/poolmgr.pid")"
 
-    local AGENT_CNT
-    AGENT_CNT=$(ss -tnlp 2>/dev/null | grep -c '191[0-9][0-9]' || echo 0)
-    echo "agents:  $AGENT_CNT listening (ports 191xx)"
+    local AGENT_CNT AGENT_START AGENT_END
+    AGENT_START="${XG_POOL_BASE_PORT:-19100}"
+    AGENT_END=$((AGENT_START + ${XG_POOL_PORT_SPAN:-100} - 1))
+    AGENT_CNT=$(ss -tnlp 2>/dev/null | awk -v start="$AGENT_START" -v end="$AGENT_END" '
+        {
+            port = ""
+            if (match($4, /:[0-9]+$/)) {
+                port = substr($4, RSTART + 1, RLENGTH - 1)
+            }
+            if (port >= start && port <= end) {
+                count += 1
+            }
+        }
+        END { print count + 0 }')
+    echo "agents:  $AGENT_CNT listening (ports ${AGENT_START}-${AGENT_END})"
 
     systemctl --user is-active xiaoge-gateway.service &>/dev/null \
         && echo "systemd: gateway active" \

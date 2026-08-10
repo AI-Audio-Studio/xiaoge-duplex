@@ -157,6 +157,13 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage) -> None:
 
 def _handle_agent_state(w: SessionWiring, event) -> None:
     broadcast({"type": "state", "agent_state": event.new_state})
+    # 音乐让 TTS:speaking → 暂停音乐;其他状态(listening/idle)→ 恢复音乐
+    player = runtime.music_player
+    if player is not None:
+        if event.new_state == "speaking":
+            player.pause()
+        else:
+            player.resume()
     if event.new_state != "speaking":
         return
     w.online_state["accum"] = ""
@@ -465,3 +472,42 @@ def setup_kws(ctx: JobContext, w: SessionWiring) -> None:
         _log(f"KWS_ACTIVE keywords={kws_config.keywords}")
     else:
         _log(f"KWS_DISABLED reason={_unavailable_reason(kws_config)!r}")
+
+
+def setup_music(ctx: JobContext, w: SessionWiring) -> None:
+    """本地音乐播放器(XIAOGE_MUSIC_ENABLED=1):ffmpeg 解码 mp3 + wave 解码 wav,
+    推帧到 ws_audio_output;TTS 起来暂停、TTS 结束恢复(在 _handle_agent_state 里挂)。
+
+    必须在 setup_web_audio 之后调用(依赖 runtime.ws_audio_output)。
+    """
+    if os.getenv("XIAOGE_MUSIC_ENABLED", "0").strip().lower() not in ("1", "true", "on", "yes"):
+        _log("MUSIC_DISABLED reason=env_off")
+        return
+    if runtime.ws_audio_output is None:
+        _log("MUSIC_DISABLED reason=no_ws_audio_output")
+        return
+    music_dir = os.getenv(
+        "XIAOGE_MUSIC_DIR",
+        str(Path(__file__).resolve().parent.parent / "music"),
+    )
+    music_dir_path = Path(music_dir).expanduser()
+    if not music_dir_path.exists():
+        _log(f"MUSIC_DISABLED reason=dir_not_found dir={music_dir}")
+        return
+    try:
+        from app.music_player import MusicLibrary, MusicPlayer
+
+        refresh_s = float(os.getenv("XIAOGE_MUSIC_REFRESH_S", "60"))
+        threshold = float(os.getenv("XIAOGE_MUSIC_MATCH_THRESHOLD", "0.5"))
+        library = MusicLibrary(
+            music_dir=music_dir_path,
+            refresh_s=refresh_s,
+            match_threshold=threshold,
+        )
+        player = MusicPlayer(runtime, library, loop=asyncio.get_running_loop())
+        runtime.music_player = player
+        ctx.add_shutdown_callback(player.aclose)
+        _log(f"MUSIC_ACTIVE dir={music_dir} files={len(library.list_names())}")
+    except Exception as exc:
+        logger.warning("music player disabled: %s", exc)
+        _log(f"MUSIC_DISABLED reason={exc!r}")

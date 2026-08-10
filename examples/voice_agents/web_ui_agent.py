@@ -32,6 +32,7 @@ import time
 import webbrowser
 
 from app.backends import build_llm, build_tts
+from app.knowledge_index import KnowledgeIndex
 from app.listening_host import (
     listen_cancel_ttl,
     listen_clear_guard,
@@ -47,6 +48,7 @@ from app.setup_taps import (
     register_session_handlers,
     setup_kws,
     setup_live_transcript,
+    setup_music,
     setup_mute_gate,
     setup_recording,
     setup_scenario_injection,
@@ -55,6 +57,7 @@ from app.setup_taps import (
     setup_web_audio,
     start_llm_warmup,
 )
+from common.g3_intent import G3IntentEngine, SessionState
 from common.runtime import (
     append_turn_log as _append_turn_log,
     configure_utf8_stdio as _configure_utf8_stdio,
@@ -78,14 +81,16 @@ from livekit.agents import (
     AgentSession,
     JobContext,
     JobProcess,
+    RunContext,
     StopResponse,
     cli,
 )
-from livekit.agents.llm import ChatMessage
+from livekit.agents.llm import ChatMessage, function_tool
 from livekit.plugins import silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 logger = logging.getLogger("web-ui-agent")
+_g3_intent_engine = G3IntentEngine()
 
 _CONTINUATION_PROMPT_RE = re.compile(
     r"(好不好|要不要|想不想|有没有兴趣|继续听|继续讲|接着讲|往下讲)"
@@ -145,6 +150,12 @@ class VoiceAgent(Agent):
 # 边界
 - 做不到的事坦白说，并给个替代办法；不输出不安全或越界的内容。
 
+# 关于小歌自身的事实性问题
+- 用户问小歌自身的硬件规格、软件功能、网络要求、使用场景、升级方式、隐私政策等"关于小歌本身"的问题时，
+  调用 query_knowledge 工具检索产品手册，再据此用一两句口语化回答。
+- 普通聊天、讲故事、陪聊、问别人感受、问通用知识，不要调这个工具，直接答即可。
+- 调用后不要照念返回里的 score/source/标题等元信息，也不要说"根据知识库"，组织成自然口吻告诉用户。
+
 # 示例（学这个语气和长度，不要照抄内容）
 用户：今天好累啊，不太想说话。
 小歌：那就先歇会儿，别勉强。需要我的时候喊一声就行。
@@ -160,6 +171,96 @@ class VoiceAgent(Agent):
         )
         self._last_assistant_text = ""
         self._awaiting_continue_confirmation = False
+        self._wiring: SessionWiring | None = None
+
+    def attach_wiring(self, wiring: SessionWiring) -> None:
+        self._wiring = wiring
+
+    # ── 音乐控制工具(function call 单路):委托给 runtime.music_player ──
+    @function_tool
+    async def play_music(self, context: RunContext, music_id: str = "") -> str:
+        """播放本地音乐。用户说"播放音乐/放首歌/来点音乐/听歌"时调用。
+
+        Args:
+            music_id: 歌曲名(可模糊匹配,如"声动未来")。空字符串或 "random" 表示随机播放一首。
+        """
+        player = runtime.music_player
+        if player is None:
+            return "音乐功能没启用。"
+        try:
+            name = await player.play_for_tool(music_id or None)
+        except Exception as exc:
+            logger.exception("play_music failed")
+            return f"播放出错了:{exc}"
+        if name is None:
+            return "没找到匹配的歌,告诉用户没找到、问要不要换一首,不要编造歌名。"
+        # 工具结果给 LLM 看,不是给用户念的原文。明确告诉 LLM:
+        # 1) 音乐已经真的在播了,不要再"建议换歌/挑一首";
+        # 2) 只用一句简短自然的话告知用户在放什么;
+        # 3) 不要复述模板原话、不要加"我再给你放一首"之类的多余动作。
+        return (
+            f"已开始播放《{name}》,音乐正在出声。"
+            f"用一句简短自然的话告诉用户在放这首歌,不要说“换一首/来首别的”,"
+            f"也不要重复模板原文。"
+        )
+
+    @function_tool
+    async def stop_music(self, context: RunContext) -> str:
+        """停止播放音乐。用户说"停音乐/别放了/关掉音乐/停止音乐"时调用。"""
+        player = runtime.music_player
+        if player is None:
+            return "音乐没在播。"
+        try:
+            stopped = await player.stop_for_tool()
+        except Exception as exc:
+            logger.exception("stop_music failed")
+            return f"停止出错了:{exc}"
+        if not stopped:
+            return "音乐本来就没在播,告诉用户就行,不用做任何动作。"
+        return "音乐已停止。用一句简短自然的话告诉用户,不要加多余动作。"
+
+    # ── 知识库检索工具:委托给 runtime.knowledge_index ──
+    @function_tool
+    async def query_knowledge(self, context: RunContext, query: str) -> str:
+        """查询小歌产品知识库(产品手册、规格、FAQ、使用场景等)。
+
+        当用户问到小歌自身的硬件规格、软件功能、网络要求、使用场景、升级方式、
+        隐私政策等"关于小歌本身"的事实性问题时调用。普通聊天/讲故事/陪聊不要调。
+
+        Args:
+            query: 用户问题的精炼关键词(如"麦克风阵列规格"/"如何升级模型"/"网络要求")。
+        """
+        idx = runtime.knowledge_index
+        if idx is None:
+            return "知识库未启用。告诉用户你不清楚这个问题,不要编造。"
+        try:
+            hits = await idx.query(query)
+        except Exception as exc:
+            logger.exception("query_knowledge failed")
+            return f"检索出错了:{exc}"
+        if not hits:
+            return "没查到相关内容。告诉用户知识库里没有这部分,不要编造。"
+        # 拼 LLM 可读的上下文:每条带标题、来源、相似度。LLM 据此组织回答话术(不要照念原文)。
+        lines: list[str] = [f"知识库命中 {len(hits)} 条(按相关度降序):"]
+        for i, h in enumerate(hits, 1):
+            lines.append(
+                f"\n[{i}] (score={h.score:.2f} source={h.source} title={h.title})\n{h.text}"
+            )
+        lines.append(
+            "\n请基于以上内容用一句到三句口语化回答用户。不要复述 score/source/标题等元信息,"
+            "不要说'根据知识库'之类的话。如果内容不足以回答,如实说不确定。"
+        )
+        return "\n".join(lines)
+
+    def _reset_live_transcript(self, reason: str) -> None:
+        live = getattr(self._wiring, "live", None)
+        reset_turn = getattr(live, "reset_turn", None)
+        if callable(reset_turn):
+            reset_turn(reason)
+
+    def _finalize_g3_user_message(self, original: str, enabled: bool) -> None:
+        if enabled:
+            broadcast({"type": "message", "role": "user", "text": original, "ts": time.time()})
 
     async def on_enter(self) -> None:
         # 开场白不在这里触发:on_enter 在 session.start() 期间执行,早于录音 tap 安装,
@@ -211,10 +312,7 @@ class VoiceAgent(Agent):
             self._awaiting_continue_confirmation = False
             return original
 
-        instruction = (
-            "我确认继续。请直接接着刚才的内容往下讲正文，"
-            "不要重复刚才的询问或铺垫。"
-        )
+        instruction = "我确认继续。请直接接着刚才的内容往下讲正文，不要重复刚才的询问或铺垫。"
         turn_ctx.add_message(role="system", content=instruction)
         self._awaiting_continue_confirmation = False
         _append_turn_log(
@@ -299,6 +397,77 @@ class VoiceAgent(Agent):
             _append_turn_log(f"BACKCHANNEL_OVERLAP text={original!r} -> skip_reply")
             raise StopResponse()
 
+    async def _maybe_handle_g3_protocol_turn(
+        self, original: str, *, finalize_user_message: bool = False
+    ) -> None:
+        """Run R5.2.2 G3 intent/control/RAG routing before generic LLM chat.
+
+        This hook keeps real robot actions disabled. It only produces protocol-shaped
+        decisions, broadcasts them for the web client/logs, and speaks reply-only
+        outcomes. Accepted commands are dry-run decisions unless a later gate enables
+        real robot action outside this G3 scope.
+        """
+        state = SessionState(
+            trace_id=f"trace-g3-{int(time.time() * 1000)}",
+            session_id=os.getenv("XIAOGE_SESSION_ID", "sess-g3-local"),
+            command_dry_run=os.getenv("XG_COMMAND_DRY_RUN", "1").strip().lower()
+            not in ("0", "false", "off", "no"),
+            robot_action_enabled=os.getenv("XG_ROBOT_ACTION_ENABLED", "0").strip().lower()
+            in ("1", "true", "on", "yes"),
+        )
+        frames = _g3_intent_engine.handle_text(
+            original,
+            state,
+            utterance_id=f"utt-g3-{int(time.time() * 1000)}",
+        )
+        if not frames:
+            return
+        first = frames[0]
+        if first["type"] == "data.reply" and first["intent_type"] in {
+            "control_cmd",
+            "info_query",
+            "knowledge_qa",
+            "system",
+        }:
+            self._finalize_g3_user_message(original, finalize_user_message)
+            broadcast({"type": "g3_protocol", "frames": frames})
+            _append_turn_log(f"G3_PROTOCOL_REPLY frames={frames!r}")
+            self.session.say(str(first["text"]), add_to_chat_ctx=False)
+            self._reset_live_transcript("g3_protocol_reply")
+            raise StopResponse()
+        if first["type"] == "data.cmd":
+            self._finalize_g3_user_message(original, finalize_user_message)
+            broadcast(
+                {
+                    "type": "g3_protocol",
+                    "dry_run": state.command_dry_run or not state.robot_action_enabled,
+                    "frames": frames,
+                }
+            )
+            _append_turn_log(
+                "G3_PROTOCOL_CMD_DRY_RUN "
+                f"dry_run={state.command_dry_run} robot_action={state.robot_action_enabled} "
+                f"frames={frames!r}"
+            )
+            self.session.say(
+                "已识别到单条控制指令，当前保持 dry-run，不执行真实机器人动作。",
+                add_to_chat_ctx=False,
+            )
+            self._reset_live_transcript("g3_protocol_cmd")
+            raise StopResponse()
+
+    async def handle_manual_text(self, text: str) -> None:
+        original = text.strip()
+        if not original:
+            return
+        _append_turn_log(f"MANUAL_TEXT text={original!r}")
+        try:
+            await self._maybe_handle_g3_protocol_turn(original)
+        except StopResponse:
+            broadcast({"type": "message", "role": "user", "text": original, "ts": time.time()})
+            return
+        self.session.generate_reply(user_input=original, input_modality="text")
+
     async def on_user_turn_completed(self, turn_ctx, new_message: ChatMessage) -> None:
         spoke_over_agent = runtime.overlap_turn_state["user_spoke_over_agent"]
         original = new_message.text_content
@@ -309,6 +478,7 @@ class VoiceAgent(Agent):
         original = self._maybe_add_continuation_instruction(turn_ctx, original)
         self._maybe_auto_enter_listening(original, spoke_over_agent)
         self._apply_turn_filters(original, spoke_over_agent)
+        await self._maybe_handle_g3_protocol_turn(original, finalize_user_message=True)
 
         normalized = _normalize_spoken_digit_sequence(original)
         if normalized is None or normalized == original:
@@ -366,8 +536,10 @@ async def entrypoint(ctx: JobContext) -> None:
     start_llm_warmup(llm)
     turn_metrics = setup_test_instrumentation(ctx, w)  # 设 w.timeline/record_settings/record_dir
 
-    await session.start(agent=VoiceAgent(), room=ctx.room)
+    agent = VoiceAgent()
+    await session.start(agent=agent, room=ctx.room)
     runtime.session = session  # 供模块级聆听助手/欢迎语在 agent 循环里 say/收尾
+    runtime.manual_text_handler = agent.handle_manual_text
 
     # tap 链装配(顺序即包裹层次,不可乱):场景注入 → 浏览器音频 → 静音门 → 录音 → KWS → 在线打断
     setup_scenario_injection(session, turn_metrics)
@@ -375,8 +547,24 @@ async def entrypoint(ctx: JobContext) -> None:
     setup_mute_gate(session)
     setup_recording(ctx, w)
     setup_live_transcript(w)
+    agent.attach_wiring(w)
     setup_kws(ctx, w)
     setup_online_interrupt(ctx, w)
+    setup_music(ctx, w)
+
+    # 知识库索引:best-effort 加载已持久化的索引;无索引文件时 is_ready()=False,
+    # query_knowledge 工具会返回"未启用"。需要重建索引时跑 `python -m app.knowledge_index rebuild`。
+    ki = KnowledgeIndex()
+    if ki._load():
+        runtime.knowledge_index = ki
+        logger.info("knowledge index loaded: %d chunks", ki.doc_count)
+    else:
+        logger.warning(
+            "knowledge index not loaded (no persisted index at %s). "
+            "Run `python -m app.knowledge_index rebuild` to build.",
+            ki.index_dir,
+        )
+        runtime.knowledge_index = ki  # 仍挂上,工具会优雅返回"未启用"
 
     # 开场白:固定文案(稳定、可复现、首字延迟低),口吻与小歌人设一致。say() 仍会经过
     # transcription_node(广播到网页气泡)与录音 tap。放在所有 tap(录音/KWS/在线打断)

@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 from common.config_utils import env_bool
 
+from webpanel.command_lifecycle import CommandLifecycleTracker
+
 if TYPE_CHECKING:
     import aiohttp.web
 
@@ -24,6 +26,7 @@ WEB_AUDIO: bool = env_bool("WEB_AUDIO", False)
 # M5 / D-19:asr/tts 管理路由(后端热切换)开关。**代码默认=显示(PC/测试形态不变)**;服务器形态
 # 由池管理器注入 `XIAOGE_ADMIN_ROUTES=0` 隐藏——关时不注册即 404、tab 也不注入。/api/mic 不受约束。
 ADMIN_ROUTES: bool = env_bool("XIAOGE_ADMIN_ROUTES", True)
+DEBUG_QUERY_TOKEN: bool = env_bool("XIAOGE_WEBPANEL_DEBUG_QUERY_TOKEN", False)
 SSL_CERT: str = os.getenv("WEB_SSL_CERT", "")
 SSL_KEY: str = os.getenv("WEB_SSL_KEY", "")
 
@@ -55,8 +58,13 @@ class WebPanelState:
     connection_lock: asyncio.Lock | None = None
     ws_clients: set[aiohttp.web.WebSocketResponse] = field(default_factory=set)
     ws_primary_client: aiohttp.web.WebSocketResponse | None = None
+    session_ws_clients: set[aiohttp.web.WebSocketResponse] = field(default_factory=set)
+    session_ws_primary_client: aiohttp.web.WebSocketResponse | None = None
     audio_ws_clients: set[aiohttp.web.WebSocketResponse] = field(default_factory=set)
     audio_ws_primary_client: aiohttp.web.WebSocketResponse | None = None
+    issued_tokens: dict[str, dict[str, object]] = field(default_factory=dict)
+    active_session_ids: set[str] = field(default_factory=set)
+    command_lifecycle: CommandLifecycleTracker = field(default_factory=CommandLifecycleTracker)
 
 
 panel = WebPanelState()

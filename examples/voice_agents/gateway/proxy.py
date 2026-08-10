@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -71,6 +72,22 @@ class Proxy:
         return await sess.ws_connect(
             f"http://127.0.0.1:{session.port}/ws/audio",
             headers={"X-XG-Session": session.session_id},
+            heartbeat=30,
+        )
+
+    async def _open_session_upstream(
+        self,
+        session: af.Session,
+        request: aiohttp.web.Request,
+        access_token: str,
+    ) -> aiohttp.ClientWebSocketResponse:
+        sess = await self._client()
+        fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+        fwd["X-XG-Session"] = session.session_id
+        fwd["Authorization"] = f"Bearer {access_token}"
+        return await sess.ws_connect(
+            f"http://127.0.0.1:{session.port}/ws/session",
+            headers=fwd,
             heartbeat=30,
         )
 
@@ -199,7 +216,80 @@ class Proxy:
             with contextlib.suppress(Exception):
                 await up.close()
         finally:
-            self._table.on_state_disconnect(sid)  # CancelledError 时也必须执行,否则 state_idle_since 停在 0.0 永不 sweep
+            self._table.on_state_disconnect(
+                sid
+            )  # CancelledError 时也必须执行,否则 state_idle_since 停在 0.0 永不 sweep
+
+    async def handle_ws_session(
+        self,
+        client_ws: aiohttp.web.WebSocketResponse,
+        session: af.Session,
+        request: aiohttp.web.Request,
+        *,
+        access_token: str,
+    ) -> None:
+        """R5.2.2 合并 WSS:JSON control/data + PCM binary 原样双向透传。"""
+        try:
+            up = await self._open_session_upstream(session, request, access_token)
+        except Exception:
+            await client_ws.close(code=1011, message=b"upstream unavailable")
+            return
+
+        async def _pump(src: Any, dst: Any, *, validate_client_frames: bool = False) -> int:
+            limiter = _RateLimiter(self._cfg.msg_rate_per_s)
+            close_code = 1000
+            try:
+                async for m in src:
+                    if not limiter.allow():
+                        close_code = int(aiohttp.WSCloseCode.POLICY_VIOLATION)
+                        break
+                    if m.type == aiohttp.WSMsgType.TEXT:
+                        if validate_client_frames:
+                            if len(m.data.encode("utf-8")) > self._cfg.max_frame_bytes:
+                                return 4400
+                            try:
+                                json.loads(m.data)
+                            except json.JSONDecodeError:
+                                return 4400
+                        await dst.send_str(m.data)
+                    elif m.type == aiohttp.WSMsgType.BINARY:
+                        if len(m.data) > self._cfg.max_frame_bytes:
+                            close_code = int(aiohttp.WSCloseCode.MESSAGE_TOO_BIG)
+                            break
+                        await dst.send_bytes(m.data)
+                    elif m.type in (
+                        aiohttp.WSMsgType.ERROR,
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.CLOSING,
+                    ):
+                        close_code = getattr(src, "close_code", None) or close_code
+                        break
+            except Exception as exc:
+                logger.info("session pump ended: %s", exc)
+                close_code = getattr(src, "close_code", None) or 1011
+            return int(getattr(src, "close_code", None) or close_code)
+
+        c2u = asyncio.create_task(_pump(client_ws, up, validate_client_frames=True))
+        u2c = asyncio.create_task(_pump(up, client_ws))
+        tasks = {c2u, u2c}
+        close_code = 1000
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            codes = [task.result() for task in done]
+            close_code = next((code for code in codes if code != 1000), codes[0])
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # No reader may remain on client_ws while close() waits for the peer close reply.
+            # Otherwise the reader can consume that reply and turn a valid 44xx close into 1006.
+            with contextlib.suppress(Exception):
+                await up.close(code=close_code)
+            if not client_ws.closed:
+                with contextlib.suppress(Exception):
+                    await client_ws.close(code=close_code)
 
     # ── HTTP 反代(POST /api/*)─────────────────────────────────────────────────
     async def proxy_http(

@@ -44,6 +44,11 @@ class AppRuntime:
     # 浏览器音频 I/O 引用(WEB_AUDIO=1)
     ws_audio_input: Any = None
     ws_audio_output: Any = None
+    # 本地音乐播放器(XIAOGE_MUSIC_ENABLED=1 时由 setup_music 实例化)
+    music_player: Any = None
+    # 知识库索引(KnowledgeIndex;入口处 best-effort _load,无索引文件时为 None/未就绪)
+    knowledge_index: Any = None
+    manual_text_handler: Any = None
     # 压话标志:用户当前这句话是否压着 AI 播报开口(附和拒识的上下文闸门)。
     # user_state_changed 在每次开口时直接覆盖(不粘滞、不靠提交复位)。
     overlap_turn_state: dict[str, bool] = field(
