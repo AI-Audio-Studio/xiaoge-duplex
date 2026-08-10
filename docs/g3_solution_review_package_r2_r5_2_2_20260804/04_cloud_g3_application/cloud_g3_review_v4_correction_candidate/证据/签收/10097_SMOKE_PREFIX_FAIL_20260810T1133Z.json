@@ -1,0 +1,70 @@
+{
+  "tool": "g3_cloud_signoff_smoke",
+  "version": 1,
+  "utc": "2026-08-10T11:33:18Z",
+  "base_url": "https://60.205.197.165:10097",
+  "tls_verification": "certificate_sha256_pin:460e09d5d59b91df",
+  "overall": "FAIL",
+  "checks": [
+    {
+      "name": "demo_requires_user_key",
+      "status": "PASS",
+      "detail": "status=200"
+    },
+    {
+      "name": "debug_query_route_disabled",
+      "status": "PASS",
+      "detail": "status=404"
+    },
+    {
+      "name": "formal_query_only_rejected",
+      "status": "PASS",
+      "detail": "close_code=4401"
+    },
+    {
+      "name": "formal_header_plus_query_rejected",
+      "status": "PASS",
+      "detail": "close_code=4401"
+    },
+    {
+      "name": "formal_bearer_handshake",
+      "status": "PASS",
+      "detail": "type=ctrl.ready caps=['audio', 'text', 'cmd', 'state']"
+    },
+    {
+      "name": "single_command_dry_run",
+      "status": "PASS",
+      "detail": "type=data.cmd action=navigation.move"
+    },
+    {
+      "name": "fake_ack_running_succeeded",
+      "status": "PASS",
+      "detail": "frames_sent=true"
+    },
+    {
+      "name": "unknown_cmd_id",
+      "status": "PASS",
+      "detail": "type=data.error code=unknown_cmd_id"
+    },
+    {
+      "name": "multi_command_ask_split",
+      "status": "PASS",
+      "detail": "type=data.reply has_cmd_id=False"
+    },
+    {
+      "name": "bearer_reconnect_new_session",
+      "status": "PASS",
+      "detail": "ready=true"
+    },
+    {
+      "name": "ctrl_hello_token_rejected",
+      "status": "FAIL",
+      "detail": "close_code=1006"
+    },
+    {
+      "name": "hello_caps_cannot_escalate",
+      "status": "PASS",
+      "detail": "caps=['audio', 'text', 'cmd']"
+    }
+  ]
+}
