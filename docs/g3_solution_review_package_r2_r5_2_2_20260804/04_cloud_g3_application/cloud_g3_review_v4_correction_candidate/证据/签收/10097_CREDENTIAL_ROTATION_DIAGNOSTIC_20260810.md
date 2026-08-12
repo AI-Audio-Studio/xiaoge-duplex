@@ -21,9 +21,9 @@ access token、Authorization 值或带 token 的 URL。
 | 随机错误 Key 创建会话 | PASS | HTTP 401，`auth_failed` |
 | 旧 Key 服务端删除 | OWNER DECLARED | 操作方声明已删除；完整旧值已从可分发材料清除，当前工作站无法复写旧值做负向调用 |
 
-上述结果证明 10097 已启用强制 API Key 校验且新 Key 生效。旧 Key 的最终关闭仍需
-Security owner 在 `待签字/SECURITY_OWNER_CREDENTIAL_CLOSURE_TEMPLATE.md` 中填写平台
-作废时间、旧 key-id/指纹和签字；不得为补测试而从历史日志或材料重新传播完整旧值。
+上述结果证明 10097 已启用强制 API Key 校验且新 Key 生效。采证当时旧 Key 平台侧作废仍待
+Security owner 回执；2026-08-11 已由 `SEC-01_API_KEY_CLOSURE_OWNER_DECLARATION_20260811.md`
+补充关闭。不得为补测试而从历史日志或材料重新传播完整旧值。
 
 ## 历史 Access Token
 
@@ -41,7 +41,8 @@ Security owner 在 `待签字/SECURITY_OWNER_CREDENTIAL_CLOSURE_TEMPLATE.md` 中
 
 旧 Key 已在该测试前由操作方声明删除，10097 同时验证缺失/错误 Key 均为 401；因此在
 `2026-08-10T11:20:53Z` 这个边界，删除前签发且未超过 600 秒的历史 token 也已全部跨过
-TTL。该结论关闭 token 重放的应用层技术疑问，但仍需部署/身份 owner 签署回执。
+TTL。该结论关闭 token 重放的应用层技术疑问；2026-08-11 已由
+`SEC-02B_TOKEN_INVALIDATION_OWNER_DECLARATION_20260811.md` 补充 deployment/identity owner 回执。
 
 本次没有在旧快照上继续发送携带有效 token 的 query 请求，以避免把 token 写入旧版 access
 log。query-only、Authorization+query 和 access-log 0 命中必须在部署 V4 后由正式 smoke
@@ -71,5 +72,6 @@ log。query-only、Authorization+query 和 access-log 0 命中必须在部署 V4
 - 到期时间：2027-05-28T02:56:13Z
 
 系统默认 TLS 校验失败；即使把该自签证书作为信任锚，现代客户端仍因 IP SAN 缺失拒绝。
-本文件中的 API 应用层检查使用诊断性 `ssl=False`，不得作为生产 TLS PASS 证据。正式签收
-必须换用受信 CA 签发且 SAN 包含实际域名/IP 的证书，或通过受信域名入口执行 smoke。
+本文件中的 API 应用层检查使用诊断性 `ssl=False`，不得作为生产 TLS PASS 证据。后续正式
+smoke 已使用证书 SHA-256 pin 验收 10097 G3 内部测试入口；若目标变为生产发布，仍必须换用
+受信 CA 签发且 SAN 覆盖生产入口域名的证书，或通过受信域名入口执行 smoke。

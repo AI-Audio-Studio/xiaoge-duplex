@@ -118,7 +118,9 @@ $patterns = [ordered]@{
     jwt = 'eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}'
     openai_style = '(?i)sk-[A-Za-z0-9_-]{20,}'
     literal_bearer = '(?i)Bearer\s+[A-Za-z0-9._-]{24,}'
+    query_token = '(?i)(access_token|token)=tok-[A-Za-z0-9._-]{12,}'
     removed_demo_default = 'DEFAULT_RUOYI_API_KEY'
+    api_key_persistence = '(?i)(localStorage|sessionStorage|[?&]api[_-]?key=)'
 }
 $scanText = ($productionFiles | ForEach-Object {
     Get-Content -Raw -Encoding UTF8 -LiteralPath $_
@@ -130,9 +132,21 @@ foreach ($entry in $patterns.GetEnumerator()) {
     $scanResult[$entry.Key] = $count
     if ($count -ne 0) { $scanFailed = $true }
 }
+$generatedArtifacts = @(
+    Get-ChildItem -LiteralPath $repoRoot -Recurse -Force -Directory -Filter '__pycache__' |
+        Where-Object { $_.FullName -notmatch '[\\/](\.git|\.venv|venv|env)[\\/]' } |
+        ForEach-Object { $_.FullName.Substring($repoRoot.Length + 1).Replace('\', '/') }
+) + @(
+    Get-ChildItem -LiteralPath $repoRoot -Recurse -Force -File -Include '*.pyc', '*.pyo' |
+        Where-Object { $_.FullName -notmatch '[\\/](\.git|\.venv|venv|env)[\\/]' } |
+        ForEach-Object { $_.FullName.Substring($repoRoot.Length + 1).Replace('\', '/') }
+)
+$scanResult['generated_artifacts'] = @($generatedArtifacts).Count
 $scanResult | ConvertTo-Json |
     Set-Content -Encoding UTF8 -LiteralPath (Join-Path $resolvedEvidence '50_sanitization.json')
-if ($scanFailed) { throw 'sensitive material scan failed; inspect locally without copying matches' }
+if ($scanFailed -or @($generatedArtifacts).Count -ne 0) {
+    throw 'sensitive material or generated artifact scan failed; inspect locally without copying matches'
+}
 
 if (Test-Path -LiteralPath 'uv.lock') {
     Copy-Item -LiteralPath 'uv.lock' -Destination (Join-Path $resolvedEvidence 'uv.lock')

@@ -2,7 +2,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `collect_clean_signoff_evidence.ps1` | 在 clean checkout 中执行依赖装配、72 项回归、Ruff、源码哈希和脱敏扫描 |
+| `collect_clean_signoff_evidence.ps1` | 在 clean checkout 中执行依赖装配、72 项回归、Ruff、源码哈希、凭据脱敏扫描和生成产物检查 |
 | `g3_cloud_signoff_smoke.py` | 对 HTTPS 10097 执行不打印凭据的 Bearer/WS/命令链路冒烟 |
 
 工具自身已完成 PowerShell parser、Python bytecode compile、Ruff 和 `--help` 自检。工具只能在

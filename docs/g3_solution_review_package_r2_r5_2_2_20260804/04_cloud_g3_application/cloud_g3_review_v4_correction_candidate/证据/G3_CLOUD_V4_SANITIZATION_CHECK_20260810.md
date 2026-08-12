@@ -6,6 +6,8 @@
 
 扫描范围：`cloud_g3_review_v4_correction_candidate/` 全部文件，包括 `代码/source/`。
 
+2026-08-12 补充说明：该报告原始扫描对象为 `cloud_g3_review_v4_correction_candidate/`。若评审包命名为 `cloud_g3_review_v4_correction_candidate-02/`，本报告只能作为同源候选目录的历史脱敏证据；正式 promotion 前应对实际提交目录重新执行包级 sanitization，并同步覆盖 `__pycache__/`、`*.pyc` 等生成产物检查。
+
 ## 结果
 
 | 模式 | 命中数 |
@@ -19,4 +21,4 @@
 
 扫描只证明当前候选包没有上述完整凭据形态。新 Key 准入、缺失/错误 Key 拒绝结果见
 `签收/10097_CREDENTIAL_ROTATION_DIAGNOSTIC_20260810.md`；旧 Key 平台作废和历史 token
-失效仍须对应 owner 签字。
+失效已由 owner 回执补充关闭。
