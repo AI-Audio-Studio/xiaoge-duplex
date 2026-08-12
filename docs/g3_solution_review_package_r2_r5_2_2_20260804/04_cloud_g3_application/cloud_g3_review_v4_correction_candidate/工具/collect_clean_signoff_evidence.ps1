@@ -91,6 +91,13 @@ uv run ruff check @ruffTargets 2>&1 |
     Tee-Object -FilePath (Join-Path $resolvedEvidence '30_ruff.log')
 if ($LASTEXITCODE -ne 0) { throw 'ruff failed' }
 
+Get-ChildItem -LiteralPath $repoRoot -Recurse -Force -Directory -Filter '__pycache__' |
+    Where-Object { $_.FullName -notmatch '[\/](\.git|\.venv|venv|env)[\/]' } |
+    Remove-Item -Recurse -Force
+Get-ChildItem -LiteralPath $repoRoot -Recurse -Force -File -Include '*.pyc', '*.pyo' |
+    Where-Object { $_.FullName -notmatch '[\/](\.git|\.venv|venv|env)[\/]' } |
+    Remove-Item -Force
+
 $snapshotFiles = @($ruffTargets) + @(
     'examples/voice_agents/data/knowledge/product_manual.md',
     'examples/voice_agents/webpanel/static/index.html',
