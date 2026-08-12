@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1640" height="1280" viewBox="0 0 1640 1280">
+  <defs>
+    <marker id="arrow" markerWidth="11" markerHeight="11" refX="9.5" refY="5.5" orient="auto">
+      <path d="M 0 0 L 10 5.5 L 0 11 z" fill="context-stroke"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2" flood-color="#0F172A" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+  <style>
+    text { font-family: 'Microsoft YaHei', 'Noto Sans CJK SC', 'PingFang SC', 'Segoe UI', Arial, sans-serif; letter-spacing: 0; }
+  </style>
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <text x="60" y="46" text-anchor="start" font-size="24" font-weight="900" fill="#172033" opacity="1"><tspan x="60" dy="0">R5.2.2 命令投递与执行状态图（multi_command_blocked + ack-result）</tspan></text>
+  <rect x="66" y="82" width="700" height="316" rx="14" fill="#EFF6FF" stroke="#BFDBFE"/><rect x="66" y="430" width="700" height="238" rx="14" fill="#F8FAFC" stroke="#CBD5E1"/><rect x="66" y="700" width="700" height="174" rx="14" fill="#F8FAFC" stroke="#CBD5E1"/><rect x="805" y="82" width="760" height="792" rx="14" fill="#FFFFFF" stroke="#CBD5E1"/><text x="92" y="112" text-anchor="start" font-size="17" font-weight="900" fill="#1D4ED8" opacity="1"><tspan x="92" dy="0">小歌交互引擎/命令路由</tspan></text><text x="92" y="460" text-anchor="start" font-size="17" font-weight="900" fill="#334155" opacity="1"><tspan x="92" dy="0">端侧 SDK</tspan></text><text x="92" y="730" text-anchor="start" font-size="17" font-weight="900" fill="#334155" opacity="1"><tspan x="92" dy="0">端侧执行模块（工程外）</tspan></text><text x="830" y="112" text-anchor="start" font-size="17" font-weight="900" fill="#DC2626" opacity="1"><tspan x="830" dy="0">异常与可靠性策略</tspan></text><g>
+    <rect x="115" y="150" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#2563EB" stroke-width="2"/>
+    <text x="197.5" y="178" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="197.5" dy="0">intent_ready</tspan></text>
+    <text x="197.5" y="205" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="197.5" dy="0">ASR/LLM 解析出候选意图</tspan></text>
+    <g>
+    <rect x="165.5" y="208" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="197.5" y="223" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-001</text>
+  </g>
+  </g><g>
+    <rect x="320" y="150" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#D97706" stroke-width="2"/>
+    <text x="402.5" y="178" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="402.5" dy="0">risk_gate</tspan></text>
+    <text x="402.5" y="205" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="402.5" dy="0">识别动作风险与能力</tspan></text>
+    <g>
+    <rect x="370.5" y="208" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="402.5" y="223" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-005</text>
+  </g>
+  </g><g>
+    <rect x="520" y="150" width="165" height="88" rx="10" fill="#FFFBEB" stroke="#D97706" stroke-width="2"/>
+    <text x="602.5" y="178" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="602.5" dy="0">pending_conf</tspan></text>
+    <text x="602.5" y="205" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="602.5" dy="0">高危命令等待用户确认</tspan></text>
+    <g>
+    <rect x="570.5" y="208" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="602.5" y="223" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-005</text>
+  </g>
+  </g><g>
+    <rect x="115" y="280" width="165" height="88" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="2"/>
+    <text x="197.5" y="308" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="197.5" dy="0">send_allowed</tspan></text>
+    <text x="197.5" y="335" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="197.5" dy="0">已确认/低风险且能力满足</tspan></text>
+    <g>
+    <rect x="165.5" y="338" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="197.5" y="353" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-006</text>
+  </g>
+  </g><g>
+    <rect x="320" y="280" width="165" height="88" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="2"/>
+    <text x="402.5" y="308" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="402.5" dy="0">ack_waiting</tspan></text>
+    <text x="402.5" y="335" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="402.5" dy="0">已发送 data.cmd，等待 ack </tspan><tspan x="402.5" dy="18">timeout</tspan></text>
+    <g>
+    <rect x="370.5" y="338" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="402.5" y="353" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-008</text>
+  </g>
+  </g><g>
+    <rect x="520" y="280" width="165" height="88" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="2"/>
+    <text x="602.5" y="308" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="602.5" dy="0">ack_accepted</tspan></text>
+    <text x="602.5" y="335" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="602.5" dy="0">收到 ack accepted</tspan></text>
+    <g>
+    <rect x="570.5" y="338" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="602.5" y="353" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-008</text>
+  </g>
+  </g><g>
+    <rect x="115" y="505" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
+    <text x="197.5" y="533" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="197.5" dy="0">sdk_received</tspan></text>
+    <text x="197.5" y="560" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="197.5" dy="0">SDK 收到 data.cmd</tspan></text>
+    <g>
+    <rect x="165.5" y="563" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="197.5" y="578" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-DEV-001</text>
+  </g>
+  </g><g>
+    <rect x="320" y="505" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
+    <text x="402.5" y="533" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="402.5" dy="0">ack_sent</tspan></text>
+    <text x="402.5" y="560" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="402.5" dy="0">SDK 立即回传 accepted / rejected </tspan><tspan x="402.5" dy="18">/ duplicate</tspan></text>
+    <g>
+    <rect x="370.5" y="563" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="402.5" y="578" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-008</text>
+  </g>
+  </g><g>
+    <rect x="520" y="505" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
+    <text x="602.5" y="533" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="602.5" dy="0">execute_forwarded</tspan></text>
+    <text x="602.5" y="560" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="602.5" dy="0">转给端侧应用/执行器</tspan></text>
+    <g>
+    <rect x="570.5" y="563" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="602.5" y="578" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-DEV-001</text>
+  </g>
+  </g><g>
+    <rect x="220" y="760" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
+    <text x="302.5" y="788" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="302.5" dy="0">running</tspan></text>
+    <text x="302.5" y="815" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="302.5" dy="0">执行动作/控制设备</tspan></text>
+    <g>
+    <rect x="270.5" y="818" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="302.5" y="833" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-DEV-001</text>
+  </g>
+  </g><g>
+    <rect x="520" y="760" width="165" height="88" rx="10" fill="#FFFFFF" stroke="#334155" stroke-width="2"/>
+    <text x="602.5" y="788" text-anchor="middle" font-size="16" font-weight="850" fill="#172033" opacity="1"><tspan x="602.5" dy="0">result_ready</tspan></text>
+    <text x="602.5" y="815" text-anchor="middle" font-size="13" font-weight="400" fill="#334155" opacity="1"><tspan x="602.5" dy="0">生成成功/失败/取消结果</tspan></text>
+    <g>
+    <rect x="570.5" y="818" width="63.99999999999999" height="22" rx="6" fill="#EEF2FF" stroke="#A5B4FC"/>
+    <text x="602.5" y="833" text-anchor="middle" font-size="11" font-weight="800" fill="#3730A3">FR-CMD-006</text>
+  </g>
+  </g><g>
+    <path d="M 280 194 L 320 194" fill="none" stroke="#2563EB" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="300" y="184" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="300" dy="0">语义命中</tspan></text>
+  </g><g>
+    <path d="M 485 194 L 520 194" fill="none" stroke="#D97706" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="502.5" y="184" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="502.5" dy="0">high</tspan></text>
+  </g><g>
+    <path d="M 602 238 L 602 260 L 197 260 L 197 280" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="399.5" y="252" text-anchor="middle" font-size="12" font-weight="400" fill="#059669" opacity="1"><tspan x="399.5" dy="0">确认通过</tspan></text>
+  </g><g>
+    <path d="M 402 238 L 402 260 L 197 260 L 197 280" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="299.5" y="252" text-anchor="middle" font-size="12" font-weight="400" fill="#059669" opacity="1"><tspan x="299.5" dy="0">low/medium</tspan></text>
+  </g><g>
+    <path d="M 280 324 L 320 324" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="300" y="314" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="300" dy="0">emit data.cmd</tspan></text>
+  </g><g>
+    <path d="M 485 324 L 520 324" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="502.5" y="314" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="502.5" dy="0">ack accepted</tspan></text>
+  </g><g>
+    <path d="M 402 368 L 402 472 L 197 472 L 197 505" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="299.5" y="464" text-anchor="middle" font-size="12" font-weight="400" fill="#059669" opacity="1"><tspan x="299.5" dy="0">WSS 下发</tspan></text>
+  </g><g>
+    <path d="M 280 549 L 320 549" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="300" y="539" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="300" dy="0">data.cmd_ack</tspan></text>
+  </g><g>
+    <path d="M 485 549 L 520 549" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="502.5" y="539" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="502.5" dy="0">转执行</tspan></text>
+  </g><g>
+    <path d="M 602 593 L 602 720 L 302 720 L 302 760" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="452" y="712" text-anchor="middle" font-size="12" font-weight="400" fill="#334155" opacity="1"><tspan x="452" dy="0">端侧应用调用</tspan></text>
+  </g><g>
+    <path d="M 385 804 L 520 804" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="452.5" y="794" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="452.5" dy="0">result</tspan></text>
+  </g><g>
+    <path d="M 602 760 L 690 760 L 690 324 L 685 324" fill="none" stroke="#059669" stroke-width="2" marker-end="url(#arrow)"/>
+    <text x="690" y="534" text-anchor="middle" font-size="12" font-weight="400" fill="#059669" opacity="1"><tspan x="690" dy="0">data.cmd_result 回云端</tspan></text>
+  </g><g>
+    <path d="M 685 324 L 805 324" fill="none" stroke="#DC2626" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+    <text x="745" y="314" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="745" dy="0">异常分支见右表</tspan></text>
+  </g><g>
+    <path d="M 685 549 L 805 549" fill="none" stroke="#D97706" stroke-width="2" marker-end="url(#arrow)" stroke-dasharray="7 6"/>
+    <text x="745" y="539" text-anchor="middle" font-size="12" font-weight="400" fill="#172033" opacity="1"><tspan x="745" dy="0">ack 与 result 异常</tspan></text>
+  </g><rect x="850" y="150" width="736" height="34" rx="8" fill="#DC2626"/><text x="866" y="173" text-anchor="start" font-size="14" font-weight="850" fill="#FFFFFF" opacity="1"><tspan x="866" dy="0">异常状态转移表</tspan></text><rect x="850" y="190" width="150" height="58" fill="#E2E8F0" stroke="#CBD5E1"/><text x="860" y="211" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="860" dy="0">源状态</tspan></text><rect x="1000" y="190" width="248" height="58" fill="#E2E8F0" stroke="#CBD5E1"/><text x="1010" y="211" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="1010" dy="0">事件/条件</tspan></text><rect x="1248" y="190" width="174" height="58" fill="#E2E8F0" stroke="#CBD5E1"/><text x="1258" y="211" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="1258" dy="0">目标状态</tspan></text><rect x="1422" y="190" width="164" height="58" fill="#E2E8F0" stroke="#CBD5E1"/><text x="1432" y="211" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="1432" dy="0">需求ID</tspan></text><rect x="850" y="248" width="150" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="860" y="269" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">intent_ready</tspan></text><rect x="1000" y="248" width="248" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1010" y="269" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">一轮多个控制动作</tspan></text><rect x="1248" y="248" width="174" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1258" y="269" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">multi_cmd_blocked</tspan><tspan x="1258" dy="14">ask_split</tspan></text><rect x="1422" y="248" width="164" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1432" y="269" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-003</tspan></text><rect x="850" y="306" width="150" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="860" y="327" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">risk_gate</tspan><tspan x="860" dy="14">pending_conf</tspan></text><rect x="1000" y="306" width="248" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1010" y="327" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">能力不支持、目标离线、确认拒绝或确认超时</tspan><tspan x="1010" dy="14">；确认前不生成 data.cmd</tspan></text><rect x="1248" y="306" width="174" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1258" y="327" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">send_blocked</tspan></text><rect x="1422" y="306" width="164" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1432" y="327" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-005, FR-CMD-006</tspan></text><rect x="850" y="364" width="150" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="860" y="385" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">ack_waiting</tspan></text><rect x="1000" y="364" width="248" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1010" y="385" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">ack timeout 未收到 cmd_ack</tspan></text><rect x="1248" y="364" width="174" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1258" y="385" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">delivery_timeout</tspan></text><rect x="1422" y="364" width="164" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1432" y="385" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-008</tspan></text><rect x="850" y="422" width="150" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="860" y="443" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">ack_waiting</tspan></text><rect x="1000" y="422" width="248" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1010" y="443" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">断线且 cmd 未 ack；P0 不做命令重放</tspan></text><rect x="1248" y="422" width="174" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1258" y="443" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">disconnect_unacked</tspan></text><rect x="1422" y="422" width="164" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1432" y="443" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-008</tspan></text><rect x="850" y="480" width="150" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="860" y="501" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">ack_accepted</tspan><tspan x="860" dy="14">running</tspan></text><rect x="1000" y="480" width="248" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1010" y="501" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">result timeout 未收到终态 result</tspan></text><rect x="1248" y="480" width="174" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1258" y="501" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">execution_timeout</tspan></text><rect x="1422" y="480" width="164" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1432" y="501" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-006</tspan></text><rect x="850" y="538" width="150" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="860" y="559" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">任意命令终态</tspan></text><rect x="1000" y="538" width="248" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1010" y="559" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">重复 ack 与 result</tspan></text><rect x="1248" y="538" width="174" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1258" y="559" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">duplicate_ignored</tspan></text><rect x="1422" y="538" width="164" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1432" y="559" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-008</tspan></text><rect x="850" y="596" width="150" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="860" y="617" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">会话命令表无记录</tspan></text><rect x="1000" y="596" width="248" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1010" y="617" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">unknown cmd 的 ack 或 result</tspan></text><rect x="1248" y="596" width="174" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1258" y="617" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">data_error_audit</tspan></text><rect x="1422" y="596" width="164" height="58" fill="#FFFFFF" stroke="#CBD5E1"/><text x="1432" y="617" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-008</tspan></text><rect x="850" y="654" width="150" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="860" y="675" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="860" dy="0">execution_timeout 之后</tspan></text><rect x="1000" y="654" width="248" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1010" y="675" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1010" dy="0">迟到 result</tspan></text><rect x="1248" y="654" width="174" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1258" y="675" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1258" dy="0">late_recorded</tspan></text><rect x="1422" y="654" width="164" height="58" fill="#F8FAFC" stroke="#CBD5E1"/><text x="1432" y="675" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="1432" dy="0">FR-CMD-006</tspan></text><g>
+    <rect x="850" y="760" width="736" height="84" rx="10" fill="#FFFBEB" stroke="#D97706" stroke-width="1.5"/>
+    <text x="868" y="786" text-anchor="start" font-size="14" font-weight="850" fill="#92400E" opacity="1"><tspan x="868" dy="0">可靠性基线</tspan></text>
+    <text x="868" y="810" text-anchor="start" font-size="12" font-weight="400" fill="#334155" opacity="1"><tspan x="868" dy="0">P0 只保证单连接在线投递闭环，不做重放；ack status=accepted/rejected/duplicate，result 表示端侧执行进展/终态。</tspan></text>
+    <g>
+    <rect x="1150" y="816" width="63.99999999999999" height="22" rx="6" fill="#FFFFFF" stroke="#F59E0B"/>
+    <text x="1182" y="831" text-anchor="middle" font-size="11" font-weight="800" fill="#92400E">FR-CMD-006</text>
+  </g><g>
+    <rect x="1222" y="816" width="63.99999999999999" height="22" rx="6" fill="#FFFFFF" stroke="#F59E0B"/>
+    <text x="1254" y="831" text-anchor="middle" font-size="11" font-weight="800" fill="#92400E">FR-CMD-008</text>
+  </g>
+  </g><rect x="120" y="930" width="1270" height="34" rx="8" fill="#334155"/><text x="136" y="953" text-anchor="start" font-size="14" font-weight="850" fill="#FFFFFF" opacity="1"><tspan x="136" dy="0">P0 命令消息契约</tspan></text><rect x="120" y="970" width="150" height="34" fill="#E2E8F0" stroke="#CBD5E1"/><text x="130" y="991" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="130" dy="0">消息</tspan></text><rect x="270" y="970" width="310" height="34" fill="#E2E8F0" stroke="#CBD5E1"/><text x="280" y="991" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="280" dy="0">发送方</tspan></text><rect x="580" y="970" width="310" height="34" fill="#E2E8F0" stroke="#CBD5E1"/><text x="590" y="991" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="590" dy="0">语义</tspan></text><rect x="890" y="970" width="500" height="34" fill="#E2E8F0" stroke="#CBD5E1"/><text x="900" y="991" text-anchor="start" font-size="12" font-weight="800" fill="#172033" opacity="1"><tspan x="900" dy="0">验收重点</tspan></text><rect x="120" y="1004" width="150" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="130" y="1025" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="130" dy="0">data.cmd</tspan></text><rect x="270" y="1004" width="310" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="280" y="1025" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="280" dy="0">小歌 -&gt; SDK</tspan></text><rect x="580" y="1004" width="310" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="590" y="1025" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="590" dy="0">单命令：ids/capability/action/params/risk</tspan></text><rect x="890" y="1004" width="500" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="900" y="1025" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="900" dy="0">只在 send_allowed 后发送；高危确认前不可出现</tspan></text><rect x="120" y="1038" width="150" height="34" fill="#F8FAFC" stroke="#CBD5E1"/><text x="130" y="1059" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="130" dy="0">data.cmd_ack</tspan></text><rect x="270" y="1038" width="310" height="34" fill="#F8FAFC" stroke="#CBD5E1"/><text x="280" y="1059" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="280" dy="0">SDK -&gt; 小歌</tspan></text><rect x="580" y="1038" width="310" height="34" fill="#F8FAFC" stroke="#CBD5E1"/><text x="590" y="1059" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="590" dy="0">accepted / rejected / duplicate</tspan></text><rect x="890" y="1038" width="500" height="34" fill="#F8FAFC" stroke="#CBD5E1"/><text x="900" y="1059" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="900" dy="0">ack timeout、重复 ack、unknown cmd 均可观测</tspan></text><rect x="120" y="1072" width="150" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="130" y="1093" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="130" dy="0">data.cmd_result</tspan></text><rect x="270" y="1072" width="310" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="280" y="1093" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="280" dy="0">SDK -&gt; 小歌</tspan></text><rect x="580" y="1072" width="310" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="590" y="1093" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="590" dy="0">running/succeeded</tspan><tspan x="590" dy="14">failed/canceled/timeout</tspan></text><rect x="890" y="1072" width="500" height="34" fill="#FFFFFF" stroke="#CBD5E1"/><text x="900" y="1093" text-anchor="start" font-size="11" font-weight="500" fill="#334155" opacity="1"><tspan x="900" dy="0">result timeout 与投递失败分离；late result 不污染当前轮</tspan></text>
+</svg>

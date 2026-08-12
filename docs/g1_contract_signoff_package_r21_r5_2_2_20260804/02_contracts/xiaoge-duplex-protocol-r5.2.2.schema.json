@@ -1,0 +1,866 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xiaoge:duplex:protocol:r5.2.2",
+  "title": "Xiaoge Duplex Protocol R5.2.2 Contract",
+  "description": "Machine-checkable G1 contract manually curated from R5.2.2 workbook, protocol-v2 v1.9, and voice-cmd v4.5, then machine-reconciled against the workbook inspect tables. P1 controls ctrl.status/get/set/ack are intentionally excluded from the P0 schema. Legacy clients and legacy close codes are out of scope.",
+  "x-contract-version": "xiaoge-duplex-protocol-r5.2.2",
+  "x-frame-json-max-bytes": 8192,
+  "x-frame-binary-max-bytes": 32768,
+  "oneOf": [
+    {
+      "$ref": "#/$defs/createSessionRequest"
+    },
+    {
+      "$ref": "#/$defs/createSessionResponse"
+    },
+    {
+      "$ref": "#/$defs/wssAuth"
+    },
+    {
+      "$ref": "#/$defs/ctrlHello"
+    },
+    {
+      "$ref": "#/$defs/ctrlReady"
+    },
+    {
+      "$ref": "#/$defs/ctrlState"
+    },
+    {
+      "$ref": "#/$defs/ctrlFrontendState"
+    },
+    {
+      "$ref": "#/$defs/ctrlClear"
+    },
+    {
+      "$ref": "#/$defs/dataStt"
+    },
+    {
+      "$ref": "#/$defs/dataReply"
+    },
+    {
+      "$ref": "#/$defs/dataCmd"
+    },
+    {
+      "$ref": "#/$defs/dataCmdAck"
+    },
+    {
+      "$ref": "#/$defs/dataCmdResult"
+    },
+    {
+      "$ref": "#/$defs/dataError"
+    }
+  ],
+  "$defs": {
+    "createSessionRequest": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "credential",
+        "caps",
+        "audio_format",
+        "client_version"
+      ],
+      "properties": {
+        "device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "credential": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": true
+            },
+            {
+              "type": "string",
+              "minLength": 1
+            }
+          ]
+        },
+        "caps": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "audio",
+              "text",
+              "cmd",
+              "state"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "prefs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "audio_format": {
+          "type": "object",
+          "required": [
+            "sample_rate",
+            "channels",
+            "sample_format"
+          ],
+          "properties": {
+            "sample_rate": {
+              "const": 16000
+            },
+            "channels": {
+              "const": 1
+            },
+            "sample_format": {
+              "const": "int16le"
+            }
+          },
+          "additionalProperties": false
+        },
+        "client_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "createSessionResponse": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "access_token",
+        "expires_in_ms",
+        "ws_url",
+        "granted_caps",
+        "config_snapshot"
+      ],
+      "properties": {
+        "type": {
+          "const": "session.created"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "access_token": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expires_in_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ws_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "granted_caps": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "audio",
+              "text",
+              "cmd",
+              "state"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "config_snapshot": {
+          "type": "object",
+          "required": [
+            "config_version"
+          ],
+          "properties": {
+            "config_version": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "wssAuth": {
+      "type": "object",
+      "required": [
+        "method",
+        "path",
+        "headers"
+      ],
+      "properties": {
+        "method": {
+          "const": "GET"
+        },
+        "path": {
+          "const": "/ws/session"
+        },
+        "headers": {
+          "type": "object",
+          "required": [
+            "Authorization"
+          ],
+          "properties": {
+            "Authorization": {
+              "type": "string",
+              "pattern": "^Bearer .+"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ctrlHello": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "proto",
+        "role",
+        "device_id",
+        "caps"
+      ],
+      "properties": {
+        "type": {
+          "const": "ctrl.hello"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proto": {
+          "const": 2
+        },
+        "role": {
+          "enum": [
+            "device",
+            "panel"
+          ]
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "caps": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "audio",
+              "text",
+              "cmd",
+              "state"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "prefs": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ctrlReady": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "sample_rate",
+        "granted_caps",
+        "config_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "ctrl.ready"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sample_rate": {
+          "const": 16000
+        },
+        "granted_caps": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "audio",
+              "text",
+              "cmd",
+              "state"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "config_version": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "ctrlState": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "link_state",
+        "interaction_mode",
+        "engine_gate",
+        "resource_state",
+        "ts_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "ctrl.state"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "link_state": {
+          "enum": [
+            "connecting",
+            "connected",
+            "reconnecting",
+            "closed"
+          ]
+        },
+        "interaction_mode": {
+          "enum": [
+            "sleeping",
+            "dialogue",
+            "listening"
+          ]
+        },
+        "engine_gate": {
+          "enum": [
+            "closed",
+            "open",
+            "kws_only"
+          ]
+        },
+        "resource_state": {
+          "enum": [
+            "SleepingHot",
+            "SleepingWarm",
+            "ActiveAgent",
+            "ReleasedIdle",
+            "PendingReconnect"
+          ]
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_confirmation": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "ctrlFrontendState": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "seq",
+        "ts_ms",
+        "ttl_ms",
+        "trust_level"
+      ],
+      "properties": {
+        "type": {
+          "const": "ctrl.frontend_state"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "trust_level": {
+          "enum": [
+            "observe",
+            "hint",
+            "authoritative"
+          ]
+        },
+        "wake_event": {
+          "enum": [
+            "local_kws",
+            "button",
+            "gui",
+            "none"
+          ]
+        },
+        "wake_state": {
+          "enum": [
+            "sleeping",
+            "awake",
+            "unknown"
+          ]
+        },
+        "vad": {
+          "enum": [
+            "silence",
+            "speech",
+            "unknown"
+          ]
+        },
+        "doa": {
+          "type": "number"
+        },
+        "lock_mode": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ctrlClear": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "ctrl.clear"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "enum": [
+            "barge_in",
+            "user_stop",
+            "system_cancel",
+            "sleep"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataStt": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "utterance_id",
+        "text",
+        "final",
+        "ts_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.stt"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "final": {
+          "type": "boolean"
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataReply": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "utterance_id",
+        "intent_type",
+        "text",
+        "ts_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.reply"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intent_type": {
+          "enum": [
+            "control_cmd",
+            "info_query",
+            "knowledge_qa",
+            "chat",
+            "config",
+            "system"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "speak_policy": {
+          "enum": [
+            "silent",
+            "ack",
+            "ack_then_result",
+            "final_only"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataCmd": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "utterance_id",
+        "cmd_id",
+        "capability_id",
+        "action",
+        "params",
+        "risk_level",
+        "ack_timeout_ms",
+        "result_timeout_ms",
+        "issued_at_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.cmd"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cmd_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "params": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "risk_level": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "ack_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "result_timeout_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "issued_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataCmdAck": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "utterance_id",
+        "cmd_id",
+        "status",
+        "code",
+        "received_at_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.cmd_ack"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cmd_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "accepted",
+            "rejected",
+            "duplicate"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "received_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataCmdResult": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "utterance_id",
+        "cmd_id",
+        "status",
+        "code"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.cmd_result"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "utterance_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cmd_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": [
+            "running",
+            "succeeded",
+            "failed",
+            "canceled",
+            "timeout"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "message": {
+          "type": "string"
+        },
+        "started_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "finished_at_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dataError": {
+      "type": "object",
+      "required": [
+        "type",
+        "trace_id",
+        "session_id",
+        "code",
+        "message",
+        "retryable",
+        "ts_ms"
+      ],
+      "properties": {
+        "type": {
+          "const": "data.error"
+        },
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "code": {
+          "enum": [
+            "auth_failed",
+            "permission_denied",
+            "busy",
+            "protocol_error",
+            "capability_unsupported",
+            "token_expired",
+            "duplicate_connection",
+            "resource_exhausted",
+            "unknown_cmd_id"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "ts_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "p0Message": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/ctrlHello"
+        },
+        {
+          "$ref": "#/$defs/ctrlReady"
+        },
+        {
+          "$ref": "#/$defs/ctrlState"
+        },
+        {
+          "$ref": "#/$defs/ctrlFrontendState"
+        },
+        {
+          "$ref": "#/$defs/ctrlClear"
+        },
+        {
+          "$ref": "#/$defs/dataStt"
+        },
+        {
+          "$ref": "#/$defs/dataReply"
+        },
+        {
+          "$ref": "#/$defs/dataCmd"
+        },
+        {
+          "$ref": "#/$defs/dataCmdAck"
+        },
+        {
+          "$ref": "#/$defs/dataCmdResult"
+        },
+        {
+          "$ref": "#/$defs/dataError"
+        }
+      ]
+    }
+  }
+}

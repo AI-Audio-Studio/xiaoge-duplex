@@ -1,0 +1,126 @@
+{
+  "version": "xiaoge-duplex-protocol-r5.2.2",
+  "generated_at": "2026-08-03T09:52:53.409Z",
+  "status": "G1_CONTRACT_PACKAGE_DRAFT_NOT_SIGNED",
+  "accountable_owners": {
+    "clients_owner": {
+      "name": "童紫薇",
+      "scope": "clients SDK/GUI/fake SDK/fake executor"
+    },
+    "cloud_owner": {
+      "name": "王明辉",
+      "scope": "Gateway/Auth/sessproto/Agent/voice-cmd/fake server/cloud replay"
+    },
+    "protocol_arbiter": {
+      "name": "陈强",
+      "scope": "Manifest hash, field, enum, error code, close code, and no-legacy dispute decisions"
+    }
+  },
+  "contract_generation_mode": {
+    "mode": "manual_curated_contract_with_machine_reconciliation",
+    "statement": "The schema/examples/registry are curated contract artifacts. build_contracts.mjs parses the R5.2.2 workbook inspect tables and fails generation if the source tables drift from the contract."
+  },
+  "gate": {
+    "g1": "contract package/signoff only",
+    "g2": "blocked until G1 review; only mock/test code when approved",
+    "implementation": "blocked until G1/G2/G3 and explicit owner approval"
+  },
+  "sources": {
+    "workbook": {
+      "path": "outputs/xiaoge_full_duplex_20260731/xiaoge_full_duplex_requirements_design_20260731_r5_2_2_review.xlsx",
+      "sha256": "5fcd038de9de0fb36d96f88988f6f8eda29a0cf7034aa18fb83c99c639627b25"
+    },
+    "workbook_inspect": {
+      "path": "outputs/xiaoge_full_duplex_20260731/xiaoge_full_duplex_requirements_design_20260731_r5_2_2_review.xlsx.inspect.ndjson",
+      "sha256": "5384f8b8b82afeb608cad7cc53ff3ea57bb5779efc6f6d3b3736ef49c5fa4eda"
+    },
+    "protocol_v2": {
+      "path": "docs/design/protocol-v2/PROTOCOL_V2_DESIGN.md",
+      "version": "v1.9",
+      "sha256": "10c596d4c6662ec56e6ea00b71d94a8da28227053e35d12ec61146b8d01e8c05"
+    },
+    "voice_cmd": {
+      "path": "docs/design/voice-cmd/VOICE_CMD_DESIGN.md",
+      "version": "v4.5",
+      "sha256": "7b5a74ff34380f21128c4a944d027e83a93d1c662da49555953e1cbfc1bec0ac"
+    },
+    "generator": {
+      "path": "docs/design/protocol-v2/contracts/build_contracts.mjs",
+      "sha256": "e21a893f76cf0533ed83b03a3a1649b56b1ce4404c7c5691d1c92fdb0264c514"
+    }
+  },
+  "generated_files": {
+    "protocol_schema": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-protocol-r5.2.2.schema.json",
+      "sha256": "3b068793be381264fcd1099e399572f424b42d0bb311b3cfa4f0f50ff472f4b9"
+    },
+    "examples_jsonl": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-protocol-r5.2.2.examples.jsonl",
+      "sha256": "18bb3099cbc3e0d663be5870f85ace66db3c59d92d1c3ba843648433a1b672c4"
+    },
+    "close_code_cases_jsonl": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-protocol-r5.2.2.close-codes.jsonl",
+      "sha256": "91630485b0b301243d32377e171ccdc33a8769610c2185a5f2d668cc0d546ad9"
+    },
+    "voicecmd_registry_schema": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-voicecmd-registry-r5.2.2.schema.json",
+      "sha256": "bde318f4920d205c9fc0e8cf5e7c59999dcb4fee6d74d3eaab76367127561214"
+    },
+    "source_reconciliation_report": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-protocol-r5.2.2.source-check.json",
+      "sha256": "ba08d5564c3e35ab039e12d8177e6b53403590cc8dbda6a4ac24ece766fac5ca"
+    },
+    "signoff": {
+      "path": "docs/design/protocol-v2/contracts/xiaoge-duplex-protocol-r5.2.2.signoff.md",
+      "sha256": "a2c3f048993b5ce3d169f700086f23ef7b2d2dc619a01ba6d5ab535b2f65ae81"
+    }
+  },
+  "validation": {
+    "result": "PASS",
+    "schema_sample_field_check": "PASS",
+    "p1_control_not_in_p0_schema": "PASS",
+    "positive_examples": 17,
+    "negative_schema_fail_examples": 12,
+    "negative_semantic_or_transport_examples": 3,
+    "source_reconciliation": {
+      "result": "PASS",
+      "mode": "manual_curated_contract_with_machine_reconciliation",
+      "workbook_schema_rows_checked": 84,
+      "workbook_schema_fields_checked": 111,
+      "workbook_sample_frames_checked": 15,
+      "registry_rows_checked": 14,
+      "error_close_code_rows_checked": 9,
+      "close_code_cases_checked": 11,
+      "close_codes_covered": [
+        1013,
+        4009,
+        4400,
+        4401,
+        4403
+      ],
+      "http_statuses_covered": [
+        401,
+        403,
+        503
+      ],
+      "data_error_codes_covered": [
+        "busy",
+        "protocol_error",
+        "resource_exhausted"
+      ]
+    },
+    "p1_controls_excluded": [
+      "ctrl.status",
+      "ctrl.get",
+      "ctrl.set",
+      "ctrl.ack"
+    ],
+    "error_code_contract": {
+      "protocol_error": 4400,
+      "token_expired": 4401,
+      "permission_denied": 4403,
+      "duplicate_connection": 4009,
+      "resource_exhausted_or_busy": 1013
+    }
+  }
+}

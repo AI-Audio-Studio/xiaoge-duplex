@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:xiaoge:duplex:voicecmd-registry:r5.2.2",
+  "title": "Xiaoge Voice Intent Seed/Registry R5.2.2 Contract",
+  "description": "Machine-checkable schema for R5.2.2 P0 voice intent seed/registry entries. It covers cloud routing intents as well as endpoint-executable control commands. Only delivery=data.cmd and delivery=data.cmd after confirmation are executable by clients/fake executor. cloud_tool + data.reply, cloud_knowledge + data.reply, and ask_split only are cloud-handled reply-only entries and must not be consumed as endpoint execution contracts. P0 parameter types are intentionally limited to enum/int.",
+  "x-contract-version": "xiaoge-duplex-protocol-r5.2.2",
+  "x-client-executable-deliveries": [
+    "data.cmd",
+    "data.cmd after confirmation"
+  ],
+  "x-cloud-reply-only-deliveries": [
+    "cloud_tool + data.reply",
+    "cloud_knowledge + data.reply",
+    "ask_split only"
+  ],
+  "type": "object",
+  "required": [
+    "version",
+    "entries"
+  ],
+  "properties": {
+    "version": {
+      "const": "xiaoge-duplex-protocol-r5.2.2"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/commandEntry"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "commandEntry": {
+      "type": "object",
+      "required": [
+        "action",
+        "capability_id",
+        "intent_type",
+        "delivery",
+        "params",
+        "risk_level",
+        "owner",
+        "unsupported_behavior",
+        "source_seed"
+      ],
+      "properties": {
+        "action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "capability_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "intent_type": {
+          "enum": [
+            "control_cmd",
+            "config",
+            "config/control",
+            "info_query",
+            "knowledge_qa",
+            "control_cmd_multi"
+          ]
+        },
+        "delivery": {
+          "description": "Endpoint executable iff delivery is data.cmd or data.cmd after confirmation. cloud_tool + data.reply, cloud_knowledge + data.reply, and ask_split only are not executable by clients/fake executor.",
+          "enum": [
+            "data.cmd",
+            "data.cmd after confirmation",
+            "ctrl.set/config API",
+            "data.cmd or ctrl.set by owner",
+            "cloud_tool + data.reply",
+            "cloud_knowledge + data.reply",
+            "ask_split only"
+          ]
+        },
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/paramSpec"
+          }
+        },
+        "risk_level": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unsupported_behavior": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_seed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "positive_examples": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "negative_examples": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "paramSpec": {
+      "type": "object",
+      "required": [
+        "name",
+        "type",
+        "required"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "enum": [
+            "enum",
+            "int"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "enum": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "default": {}
+      },
+      "additionalProperties": false
+    }
+  }
+}

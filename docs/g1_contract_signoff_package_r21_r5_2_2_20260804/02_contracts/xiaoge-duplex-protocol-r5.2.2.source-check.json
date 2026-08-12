@@ -1,0 +1,208 @@
+{
+  "version": "xiaoge-duplex-protocol-r5.2.2",
+  "generated_at": "2026-08-03T09:52:53.409Z",
+  "result": "PASS",
+  "mode": "manual_curated_contract_with_machine_reconciliation",
+  "workbook_inspect_path": "outputs/xiaoge_full_duplex_20260731/xiaoge_full_duplex_requirements_design_20260731_r5_2_2_review.xlsx.inspect.ndjson",
+  "tables_checked": {
+    "authoritative_json_schema": {
+      "result": "PASS",
+      "source_rows_checked": 84,
+      "fields_checked": 111,
+      "required_fields_checked": 64,
+      "enum_values_checked": 80,
+      "const_fields_checked": 12,
+      "source_objects_checked": [
+        "create_session.request",
+        "create_session.response",
+        "ctrl.clear",
+        "ctrl.frontend_state",
+        "ctrl.hello",
+        "ctrl.ready",
+        "ctrl.state",
+        "data.cmd",
+        "data.cmd_ack",
+        "data.cmd_result",
+        "data.error",
+        "data.reply",
+        "data.stt",
+        "wss.auth"
+      ]
+    },
+    "schema_sample_frames": {
+      "result": "PASS",
+      "source_samples_checked": 15,
+      "generated_positive_examples_checked": 15
+    },
+    "error_and_close_codes": {
+      "result": "PASS",
+      "source_error_rows_checked": 9,
+      "source_codes": {
+        "auth_failed": {
+          "plane": "HTTPS/WSS",
+          "trigger": "鉴权失败、签名无效或设备不存在",
+          "behavior": "401 / close 4401",
+          "client_gui_behavior": "不分配 agent；SDK 提示未授权",
+          "requirement": "FR-CONN-002"
+        },
+        "permission_denied": {
+          "plane": "HTTPS/WSS",
+          "trigger": "设备无请求能力或配置权限",
+          "behavior": "403 / close 4403",
+          "client_gui_behavior": "不执行请求；GUI 展示权限不足",
+          "requirement": "FR-CONN-002, FR-GUI-005"
+        },
+        "busy": {
+          "plane": "HTTPS/WSS",
+          "trigger": "服务忙或并发达到 Demo 参数上限",
+          "behavior": "503 / close 1013",
+          "client_gui_behavior": "SDK 退避重试；不占池",
+          "requirement": "NFR-CAP-001"
+        },
+        "protocol_error": {
+          "plane": "WSS",
+          "trigger": "JSON 缺字段、类型不合法、未知/重复 caps、超过 8192 bytes 或顺序非法",
+          "behavior": "data.error / close 4400",
+          "client_gui_behavior": "记录 trace；严重错误关闭连接",
+          "requirement": "FR-CONN-003"
+        },
+        "capability_unsupported": {
+          "plane": "WSS",
+          "trigger": "端侧未授权或不支持 capability_id",
+          "behavior": "data.cmd_ack rejected",
+          "client_gui_behavior": "不等待 result；小歌播不支持话术",
+          "requirement": "FR-CMD-008"
+        },
+        "token_expired": {
+          "plane": "WSS",
+          "trigger": "access_token 超时",
+          "behavior": "close 4401",
+          "client_gui_behavior": "SDK 重新 create_session",
+          "requirement": "FR-CONN-002"
+        },
+        "duplicate_connection": {
+          "plane": "WSS",
+          "trigger": "同 device/session 重复连接且策略不允许",
+          "behavior": "close 4009",
+          "client_gui_behavior": "保留最新或拒绝新连接，R5 评审确认",
+          "requirement": "FR-CONN-004"
+        },
+        "resource_exhausted": {
+          "plane": "Gateway",
+          "trigger": "无可用 Agent/Pool 容量",
+          "behavior": "503 / data.error",
+          "client_gui_behavior": "返回 busy，不抢占活跃会话",
+          "requirement": "NFR-CAP-001"
+        },
+        "unknown_cmd_id": {
+          "plane": "WSS",
+          "trigger": "云端收到未知 cmd_id 的 ack/result",
+          "behavior": "data.error + audit",
+          "client_gui_behavior": "不污染当前轮，不混入 data.cmd_ack.status",
+          "requirement": "FR-CMD-008"
+        }
+      },
+      "data_error_enum_checked": 9,
+      "close_codes_from_source": [
+        1013,
+        4009,
+        4400,
+        4401,
+        4403
+      ],
+      "http_statuses_from_source": [
+        401,
+        403,
+        503
+      ],
+      "legacy_close_only_codes": []
+    },
+    "close_code_replay_cases": {
+      "result": "PASS",
+      "cases_checked": 11,
+      "required_cases_checked": 11,
+      "close_codes_covered": [
+        1013,
+        4009,
+        4400,
+        4401,
+        4403
+      ],
+      "http_statuses_covered": [
+        401,
+        403,
+        503
+      ],
+      "data_error_codes_covered": [
+        "busy",
+        "protocol_error",
+        "resource_exhausted"
+      ]
+    },
+    "p0_registry_schema": {
+      "result": "PASS",
+      "source_rows_checked": 14,
+      "distinct_actions_checked": 10,
+      "intent_enums_checked": [
+        "control_cmd",
+        "config",
+        "config/control",
+        "info_query",
+        "knowledge_qa",
+        "control_cmd_multi"
+      ],
+      "delivery_enums_checked": [
+        "data.cmd",
+        "data.cmd after confirmation",
+        "ctrl.set/config API",
+        "data.cmd or ctrl.set by owner",
+        "cloud_tool + data.reply",
+        "cloud_knowledge + data.reply",
+        "ask_split only"
+      ],
+      "param_type_enums_checked": [
+        "enum",
+        "int"
+      ],
+      "risk_enums_checked": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "multi_command_blocked_contract": {
+      "result": "PASS",
+      "example_id": "data.reply.multi_command_blocked.ask_split",
+      "source_seed": "SEED-017",
+      "requirement_id": "FR-CMD-003",
+      "utterance_text": "往前走一米再挥手",
+      "expected_state": "multi_command_blocked",
+      "expected_reply_style": "ask_split",
+      "expected_output_types": [
+        "data.reply"
+      ],
+      "forbidden_outputs": [
+        "data.cmd",
+        "cmd_id",
+        "executor_side_effect"
+      ],
+      "workbook_seed_checked": true,
+      "command_state_checked": true
+    },
+    "examples_jsonl": {
+      "result": "PASS",
+      "positive_examples": 17,
+      "negative_schema_fail_examples": 12,
+      "negative_semantic_or_transport_examples": 3
+    },
+    "p1_control_exclusion": {
+      "result": "PASS",
+      "excluded_types": [
+        "ctrl.status",
+        "ctrl.get",
+        "ctrl.set",
+        "ctrl.ack"
+      ]
+    }
+  }
+}
