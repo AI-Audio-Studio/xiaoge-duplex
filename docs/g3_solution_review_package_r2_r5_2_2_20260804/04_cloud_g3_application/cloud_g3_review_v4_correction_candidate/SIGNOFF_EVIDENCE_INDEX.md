@@ -12,7 +12,7 @@
 | AUTH-02 | access log 不含 query | PASS | `证据/签收/10097_V4_DEPLOYMENT_AND_ACCEPTANCE_20260810.md`：14 文件 0 命中 | Cloud owner |
 | SRC-01 | 完整源码快照 | PASS | `代码/source/`、`代码/SOURCE_SNAPSHOT_MANIFEST_20260810.md` | Cloud owner |
 | SRC-02 | 不可变 commit | PASS | `证据/签收/SRC-02_RELEASE_OWNER_SOURCE_CONFIRMATION_0710254d11d0_20260811.md`；`0710254d11d0ee84b0ab09e46d644fd283752461` | Release owner |
-| REP-01 | clean checkout | PENDING | `待执行/CLEAN_CHECKOUT_REPRO_RUNBOOK.md` 产物 | Release/test owner |
+| REP-01 | clean checkout | PASS | `证据/签收/REP-01_CLEAN_CHECKOUT_EVIDENCE_1b62ad5_e0aac93_20260812.md`：`e0aac93802afc017eaefc01adf5290ab7d44cdf9` clean checkout，126 tests、Ruff、scan 全 PASS | Release/test owner |
 | DEP-01 | 10097 部署快照/哈希 | PASS | `证据/签收/10097_V4_DEPLOYMENT_AND_ACCEPTANCE_20260810.md` | Deployment owner |
 | WS-01 | 10097 Bearer/query 矩阵 | PASS | 最终 smoke 12/12 PASS | Cloud/test owner |
 | TLS-01 | HTTPS/WSS 证书验证 | PASS（G3 pin） | SHA-256 pin；最终 smoke 报告记录验证模式；生产 TLS 边界见 `G3_CLOUD_V4_JUDGE_REVIEW_RESPONSE_20260811.md` | Deployment/security owner |

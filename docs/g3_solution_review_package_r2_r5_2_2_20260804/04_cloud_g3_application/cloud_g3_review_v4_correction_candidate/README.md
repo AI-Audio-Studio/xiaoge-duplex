@@ -30,7 +30,7 @@
   敏感值扫描 0 命中。
 - 测试阶段端云联合签收已回填，见 `证据/签收/JOINT-01_END_CLOUD_SIGNOFF_10097_20260811.md`；该签收不授权真实动作、生产上线或生产 TLS。
 
-## 当前状态与仍未关闭项
+## 当前状态
 
 - `P0-01`：新 Key 已在 10097 返回 HTTP 200，缺失/随机错误 Key 均返回 401；Security owner
   已确认旧 API Key 平台侧作废。历史 token 已验证在 610 秒后 Bearer 重连返回 4401，
@@ -39,12 +39,9 @@
   `0710254d11d0ee84b0ab09e46d644fd283752461`（分支
   `g3-cloud-v4-signoff-20260810`，提交时间 2026-08-10 20:01:40 +08:00）；
   已附 30 个文件的 source snapshot 与 SHA-256 manifest，Release owner 已确认源码可追溯。
-- `P1-02`：当前工作区执行 `uv sync --all-extras --dev` 成功，但不是 clean checkout，
-  仍需在可定位 commit 上做一次干净复现。
+- `P1-02`：已在不可变提交 `e0aac93802afc017eaefc01adf5290ab7d44cdf9` 的 clean checkout 中复现通过：`uv sync --all-extras --dev`、126 tests、Ruff、脱敏扫描和生成产物扫描均 PASS。
 - 端云联合签收已按当前测试阶段范围回填，见
   `证据/签收/JOINT-01_END_CLOUD_SIGNOFF_10097_20260811.md`；不扩大为真实动作放行、生产上线或生产 TLS 验收。
-- 远端 `uv sync --all-extras --dev` 在 7 分钟采证上限内未完成；这不影响当前运行态 PASS，
-  但 clean checkout 一次装配仍需在不可变 commit 上关闭。
 
 ## 索引
 
@@ -67,6 +64,7 @@
 - `证据/签收/10097_CREDENTIAL_ROTATION_DIAGNOSTIC_20260810.md`：新 Key 准入、远端版本和 TLS 诊断。
 - `证据/签收/10097_V4_DEPLOYMENT_AND_ACCEPTANCE_20260810.md`：部署、回滚、远端回归和日志扫描。
 - `证据/签收/10097_SMOKE_SUMMARY_FINAL_20260810T1155Z.json`：最终 12/12 PASS 运行态证据。
+- `证据/签收/REP-01_CLEAN_CHECKOUT_EVIDENCE_1b62ad5_e0aac93_20260812.md`：不可变提交 clean checkout 复现证据，126 tests、Ruff、脱敏和生成产物扫描全 PASS。
 - `代码/SOURCE_SNAPSHOT_MANIFEST_20260810.md`：源码快照清单和 SHA-256。
 - `待签字/`：安全、部署、release 和端云共同签收模板。
 - `待执行/`：clean checkout 与 10097 采证操作单。
