@@ -56,6 +56,23 @@ class PoolClient:
             logger.warning("pool status failed: %s", exc)
             return {}
 
+    async def list_ready(self) -> list[dict[str, Any]]:
+        """GET /list_ready → [{proc_id, port, state}, ...];失败/无就绪 → []。
+
+        无亲和路由(/knows 等)用此取可用 agent 端口,**绕开 alloc/release 语义**
+        (alloc 占槽、release 杀进程,/knows 高频调用会清空整个池)。
+        """
+        try:
+            sess = await self._sess()
+            async with sess.get(f"{self._base}/list_ready") as r:
+                if r.status != 200:
+                    return []
+                data = await r.json()
+                return list(data.get("ports", []))
+        except Exception as exc:
+            logger.warning("pool list_ready failed: %s", exc)
+            return []
+
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()

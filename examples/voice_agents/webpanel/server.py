@@ -387,9 +387,8 @@ def _is_p0_client_frame(payload: dict) -> bool:
             and "token" not in payload
         )
     if typ == "ctrl.frontend_state":
-        return (
-            _is_non_negative_int(payload.get("seq"))
-            and _is_non_negative_int(payload.get("ttl_ms"))
+        return _is_non_negative_int(payload.get("seq")) and _is_non_negative_int(
+            payload.get("ttl_ms")
         )
     if typ == "data.text":
         text = payload.get("text")
@@ -669,6 +668,138 @@ async def _handle_switch_tts(request: aiohttp.web.Request) -> aiohttp.web.Respon
     return aiohttp.web.json_response({"backend": backend, "provider": provider})
 
 
+def _knows_html() -> str:
+    """读 static/knows.html(独立管理页;Cache-Control: no-store 由处理器设)。"""
+    return (Path(__file__).resolve().parent / "static" / "knows.html").read_text(encoding="utf-8")
+
+
+async def _handle_knows_page(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /knows → 返回独立管理页(无鉴权;网关层负责 apikey 准入)。"""
+    return aiohttp.web.Response(
+        text=_knows_html(),
+        content_type="text/html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _handle_knows_list(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """GET /api/knows/list → {chunks:[...], doc_count, ready}。list_chunks 同步读 SQLite。"""
+    idx = runtime.knowledge_index
+    if idx is None:
+        return aiohttp.web.json_response({"error": "knowledge index not initialized"}, status=503)
+    try:
+        chunks = idx.list_chunks()
+    except Exception as exc:
+        logger.exception("knowledge list failed")
+        return aiohttp.web.json_response({"error": f"list failed: {exc}"}, status=500)
+    return aiohttp.web.json_response(
+        {
+            "chunks": chunks,
+            "doc_count": idx.doc_count,
+            "ready": idx.is_ready(),
+        }
+    )
+
+
+async def _handle_knows_append(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """POST /api/knows/append:写 user_knowledge.md → rebuild → {ok, chunks}。
+
+    与已移除的 _handle_knowledge_append 一致:8000 字上限、agent_loop marshal、120s 超时。
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp.web.json_response({"error": "invalid json"}, status=400)
+    text = str(data.get("text", "")).strip()
+    title = str(data.get("title", "")).strip() or None
+    if not text:
+        return aiohttp.web.json_response({"error": "text is empty"}, status=400)
+    if len(text) > 8000:
+        return aiohttp.web.json_response({"error": "text too long (max 8000 chars)"}, status=400)
+    idx = runtime.knowledge_index
+    if idx is None:
+        return aiohttp.web.json_response({"error": "knowledge index not initialized"}, status=503)
+    try:
+        idx.append_user_chunk(text, title=title)
+    except Exception as exc:
+        logger.exception("failed to append user knowledge")
+        return aiohttp.web.json_response({"error": f"write failed: {exc}"}, status=500)
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return aiohttp.web.json_response({"error": "agent loop not running"}, status=503)
+    fut = asyncio.run_coroutine_threadsafe(idx.rebuild(), aloop)
+    try:
+        n = fut.result(timeout=120)
+    except Exception as exc:
+        logger.exception("knowledge rebuild failed")
+        return aiohttp.web.json_response({"error": f"rebuild failed: {exc}"}, status=500)
+    return aiohttp.web.json_response({"ok": True, "chunks": n})
+
+
+async def _handle_knows_query(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """POST /api/knows/query {query, top_k?} → {hits:[{title,text,score,source},...]}。
+
+    **核心新功能**:不依赖 LLM 工具调用即可验证 RAG 是否命中。
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp.web.json_response({"error": "invalid json"}, status=400)
+    query = str(data.get("query", "")).strip()
+    if not query:
+        return aiohttp.web.json_response({"error": "query is empty"}, status=400)
+    top_k = int(data.get("top_k") or 5)
+    if top_k < 1 or top_k > 50:
+        top_k = 5
+    idx = runtime.knowledge_index
+    if idx is None:
+        return aiohttp.web.json_response({"error": "knowledge index not initialized"}, status=503)
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return aiohttp.web.json_response({"error": "agent loop not running"}, status=503)
+    fut = asyncio.run_coroutine_threadsafe(idx.query(query, top_k=top_k), aloop)
+    try:
+        hits = fut.result(timeout=30)
+    except Exception as exc:
+        logger.exception("knowledge query failed")
+        return aiohttp.web.json_response({"error": f"query failed: {exc}"}, status=500)
+    return aiohttp.web.json_response(
+        {
+            "hits": [
+                {
+                    "title": h.title,
+                    "text": h.text,
+                    "score": h.score,
+                    "source": h.source,
+                }
+                for h in hits
+            ]
+        }
+    )
+
+
+async def _handle_knows_delete(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """DELETE /api/knows/{chunk_id} → {ok: bool}。仅可删 user_knowledge.md 来源的块。"""
+    chunk_id_raw = request.match_info.get("chunk_id", "")
+    try:
+        chunk_id = int(chunk_id_raw)
+    except ValueError:
+        return aiohttp.web.json_response({"error": "invalid chunk_id"}, status=400)
+    idx = runtime.knowledge_index
+    if idx is None:
+        return aiohttp.web.json_response({"error": "knowledge index not initialized"}, status=503)
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return aiohttp.web.json_response({"error": "agent loop not running"}, status=503)
+    fut = asyncio.run_coroutine_threadsafe(idx.delete_chunk(chunk_id), aloop)
+    try:
+        ok = fut.result(timeout=120)
+    except Exception as exc:
+        logger.exception("knowledge delete failed")
+        return aiohttp.web.json_response({"error": f"delete failed: {exc}"}, status=500)
+    return aiohttp.web.json_response({"ok": ok})
+
+
 def build_web_app(
     *,
     admin_routes: bool = ADMIN_ROUTES,
@@ -688,6 +819,13 @@ def build_web_app(
         app.router.add_get("/debug/ws/session", _handle_debug_ws_session)
     app.router.add_get("/ws", _handle_ws)
     app.router.add_post("/api/mic", _handle_mic)
+    # 知识库独立管理界面(/knows 页面 + /api/knows/* REST):
+    # 网关层 apikey 准入 + 无亲和反代(任意 READY agent 都能处理,文件共享 + meta.json mtime 热更新)
+    app.router.add_get("/knows", _handle_knows_page)
+    app.router.add_get("/api/knows/list", _handle_knows_list)
+    app.router.add_post("/api/knows/append", _handle_knows_append)
+    app.router.add_post("/api/knows/query", _handle_knows_query)
+    app.router.add_delete("/api/knows/{chunk_id}", _handle_knows_delete)
     if admin_routes:  # M5:隐藏态不注册 → aiohttp 默认 404
         app.router.add_post("/api/asr", _handle_switch_asr)
         app.router.add_post("/api/tts", _handle_switch_tts)

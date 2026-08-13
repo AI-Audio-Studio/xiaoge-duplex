@@ -506,7 +506,10 @@ function setMic(m){
 }
 
 function setAsr(b){
-  var k = b.includes('Stream') ? 'qwen3-stream' : (b.toLowerCase().includes('qwen') ? 'qwen3' : 'funasr');
+  var k;
+  if (b.includes('Stream')) k='qwen3-stream';
+  else if (b.toLowerCase().includes('qwen')) k='qwen3';
+  else k='funasr';
   curAsr = k;
   id('tabFunasr').className     ='asr-tab'+(k==='funasr'       ?' on':'');
   id('tabQwen3').className      ='asr-tab'+(k==='qwen3'        ?' on':'');
@@ -607,6 +610,7 @@ function setListening(on, hint){
   if(on){ var h=id('listenHint'); if(h) h.textContent=hint||'聆听模式 · 说『小歌干活了』或点通话键退出'; mask.style.display='flex'; }
   else { mask.style.display='none'; }
 }
+
 function id(x){ return document.getElementById(x); }
 function log(){ return id('log'); }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }

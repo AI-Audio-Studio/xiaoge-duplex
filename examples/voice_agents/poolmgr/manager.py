@@ -224,6 +224,20 @@ class PoolManager:
                 out["transcoder"] = self._transcoder.metrics()
         return out
 
+    def list_ready(self) -> list[dict[str, Any]]:
+        """只读列出所有 READY 进程的端口,供无亲和路由(/knows 等)取可用 agent。
+
+        与 alloc() 的关键区别:**不修改状态机**——不标 ASSIGNED、不占槽位、后续也不需 release
+        (release 会 kill 进程)。/knows 是高频运维请求,绝不能每次都杀 agent。
+        返回 [{"proc_id", "port", "state"}, ...];pool 全空或全 SPAWNING 时返回 []。
+        """
+        with self._lock:
+            return [
+                {"proc_id": p.proc_id, "port": p.port, "state": p.state}
+                for p in self._procs.values()
+                if p.state == READY
+            ]
+
     # ── healthz 轮询 ─────────────────────────────────────────────────────────
     def poll_once(self) -> None:
         """探测一轮。可单测直调:

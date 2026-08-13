@@ -366,3 +366,261 @@ def test_knowledge_hit_dataclass() -> None:
     assert h.score == 0.5
     assert h.source == "s.md"
     assert h.title == "t"
+
+
+# ──────────────────────────── append_user_chunk ────────────────────────────
+
+
+def test_append_user_chunk_creates_file(tmp_path: Path) -> None:
+    """首次追加 → source_dir/user_knowledge.md 被创建,格式 `# title\n\nbody\n`。"""
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+    path = idx.append_user_chunk("蓝牙5.0,可外接音箱。", title="蓝牙规格")
+    assert path.exists()
+    content = path.read_text(encoding="utf-8")
+    assert "# 蓝牙规格" in content
+    assert "蓝牙5.0,可外接音箱。" in content
+    # 两个 # 行之间应有两个换行(Markdown 标准)
+    assert "\n\n# 蓝牙规格\n\n" in content or content.startswith("# 蓝牙规格\n\n")
+
+
+def test_append_user_chunk_appends_existing(tmp_path: Path) -> None:
+    """已有 user_knowledge.md → 追加到末尾,不覆盖。"""
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+    idx.append_user_chunk("第一条。", title="标题A")
+    idx.append_user_chunk("第二条。", title="标题B")
+    content = (tmp_path / "knowledge" / "user_knowledge.md").read_text(encoding="utf-8")
+    assert content.count("# 标题A") == 1
+    assert content.count("# 标题B") == 1
+    # 顺序:A 在 B 前
+    assert content.index("# 标题A") < content.index("# 标题B")
+
+
+def test_append_user_chunk_empty_body_raises(tmp_path: Path) -> None:
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+    with pytest.raises(ValueError):
+        idx.append_user_chunk("   \n  ", title="x")
+
+
+def test_append_user_chunk_strips_title_hashes(tmp_path: Path) -> None:
+    """标题里的 # 字符应被剔除,避免切块器误切。"""
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+    idx.append_user_chunk("body", title="## 复杂 # 标题 ##")
+    content = (tmp_path / "knowledge" / "user_knowledge.md").read_text(encoding="utf-8")
+    # 标题被清理成 "复杂  标题"
+    assert "# 复杂  标题" in content
+    # 不应出现 ### 三连号
+    assert "###" not in content
+
+
+def test_append_then_rebuild_increases_chunks(tmp_path: Path) -> None:
+    """追加一条 → rebuild → 块数比追加前多(至少 +1)。"""
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+    async def run() -> None:
+        n_before = await idx.rebuild()
+        idx.append_user_chunk("新补充的蓝牙规格信息。", title="蓝牙规格")
+        n_after = await idx.rebuild()
+        assert n_after == n_before + 1
+        # 检索"蓝牙"应命中新加的块
+        hits = await idx.query("蓝牙", top_k=3)
+        titles = [h.title for h in hits]
+        assert "蓝牙规格" in titles
+
+    asyncio.run(run())
+
+
+def test_append_multi_section_body(tmp_path: Path) -> None:
+    """body 内含多个 `^# ` 行 → 切块器切成多个块,rebuild 块数应 +N。"""
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+    async def run() -> None:
+        n_before = await idx.rebuild()
+        # body 内含 2 个子标题 → 切块器切成 2 段(连同外层 title 共 3 段?不:外层 title 也作为第一段的标题)
+        # 实际:_split_markdown 把 body 切成 2 段,但每段的 title 是 body 内的子标题
+        # 整体:外层标题 + body 中 2 个子标题 → 3 块?需看实现
+        # 简化:body 内 2 个 # 子标题 → 切块至少 +2
+        body = "# 子标题1\n\n内容1\n\n# 子标题2\n\n内容2\n"
+        idx.append_user_chunk(body, title="外层标题")
+        n_after = await idx.rebuild()
+        assert n_after >= n_before + 2
+
+    asyncio.run(run())
+
+
+# ──────────────────────────── list_chunks ────────────────────────────
+
+
+def test_list_chunks_empty_when_no_index(tmp_path: Path) -> None:
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+    assert idx.list_chunks() == []
+
+
+def test_list_chunks_returns_all(offline_idx: KnowledgeIndex) -> None:
+    async def run() -> None:
+        await offline_idx.rebuild()
+        chunks = offline_idx.list_chunks()
+        assert len(chunks) == 4
+        # 字段齐全
+        first = chunks[0]
+        assert {"id", "title", "source", "body", "body_preview", "deletable"} <= set(first.keys())
+        # 产品手册来源(intro.md/faq.md)不可删
+        assert first["deletable"] is False
+
+    asyncio.run(run())
+
+
+def test_list_chunks_marks_user_knowledge_deletable(tmp_path: Path) -> None:
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+
+    async def run() -> None:
+        idx.append_user_chunk("用户补充的蓝牙规格。", title="蓝牙规格")
+        await idx.rebuild()
+        chunks = idx.list_chunks()
+        # 找到 user_knowledge.md 来源的块
+        user_chunks = [c for c in chunks if c["source"] == "user_knowledge.md"]
+        assert len(user_chunks) == 1
+        assert user_chunks[0]["deletable"] is True
+        assert user_chunks[0]["title"] == "蓝牙规格"
+        assert "蓝牙规格" in user_chunks[0]["body"]
+
+    asyncio.run(run())
+
+
+# ──────────────────────────── delete_chunk ────────────────────────────
+
+
+def test_delete_chunk_rejects_product_manual(tmp_path: Path) -> None:
+    """产品手册块(source != user_knowledge.md)拒绝删除。"""
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+
+    async def run() -> None:
+        await idx.rebuild()
+        chunks = idx.list_chunks()
+        manual_id = next(c["id"] for c in chunks if c["source"] == "base.md")
+        ok = await idx.delete_chunk(manual_id)
+        assert ok is False
+        # 索引块数不变
+        assert idx.doc_count == 1
+
+    asyncio.run(run())
+
+
+def test_delete_chunk_not_found(tmp_path: Path) -> None:
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+
+    async def run() -> None:
+        await idx.rebuild()
+        ok = await idx.delete_chunk(99999)
+        assert ok is False
+
+    asyncio.run(run())
+
+
+def test_delete_chunk_user_knowledge_success(tmp_path: Path) -> None:
+    """删除用户知识块:文件中对应段被移除,rebuild 后 doc_count -1。"""
+    src = tmp_path / "knowledge"
+    src.mkdir()
+    (src / "base.md").write_text("# 基础\n\n基础内容。\n", encoding="utf-8")
+    idx = KnowledgeIndex(
+        source_dir=src,
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=32,
+    )
+
+    async def run() -> None:
+        idx.append_user_chunk("蓝牙5.0可外接音箱", title="蓝牙规格")
+        n_before = await idx.rebuild()
+        chunks = idx.list_chunks()
+        user_id = next(c["id"] for c in chunks if c["source"] == "user_knowledge.md")
+        ok = await idx.delete_chunk(user_id)
+        assert ok is True
+        # rebuild 后块数 -1
+        assert idx.doc_count == n_before - 1
+        # user_knowledge.md 文件中不再有 # 蓝牙规格
+        content = (src / "user_knowledge.md").read_text(encoding="utf-8")
+        assert "# 蓝牙规格" not in content
+        # list_chunks 也不再有
+        chunks2 = idx.list_chunks()
+        assert all(c["source"] != "user_knowledge.md" for c in chunks2)
+
+    asyncio.run(run())
+
+
+def test_delete_chunk_no_index_returns_false(tmp_path: Path) -> None:
+    """未 rebuild 也无 db → delete 返回 False。"""
+    idx = KnowledgeIndex(
+        source_dir=tmp_path / "knowledge",
+        index_dir=tmp_path / "idx",
+        offline=True,
+        dim=8,
+    )
+
+    async def run() -> None:
+        ok = await idx.delete_chunk(0)
+        assert ok is False
+
+    asyncio.run(run())

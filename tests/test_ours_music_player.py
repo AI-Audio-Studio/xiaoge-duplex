@@ -210,19 +210,14 @@ def _new_player(loop: asyncio.AbstractEventLoop, library: MusicLibrary) -> tuple
 def test_play_starts_task_and_returns_prompt(music_dir: Path) -> None:
     async def run() -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
-        player, runtime = _new_player(asyncio.get_running_loop(), lib)
+        player, _ = _new_player(asyncio.get_running_loop(), lib)
         prompt = await player.play("song_one")
         assert "song_one" in prompt
         assert any(tpl.split("{name}")[0] in prompt for tpl in PROMPT_TEMPLATES)
         assert player.is_playing is True
         assert player.current_name == "song_one"
-        # play() 起播即让 TTS → 默认 clear;模拟 agent_state 切回,手动 resume
         assert not player._resume_ev.is_set()
-        player.resume()
-        # 让循环推几帧
-        await asyncio.sleep(0.02)
-        assert runtime.ws_audio_output.captures > 0
-        # 清理
+        assert player.waiting_start_ack is True
         await player.aclose()
 
     asyncio.run(run())
@@ -303,8 +298,6 @@ def test_pause_resume_toggles_event(music_dir: Path) -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
         player, _ = _new_player(asyncio.get_running_loop(), lib)
         await player.play("song_one")
-        # play() 起播即让 TTS → 默认 clear
-        assert not player._resume_ev.is_set()
         player.resume()
         assert player._resume_ev.is_set()
         player.pause()
@@ -340,19 +333,18 @@ def test_aclose_stops_task(music_dir: Path) -> None:
 
 
 def test_play_yields_to_tts_then_resume(music_dir: Path) -> None:
-    """play() 起播即让 TTS:_resume_ev 默认 clear,首帧不推;resume() 后才推。"""
+    """play() 先等待一句起播提示 TTS,提示结束后再推音乐帧。"""
 
     async def run() -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
         player, runtime = _new_player(asyncio.get_running_loop(), lib)
         await player.play("song_one")
-        # 让 TTS:刚 play 完应处于 clear 态,首帧不应被推
         assert not player._resume_ev.is_set()
+        assert player.waiting_start_ack is True
         await asyncio.sleep(0.03)
         assert runtime.ws_audio_output.captures == 0
-        # 模拟 agent_state 切回非 speaking → resume()
         player.resume()
-        assert player._resume_ev.is_set()
+        assert player.waiting_start_ack is False
         await asyncio.sleep(0.03)
         assert runtime.ws_audio_output.captures > 0
         await player.aclose()
@@ -360,22 +352,43 @@ def test_play_yields_to_tts_then_resume(music_dir: Path) -> None:
     asyncio.run(run())
 
 
-def test_play_yield_timeout_auto_resumes(music_dir: Path, monkeypatch) -> None:
-    """LLM 没念提示语(agent_state 没切回)时,兜底 timer 超时后自动 resume。"""
+def test_play_for_tool_arms_yield_timer(music_dir: Path) -> None:
+    """工具触发点歌也先让一句 TTS,再由状态事件或兜底 timer 起播。"""
 
     async def run() -> None:
-        # 把超时压到 0.05s 加速测试
-        import app.music_player as mp
-        monkeypatch.setattr(mp, "MUSIC_YIELD_TIMEOUT_S", 0.05)
+        lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
+        player, runtime = _new_player(asyncio.get_running_loop(), lib)
+        name = await player.play_for_tool("song_one")
+        assert name == "song_one"
+        assert not player._resume_ev.is_set()
+        assert player.waiting_start_ack is True
+        assert player._yield_timer is not None
+        await asyncio.sleep(0.03)
+        assert runtime.ws_audio_output.captures == 0
+        player.resume()
+        await asyncio.sleep(0.03)
+        assert runtime.ws_audio_output.captures > 0
+        await player.aclose()
+
+    asyncio.run(run())
+
+
+def test_pause_after_music_started_is_explicit_only(music_dir: Path) -> None:
+    """音乐已开始后,普通聊天/TTS 状态不应自动 clear 播放事件。"""
+
+    async def run() -> None:
+        _write_wav(music_dir / "song_one.wav", samples=2000)
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
         player, runtime = _new_player(asyncio.get_running_loop(), lib)
         await player.play("song_one")
-        assert not player._resume_ev.is_set()
-        # 不调 resume(),等兜底超时
-        await asyncio.sleep(0.15)
+        player.resume()
+        await asyncio.sleep(0.03)
+        before = runtime.ws_audio_output.captures
+        assert before > 0
         assert player._resume_ev.is_set()
         await asyncio.sleep(0.03)
-        assert runtime.ws_audio_output.captures > 0
+        assert player._resume_ev.is_set()
+        assert runtime.ws_audio_output.captures > before
         await player.aclose()
 
     asyncio.run(run())
@@ -397,6 +410,27 @@ def test_play_loop_pushes_16k_mono_frames(music_dir: Path) -> None:
         assert f.sample_rate == SAMPLE_RATE
         assert f.num_channels == 1
         assert f.samples_per_channel == 160  # 20ms @ 16kHz
+        await player.aclose()
+
+    asyncio.run(run())
+
+
+def test_stop_then_resume_last_for_tool_restarts_same_song(music_dir: Path) -> None:
+    async def run() -> None:
+        lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
+        player, runtime = _new_player(asyncio.get_running_loop(), lib)
+        await player.play_for_tool("song_one")
+        await player.stop_for_tool()
+        assert player.is_playing is False
+        assert player.last_name == "song_one"
+        name = await player.resume_last_for_tool()
+        assert name == "song_one"
+        assert player.is_playing is True
+        assert player.current_name == "song_one"
+        assert not player._resume_ev.is_set()
+        player.resume()
+        await asyncio.sleep(0.03)
+        assert runtime.ws_audio_output.captures > 0
         await player.aclose()
 
     asyncio.run(run())

@@ -101,6 +101,12 @@ _CONFIRM_CONTINUE_RE = re.compile(
     r"继续|继续吧|继续讲|接着讲|接着吧|往下讲|说吧|开始吧|来吧|可以讲)$"
 )
 _USER_TEXT_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:…—·、\-]+")
+_MUSIC_TARGET_RE = re.compile(r"(歌|音乐|播放|放歌|放一下|声音|这首|曲子|歌曲)")
+_MUSIC_STOP_RE = re.compile(
+    r"(停止|停掉|停下|暂停|别放|不要放|不放|关掉|关闭|结束|取消|打住|别播|不要播|不播|别唱|不唱|切掉)"
+)
+_MUSIC_RESUME_RE = re.compile(r"(继续|恢复|接着|重新|再放|再播|接着放|接着播|继续放|继续播)")
+_MUSIC_BARE_RESUME_RE = re.compile(r"^(继续|继续吧|接着|接着吧|恢复|恢复吧|再放|再播|重新放|重新播)$")
 
 # 判停模型文件已离线缓存(local_files_only=True 读取),强制离线模式避免每次启动
 # 去连 huggingface.co 触发 ~30s 超时重试导致的冷启动。要更新模型时临时设为 "0"。
@@ -111,6 +117,11 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 # 见 event_timeline.install_debug_log)。正常运行不再挂任何文件日志处理器(零开销)。
 
 _configure_utf8_stdio()
+
+
+def _defer_session_say(session, text: str, **kwargs) -> None:
+    loop = asyncio.get_running_loop()
+    loop.call_soon(lambda: session.say(text, **kwargs))
 
 
 class VoiceAgent(Agent):
@@ -150,11 +161,15 @@ class VoiceAgent(Agent):
 # 边界
 - 做不到的事坦白说，并给个替代办法；不输出不安全或越界的内容。
 
-# 关于小歌自身的事实性问题
-- 用户问小歌自身的硬件规格、软件功能、网络要求、使用场景、升级方式、隐私政策等"关于小歌本身"的问题时，
-  调用 query_knowledge 工具检索产品手册，再据此用一两句口语化回答。
-- 普通聊天、讲故事、陪聊、问别人感受、问通用知识，不要调这个工具，直接答即可。
-- 调用后不要照念返回里的 score/source/标题等元信息，也不要说"根据知识库"，组织成自然口吻告诉用户。
+# 关于小歌自身的事实性问题（必须遵守）
+- 凡是问"小歌"本身的问题,一律先调 query_knowledge 工具检索,再据此回答。包括但不限于:
+  硬件规格、软件功能、网络要求、使用场景、升级方式、隐私政策,
+  "小歌都会啥/能干什么/有什么本事/会什么/有什么功能/会什么本事/会什么武术/有什么特点/有啥本领"等能力类问题。
+- 宁可多调一次工具(即便看起来不像知识库问题),也不要漏调。
+- 即便上次调过同样问题,只要用户又问了,就再调一次(知识库可能在热更新)。
+- 普通聊天、讲故事、陪聊、问别人感受、问通用知识,不要调这个工具。
+- 调用后不要照念返回里的 score/source/标题等元信息,也不要说"根据知识库",组织成自然口吻告诉用户。
+- 工具返回"没查到"时如实告诉用户即可,不要因此编造答案,也不要因此下次拒绝调用。
 
 # 示例（学这个语气和长度，不要照抄内容）
 用户：今天好累啊，不太想说话。
@@ -165,6 +180,8 @@ class VoiceAgent(Agent):
 小歌：行啊，想听冒险的，还是温馨一点的？
 用户：你是AI吧？
 小歌：哈哈，我是小歌呀。怎么突然问这个，是聊到啥好玩的了？
+用户：小歌都会啥？
+小歌：（调用 query_knowledge 工具，query="会什么 本事 能力"，然后根据返回结果用一两句口语化回答；不要直接说"我是个语音助手"之类通用答案。）
 用户：你用的什么模型？怎么实现的？
 小歌：这我还真说不上来，咱不聊这个~你想聊点啥，我陪你。"""
             )
@@ -194,14 +211,11 @@ class VoiceAgent(Agent):
             return f"播放出错了:{exc}"
         if name is None:
             return "没找到匹配的歌,告诉用户没找到、问要不要换一首,不要编造歌名。"
-        # 工具结果给 LLM 看,不是给用户念的原文。明确告诉 LLM:
-        # 1) 音乐已经真的在播了,不要再"建议换歌/挑一首";
-        # 2) 只用一句简短自然的话告知用户在放什么;
-        # 3) 不要复述模板原话、不要加"我再给你放一首"之类的多余动作。
+        # 工具结果给 LLM 看,不是给用户念的原文。
         return (
-            f"已开始播放《{name}》,音乐正在出声。"
-            f"用一句简短自然的话告诉用户在放这首歌,不要说“换一首/来首别的”,"
-            f"也不要重复模板原文。"
+            f"已准备播放《{name}》。先用一句简短自然的话告诉用户要放这首歌,"
+            f"不要说“换一首/来首别的”,也不要重复模板原文;"
+            f"这句提示说完后音乐会开始出声。"
         )
 
     @function_tool
@@ -222,15 +236,17 @@ class VoiceAgent(Agent):
     # ── 知识库检索工具:委托给 runtime.knowledge_index ──
     @function_tool
     async def query_knowledge(self, context: RunContext, query: str) -> str:
-        """查询小歌产品知识库(产品手册、规格、FAQ、使用场景等)。
+        """查询小歌产品知识库(产品手册、规格、FAQ、使用场景、用户补充知识等)。
 
         当用户问到小歌自身的硬件规格、软件功能、网络要求、使用场景、升级方式、
-        隐私政策等"关于小歌本身"的事实性问题时调用。普通聊天/讲故事/陪聊不要调。
+        隐私政策、以及"小歌都会啥/会什么/能干什么/有什么本事"等能力类问题时调用。
+        普通聊天/讲故事/陪聊不要调。
 
         Args:
-            query: 用户问题的精炼关键词(如"麦克风阵列规格"/"如何升级模型"/"网络要求")。
+            query: 用户问题的精炼关键词(如"麦克风阵列规格"/"如何升级模型"/"网络要求"/"会什么")。
         """
         idx = runtime.knowledge_index
+        logger.info("query_knowledge called: query=%r idx_ready=%s", query, idx is not None and idx.is_ready())
         if idx is None:
             return "知识库未启用。告诉用户你不清楚这个问题,不要编造。"
         try:
@@ -238,6 +254,7 @@ class VoiceAgent(Agent):
         except Exception as exc:
             logger.exception("query_knowledge failed")
             return f"检索出错了:{exc}"
+        logger.info("query_knowledge result: query=%r hits=%d", query, len(hits))
         if not hits:
             return "没查到相关内容。告诉用户知识库里没有这部分,不要编造。"
         # 拼 LLM 可读的上下文:每条带标题、来源、相似度。LLM 据此组织回答话术(不要照念原文)。
@@ -378,13 +395,56 @@ class VoiceAgent(Agent):
             listen_enter_aftermath("auto", notice=True)
             raise StopResponse()  # 触发轮不回复、不 capture(见设计 §5.2)
 
-    def _apply_turn_filters(self, original, spoke_over_agent: bool) -> None:
+    def _music_control_intent(self, original: str) -> str | None:
+        compact = _USER_TEXT_STRIP_RE.sub("", original or "")
+        if not compact:
+            return None
+        mentions_music = bool(_MUSIC_TARGET_RE.search(compact))
+        if _MUSIC_BARE_RESUME_RE.fullmatch(compact):
+            return "resume"
+        if _MUSIC_RESUME_RE.search(compact) and mentions_music:
+            return "resume"
+        if _MUSIC_STOP_RE.search(compact) and (mentions_music or "播放" in compact or "播" in compact):
+            return "stop"
+        return None
+
+    async def _apply_turn_filters(self, original, spoke_over_agent: bool) -> None:
         """停止词 → 强打断+跳过回复;背调/压话附和 → 只跳过回复。"""
+        player = runtime.music_player
+        music_intent = self._music_control_intent(original)
+        if player is not None and music_intent == "resume" and not getattr(player, "is_playing", False):
+            name = await player.resume_last_for_tool()
+            if name is not None:
+                _append_turn_log(f"MUSIC_RESUME_BY_VOICE name={name!r} text={original!r}")
+                _defer_session_say(
+                    self.session,
+                    f"好的，继续播放《{name}》。",
+                    add_to_chat_ctx=False,
+                )
+                raise StopResponse()
+        if player is not None and music_intent == "stop":
+            stopped = await player.stop_for_tool()
+            _append_turn_log(f"MUSIC_STOP_BY_VOICE stopped={stopped} text={original!r}")
+            _defer_session_say(
+                self.session,
+                "好的，音乐停了。" if stopped else "音乐现在没在播。",
+                add_to_chat_ctx=False,
+                allow_interruptions=False,
+            )
+            raise StopResponse()
         if _should_ignore_user_turn(original):
             logger.info("stop phrase -> force interrupt + skip reply: %r", original)
             _append_turn_log(f"STOP_PHRASE text={original!r} -> force_interrupt + skip_reply")
+            if player is not None and getattr(player, "is_playing", False):
+                stopped = await player.stop_for_tool()
+                _append_turn_log(f"MUSIC_STOP_BY_STOP_PHRASE stopped={stopped} text={original!r}")
             if not listen_interrupt_blocked():  # 聆听期/保护窗内不打断小歌(仍跳过回复)
                 self.session.interrupt(force=True)
+            raise StopResponse()
+
+        if player is not None and getattr(player, "is_playing", False):
+            logger.info("music playing -> skip non-music user reply: %r", original)
+            _append_turn_log(f"MUSIC_PLAYING_SKIP_REPLY text={original!r}")
             raise StopResponse()
 
         if _is_backchannel(original):
@@ -462,6 +522,7 @@ class VoiceAgent(Agent):
             return
         _append_turn_log(f"MANUAL_TEXT text={original!r}")
         try:
+            await self._apply_turn_filters(original, False)
             await self._maybe_handle_g3_protocol_turn(original)
         except StopResponse:
             broadcast({"type": "message", "role": "user", "text": original, "ts": time.time()})
@@ -477,7 +538,7 @@ class VoiceAgent(Agent):
             return
         original = self._maybe_add_continuation_instruction(turn_ctx, original)
         self._maybe_auto_enter_listening(original, spoke_over_agent)
-        self._apply_turn_filters(original, spoke_over_agent)
+        await self._apply_turn_filters(original, spoke_over_agent)
         await self._maybe_handle_g3_protocol_turn(original, finalize_user_message=True)
 
         normalized = _normalize_spoken_digit_sequence(original)

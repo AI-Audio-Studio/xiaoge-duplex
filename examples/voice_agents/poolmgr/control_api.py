@@ -4,6 +4,7 @@
   - `POST /alloc`   → 200 {proc_id, port, session_id} | 503 {error} 池满繁忙
   - `POST /release` {session_id, reason} → 200 {ok: bool}
   - `GET  /status`  → 200 {size, ready, assigned, spawning, ready_below_threshold, transcoder?}
+  - `GET  /list_ready` → 200 {ports: [{proc_id, port, state}, ...]}  (只读,无亲和路由用)
 
 **只绑 127.0.0.1(M3)**:内部端口无 TLS 无鉴权,外网不可达;网关是唯一调用方。
 """
@@ -41,10 +42,16 @@ def build_control_app(manager: Any) -> aiohttp.web.Application:
     async def _status(request: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.json_response(manager.status())
 
+    async def _list_ready(request: aiohttp.web.Request) -> aiohttp.web.Response:
+        # 只读端口发现:无亲和路由(/knows 等)用此拿 READY 端口,不走 alloc/release
+        # (release 会 kill 进程,/knows 高频调用会清空整个池)。
+        return aiohttp.web.json_response({"ports": manager.list_ready()})
+
     app = aiohttp.web.Application()
     app.router.add_post("/alloc", _alloc)
     app.router.add_post("/release", _release)
     app.router.add_get("/status", _status)
+    app.router.add_get("/list_ready", _list_ready)
     return app
 
 

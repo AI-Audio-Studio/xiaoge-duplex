@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小歌 · 知识库管理</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#FBFBFC;color:#1F2024;
+  min-height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:9px;padding:14px 22px;border-bottom:0.5px solid #ECECEF;
+  background:#FFFFFF;flex-shrink:0}
+.logo{width:26px;height:26px;border-radius:8px;background:#E86A43;color:#fff;display:flex;
+  align-items:center;justify-content:center;font-size:14px;font-weight:500}
+h1{font-size:15px;font-weight:500;color:#1F2024}
+.sub{font-size:12px;color:#9CA3AF;margin-left:8px}
+.apikey-row{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:12px;color:#6B7280}
+.apikey-row input{width:240px;padding:5px 10px;border:0.5px solid #EAEAEE;border-radius:6px;
+  font-size:12px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:#FBFBFC}
+.apikey-row input:focus{outline:none;border-color:#E86A43;background:#FFFFFF}
+.btn{padding:5px 12px;border:0.5px solid #EAEAEE;border-radius:6px;background:#FFFFFF;color:#1F2024;
+  font-size:12px;cursor:pointer;transition:all .15s}
+.btn:hover{background:#F6F6F8;border-color:#D1D5DB}
+.btn.primary{background:#E86A43;color:#fff;border-color:#E86A43}
+.btn.primary:hover{background:#D25A35}
+.btn.danger{color:#DC2626;border-color:#FCA5A5}
+.btn.danger:hover{background:#FDECEC}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+main{flex:1;display:flex;flex-direction:column;gap:18px;padding:22px;max-width:980px;margin:0 auto;width:100%}
+section{background:#FFFFFF;border:0.5px solid #EAEAEE;border-radius:10px;padding:18px 22px}
+section h2{font-size:14px;font-weight:500;color:#1F2024;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+section h2 .count{font-size:12px;color:#9CA3AF;font-weight:400}
+.field{display:flex;flex-direction:column;gap:6px;margin-bottom:10px}
+.field label{font-size:12px;color:#6B7280}
+.field input[type=text],.field textarea{padding:8px 12px;border:0.5px solid #EAEAEE;border-radius:6px;
+  font-size:13px;font-family:inherit;background:#FBFBFC;color:#1F2024}
+.field input[type=text]:focus,.field textarea:focus{outline:none;border-color:#E86A43;background:#FFFFFF}
+.field textarea{resize:vertical;min-height:90px;line-height:1.5}
+.row-end{display:flex;justify-content:flex-end;align-items:center;gap:10px}
+.status{font-size:12px;color:#6B7280}
+.status.ok{color:#15803D}.status.err{color:#DC2626}
+.list{display:flex;flex-direction:column;gap:8px;max-height:380px;overflow-y:auto}
+.item{display:flex;align-items:flex-start;gap:12px;padding:10px 14px;border:0.5px solid #EAEAEE;
+  border-radius:8px;background:#FBFBFC}
+.item .meta{flex:1;min-width:0}
+.item .title{font-size:13px;font-weight:500;color:#1F2024;margin-bottom:3px}
+.item .src{font-size:11px;color:#9CA3AF;margin-left:8px;font-weight:400}
+.item .body{font-size:12px;color:#6B7280;line-height:1.5;word-break:break-word}
+.item .ops{flex-shrink:0}
+.empty{padding:24px;text-align:center;color:#9CA3AF;font-size:13px}
+.query-row{display:flex;gap:8px;align-items:center;margin-bottom:12px}
+.query-row input[type=text]{flex:1;padding:8px 12px;border:0.5px solid #EAEAEE;border-radius:6px;
+  font-size:13px;background:#FBFBFC}
+.query-row input[type=text]:focus{outline:none;border-color:#E86A43;background:#FFFFFF}
+.query-row input[type=number]{width:70px;padding:8px;border:0.5px solid #EAEAEE;border-radius:6px;
+  font-size:13px;background:#FBFBFC;text-align:center}
+.query-row label{font-size:12px;color:#6B7280}
+.hits{display:flex;flex-direction:column;gap:8px}
+.hit{padding:10px 14px;border:0.5px solid #EAEAEE;border-radius:8px;background:#FBFBFC}
+.hit .head{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.hit .score{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;
+  color:#15803D;background:#E7F6EF;padding:2px 8px;border-radius:4px}
+.hit .title{font-size:13px;font-weight:500;color:#1F2024}
+.hit .src{font-size:11px;color:#9CA3AF;margin-left:auto}
+.hit .text{font-size:12px;color:#6B7280;line-height:1.5;word-break:break-word}
+.tip{font-size:11px;color:#9CA3AF;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">歌</div>
+  <h1>小歌知识库管理</h1>
+  <span class="sub">/knows · 独立运维入口</span>
+  <div class="apikey-row">
+    <span>API Key</span>
+    <input id="apiKey" type="password" placeholder="X-API-Key">
+    <button class="btn" id="saveKey">保存</button>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>录入新知识</h2>
+    <div class="field">
+      <label>标题(可选,留空用时间戳)</label>
+      <input id="title" type="text" placeholder="例:蓝牙规格">
+    </div>
+    <div class="field">
+      <label>正文(支持 Markdown,多个 # 子标题会被切成多块;上限 8000 字)</label>
+      <textarea id="body" placeholder="例:蓝牙 5.0,可外接音箱,支持 A2DP 协议。"></textarea>
+    </div>
+    <div class="row-end">
+      <span class="status" id="appendStatus"></span>
+      <button class="btn primary" id="appendBtn">提交并重建</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>已录入条目 <span class="count" id="listCount"></span></h2>
+    <div class="row-end" style="margin-bottom:10px">
+      <button class="btn" id="refreshBtn">刷新</button>
+    </div>
+    <div class="list" id="listBox">
+      <div class="empty">尚未加载</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>在线检索测试</h2>
+    <div class="query-row">
+      <input id="query" type="text" placeholder="输入查询文本,验证 RAG 是否命中">
+      <label>top_k</label>
+      <input id="topK" type="number" value="5" min="1" max="50">
+      <button class="btn primary" id="queryBtn">检索</button>
+    </div>
+    <div class="hits" id="hitsBox">
+      <div class="empty">输入查询后点击"检索"</div>
+    </div>
+    <div class="tip">提示:分数为余弦相似度(0-1),越高越相关。user_knowledge.md 与产品手册都会被检索。</div>
+  </section>
+</main>
+
+<script>
+const KEY_STORE = "xg_knows_apikey";
+// 入口兜底:URL ?apikey=... 把 key 写入 localStorage,然后清掉 URL 上的 token(避免泄露到 history)
+(() => {
+  const params = new URLSearchParams(location.search);
+  const qKey = params.get("apikey") || params.get("api_key");
+  if (qKey) {
+    localStorage.setItem(KEY_STORE, qKey);
+    history.replaceState(null, "", location.pathname);
+  }
+})();
+let apiKey = localStorage.getItem(KEY_STORE) || "";
+document.getElementById("apiKey").value = apiKey;
+
+function headers(extra) {
+  const h = {"Content-Type": "application/json", ...(extra || {})};
+  if (apiKey) h["X-API-Key"] = apiKey;
+  return h;
+}
+
+function setStatus(el, msg, ok) {
+  el.textContent = msg;
+  el.className = "status " + (ok ? "ok" : (msg ? "err" : ""));
+}
+
+document.getElementById("saveKey").onclick = () => {
+  apiKey = document.getElementById("apiKey").value.trim();
+  localStorage.setItem(KEY_STORE, apiKey);
+  setStatus(document.getElementById("appendStatus"), "已保存", true);
+  setTimeout(() => setStatus(document.getElementById("appendStatus"), "", true), 1500);
+};
+
+document.getElementById("appendBtn").onclick = async () => {
+  const title = document.getElementById("title").value.trim();
+  const text = document.getElementById("body").value.trim();
+  const statusEl = document.getElementById("appendStatus");
+  if (!text) { setStatus(statusEl, "正文不能为空", false); return; }
+  if (!apiKey) { setStatus(statusEl, "请先填写 API Key", false); return; }
+  const btn = document.getElementById("appendBtn");
+  btn.disabled = true; setStatus(statusEl, "提交中…", true);
+  try {
+    const r = await fetch("/api/knows/append", {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({title, text})
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) { setStatus(statusEl, d.error || ("HTTP " + r.status), false); return; }
+    setStatus(statusEl, "已录入,共 " + d.chunks + " 块", true);
+    document.getElementById("body").value = "";
+    document.getElementById("title").value = "";
+    refreshList();
+  } catch (e) { setStatus(statusEl, "网络错误:" + e.message, false); }
+  finally { btn.disabled = false; }
+};
+
+async function refreshList() {
+  const box = document.getElementById("listBox");
+  const countEl = document.getElementById("listCount");
+  if (!apiKey) { box.innerHTML = '<div class="empty">请先填写 API Key</div>'; return; }
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const r = await fetch("/api/knows/list", {headers: headers()});
+    const d = await r.json();
+    if (!r.ok) { box.innerHTML = '<div class="empty">' + (d.error || ("HTTP " + r.status)) + '</div>'; return; }
+    countEl.textContent = "(" + (d.doc_count || 0) + " 块" + (d.ready ? "" : ",索引未就绪") + ")";
+    const chunks = d.chunks || [];
+    if (!chunks.length) { box.innerHTML = '<div class="empty">暂无条目</div>'; return; }
+    box.innerHTML = chunks.map(c =>
+      '<div class="item">' +
+        '<div class="meta">' +
+          '<div class="title"># ' + escapeHtml(c.title) + '<span class="src">' + escapeHtml(c.source) + '</span></div>' +
+          '<div class="body">' + escapeHtml(c.body_preview || c.body || "(空)") + '</div>' +
+        '</div>' +
+        '<div class="ops">' + (c.deletable
+          ? '<button class="btn danger" onclick="deleteChunk(' + c.id + ')">删除</button>'
+          : '<span class="tip">只读</span>') + '</div>' +
+      '</div>'
+    ).join("");
+  } catch (e) { box.innerHTML = '<div class="empty">网络错误:' + escapeHtml(e.message) + '</div>'; }
+}
+
+window.deleteChunk = async (id) => {
+  if (!confirm("确认删除该条目?将触发索引重建。")) return;
+  try {
+    const r = await fetch("/api/knows/" + id, {method: "DELETE", headers: headers()});
+    const d = await r.json();
+    if (!r.ok || !d.ok) { alert(d.error || ("删除失败 HTTP " + r.status)); return; }
+    refreshList();
+  } catch (e) { alert("网络错误:" + e.message); }
+};
+
+document.getElementById("refreshBtn").onclick = refreshList;
+
+document.getElementById("queryBtn").onclick = async () => {
+  const q = document.getElementById("query").value.trim();
+  const topK = parseInt(document.getElementById("topK").value) || 5;
+  const box = document.getElementById("hitsBox");
+  if (!q) { box.innerHTML = '<div class="empty">请输入查询文本</div>'; return; }
+  if (!apiKey) { box.innerHTML = '<div class="empty">请先填写 API Key</div>'; return; }
+  box.innerHTML = '<div class="empty">检索中…</div>';
+  try {
+    const r = await fetch("/api/knows/query", {
+      method: "POST", headers: headers(),
+      body: JSON.stringify({query: q, top_k: topK})
+    });
+    const d = await r.json();
+    if (!r.ok) { box.innerHTML = '<div class="empty">' + (d.error || ("HTTP " + r.status)) + '</div>'; return; }
+    const hits = d.hits || [];
+    if (!hits.length) { box.innerHTML = '<div class="empty">未命中任何条目</div>'; return; }
+    box.innerHTML = hits.map(h =>
+      '<div class="hit">' +
+        '<div class="head">' +
+          '<span class="score">' + h.score.toFixed(3) + '</span>' +
+          '<span class="title">' + escapeHtml(h.title) + '</span>' +
+          '<span class="src">' + escapeHtml(h.source) + '</span>' +
+        '</div>' +
+        '<div class="text">' + escapeHtml(h.text) + '</div>' +
+      '</div>'
+    ).join("");
+  } catch (e) { box.innerHTML = '<div class="empty">网络错误:' + escapeHtml(e.message) + '</div>'; }
+};
+
+function escapeHtml(s) {
+  if (s == null) return "";
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+refreshList();
+</script>
+</body>
+</html>

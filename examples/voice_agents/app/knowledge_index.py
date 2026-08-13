@@ -104,15 +104,16 @@ class KnowledgeIndex:
             dim if dim is not None else os.getenv("XIAOGE_KNOWLEDGE_DIM", str(DEFAULT_DIM))
         )
         self.offline = bool(
-            offline if offline is not None
+            offline
+            if offline is not None
             else os.getenv("XIAOGE_KNOWLEDGE_OFFLINE", "0") in ("1", "true", "yes")
         )
         self.top_k = int(
-            top_k if top_k is not None
-            else os.getenv("XIAOGE_KNOWLEDGE_TOP_K", str(DEFAULT_TOP_K))
+            top_k if top_k is not None else os.getenv("XIAOGE_KNOWLEDGE_TOP_K", str(DEFAULT_TOP_K))
         )
         self.min_score = float(
-            min_score if min_score is not None
+            min_score
+            if min_score is not None
             else os.getenv("XIAOGE_KNOWLEDGE_MIN_SCORE", str(DEFAULT_MIN_SCORE))
         )
 
@@ -183,6 +184,123 @@ class KnowledgeIndex:
         files = sorted(self.source_dir.rglob("*.md"))
         return files
 
+    def append_user_chunk(self, body: str, *, title: str | None = None) -> Path:
+        """把一条用户知识追加到 source_dir/user_knowledge.md。
+
+        每个 entry = `# <title>\\n\\n<body>\\n`;rebuild 时切块器自动切到这块。
+        body 内若含 `^# ` 行,会被切块器切成多个独立块(允许用户用 # 拆分多个知识点)。
+
+        Returns: 写入的文件路径。
+        """
+        from datetime import datetime
+
+        self.source_dir.mkdir(parents=True, exist_ok=True)
+        path = self.source_dir / "user_knowledge.md"
+        safe_title = (title or f"用户补充 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}").replace(
+            "#", ""
+        ).strip() or "用户补充"
+        body = body.strip()
+        if not body:
+            raise ValueError("append_user_chunk: body is empty")
+        entry = f"\n\n# {safe_title}\n\n{body}\n"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(entry)
+        logger.info(
+            "appended user chunk to %s (title=%r, body_len=%d)", path, safe_title, len(body)
+        )
+        return path
+
+    # ─────────────────────────── 列表 / 删除 ───────────────────────────
+
+    def list_chunks(self) -> list[dict]:
+        """列出所有块,返回 [{id, title, source, body, body_preview, deletable}, ...]。
+
+        - body 是嵌入时用的完整文本(`{title}\\n{body}`),用于前端展示与定位删除;
+        - body_preview 截前 100 字,便于卡片显示;
+        - deletable: source == "user_knowledge.md" 才允许删,产品手册只读。
+        无索引(未 rebuild/未 _load)时返回空列表。
+        """
+        db_path = self.index_dir / "knowledge.db"
+        if not db_path.exists():
+            return []
+        conn = sqlite3.connect(str(db_path))
+        try:
+            rows = conn.execute("SELECT id, title, source, body FROM chunks ORDER BY id").fetchall()
+        finally:
+            conn.close()
+        out: list[dict] = []
+        for rid, title, source, body in rows:
+            body_str = body or ""
+            # body 实际是 `f"{title}\n{body}"`,去掉首行标题得到纯正文
+            pure_body = body_str.split("\n", 1)[1] if "\n" in body_str else body_str
+            preview = pure_body.replace("\n", " ").strip()[:100]
+            out.append(
+                {
+                    "id": rid,
+                    "title": title or "",
+                    "source": source or "",
+                    "body": pure_body,
+                    "body_preview": preview,
+                    "deletable": (source or "") == "user_knowledge.md",
+                }
+            )
+        return out
+
+    async def delete_chunk(self, chunk_id: int) -> bool:
+        """删除指定 chunk。仅 user_knowledge.md 来源的块可删。
+
+        流程:
+        1. 从 SQLite 取 title/source/body;
+        2. 校验 source == "user_knowledge.md",否则拒绝;
+        3. 从 user_knowledge.md 删除对应 `# <title>\\n\\n<body>\\n` 段(用 title+body 双匹配,避免同名误删);
+        4. rebuild() 重写索引。
+
+        Returns: 是否删除成功。
+        """
+        db_path = self.index_dir / "knowledge.db"
+        if not db_path.exists():
+            logger.warning("delete_chunk: no index db at %s", db_path)
+            return False
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute(
+                "SELECT title, source, body FROM chunks WHERE id = ?", (int(chunk_id),)
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            logger.warning("delete_chunk: chunk id=%s not found", chunk_id)
+            return False
+        title, source, body = row
+        if source != "user_knowledge.md":
+            logger.warning("delete_chunk: chunk id=%s source=%r not deletable", chunk_id, source)
+            return False
+        path = self.source_dir / "user_knowledge.md"
+        if not path.exists():
+            logger.warning("delete_chunk: %s missing", path)
+            return False
+        text = path.read_text(encoding="utf-8")
+        # entry 格式: `\n\n# {title}\n\n{body}\n`,其中 body 是嵌入文本(`{title}\n{原始正文}`)
+        # 切块器写入 db 的 body = f"{title}\n{原始正文}",所以原始正文 = body 去掉首行
+        pure_body = (body or "").split("\n", 1)[1] if "\n" in (body or "") else (body or "")
+        entry = f"# {title}\n\n{pure_body}\n"
+        if entry not in text:
+            # 兜底:仅按 title 匹配(可能 body 因 split_long_body 被改写)
+            head = f"# {title}\n\n"
+            if head not in text:
+                logger.warning("delete_chunk: entry not found in %s (title=%r)", path, title)
+                return False
+            start = text.index(head)
+            next_idx = text.find("\n\n# ", start + len(head))
+            end = len(text) if next_idx == -1 else next_idx
+            new_text = text[:start] + text[end:]
+        else:
+            new_text = text.replace(entry, "", 1)
+        path.write_text(new_text, encoding="utf-8")
+        logger.info("deleted chunk id=%s title=%r from %s, rebuilding", chunk_id, title, path)
+        await self.rebuild()
+        return True
+
     # ─────────────────────────── embedding ───────────────────────────
 
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
@@ -216,9 +334,7 @@ class KnowledgeIndex:
                 for item in resp.data:
                     out.append(item.embedding)
             except Exception:
-                logger.exception(
-                    "embedding batch failed (offset=%d, batch=%d)", i, len(batch)
-                )
+                logger.exception("embedding batch failed (offset=%d, batch=%d)", i, len(batch))
                 # 失败的 batch 用零向量占位,保证索引不丢块
                 for _ in batch:
                     out.append([0.0] * self.dim)

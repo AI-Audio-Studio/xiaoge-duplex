@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import time
@@ -43,6 +42,10 @@ def _accumulate_online_text(w: SessionWiring, piece: str, segment_end: bool) -> 
         state["accum"] = ""
         return None
     if segment_end:
+        state["accum"] = ""
+        return None
+    player = runtime.music_player
+    if player is not None and getattr(player, "is_playing", False):
         state["accum"] = ""
         return None
     out = runtime.ws_audio_output
@@ -92,13 +95,6 @@ def _judge_online_interrupt(w: SessionWiring, min_chars: int, accum: str) -> Non
 
 
 def _clear_browser_playout() -> None:
-    # KWS/在线打断触发时,音乐也要立即停(若在播);fire-and-forget,不阻塞打断路径。
-    player = runtime.music_player
-    if player is not None and player.is_playing:
-        try:
-            asyncio.get_running_loop().create_task(player.stop())
-        except Exception:
-            pass
     output = runtime.ws_audio_output
     if output is not None:
         output.clear_buffer()

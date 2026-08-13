@@ -134,28 +134,33 @@ class MusicPlayer:
         self._resume_ev.set()  # 默认不暂停
         self._current_path: Path | None = None
         self._current_name: str = ""
+        self._last_path: Path | None = None
+        self._last_name: str = ""
         self._stopping = False
         self._yield_timer: asyncio.Task[None] | None = None
+        self._waiting_start_ack = False
 
     @property
     def is_playing(self) -> bool:
         return self._task is not None and not self._task.done()
 
     @property
+    def waiting_start_ack(self) -> bool:
+        return self._waiting_start_ack
+
+    @property
     def current_name(self) -> str:
         return self._current_name
+
+    @property
+    def last_name(self) -> str:
+        return self._last_name
 
     def pick_prompt(self, name: str) -> str:
         return random.choice(PROMPT_TEMPLATES).format(name=name)
 
     async def play(self, music_id: str | None) -> str:
-        """开始播放指定曲目(或随机)。已在播则先停再起。返回提示语(供 LLM 回话)。
-
-        起播即让 TTS:启动时 _resume_ev 是 clear 的,_play_loop 卡在第一帧等待
-        resume()。LLM 拿到提示语念出来 → agent_state=speaking → pause() 维持
-        clear 态;TTS 念完 → agent_state 切回 → resume() 触发推帧。
-        若 LLM 没念提示语,_yield_timer 超时后自动 resume(),避免卡死。
-        """
+        """开始播放指定曲目(或随机)。已在播则先停再起。返回提示语(供 LLM 回话)。"""
         path = self._library.resolve(music_id)
         if path is None:
             _log(f"MUSIC_PLAY_NOTFOUND query={music_id!r}")
@@ -163,8 +168,10 @@ class MusicPlayer:
         await self._stop_internal()
         self._current_path = path
         self._current_name = path.stem
+        self._last_path = path
+        self._last_name = path.stem
         self._stopping = False
-        # 起播即让 TTS:先 clear,等 agent_state 切回 speaking→idle 时 resume()
+        self._waiting_start_ack = True
         self._resume_ev.clear()
         self._task = self._loop.create_task(self._play_loop(path))
         self._arm_yield_timer()
@@ -173,12 +180,7 @@ class MusicPlayer:
         return prompt
 
     async def play_for_tool(self, music_id: str | None) -> str | None:
-        """LLM 工具调用入口:起播并让 TTS,返回曲名(供工具结果拼装)。
-
-        与 play() 区别:不生成提示语模板 —— 让 LLM 自己组织回应话术,避免
-        LLM 把"正在为您播放《X》"当成需要解释或扩展的建议(实测会出现
-        "来首别的吧,我再给你放一首"这种奇怪接续)。返回 None 表示没匹配到。
-        """
+        """LLM 工具调用入口:起播并让 TTS 提示先完成,返回曲名(供工具结果拼装)。"""
         path = self._library.resolve(music_id)
         if path is None:
             _log(f"MUSIC_PLAY_NOTFOUND query={music_id!r}")
@@ -186,11 +188,30 @@ class MusicPlayer:
         await self._stop_internal()
         self._current_path = path
         self._current_name = path.stem
+        self._last_path = path
+        self._last_name = path.stem
         self._stopping = False
+        self._waiting_start_ack = True
         self._resume_ev.clear()
         self._task = self._loop.create_task(self._play_loop(path))
         self._arm_yield_timer()
         _log(f"MUSIC_PLAY name={self._current_name!r} path={path} (yield-to-tts, tool)")
+        return self._current_name
+
+    async def resume_last_for_tool(self) -> str | None:
+        path = self._last_path
+        if path is None:
+            return None
+        await self._stop_internal()
+        self._current_path = path
+        self._current_name = path.stem
+        self._last_name = path.stem
+        self._stopping = False
+        self._waiting_start_ack = True
+        self._resume_ev.clear()
+        self._task = self._loop.create_task(self._play_loop(path))
+        self._arm_yield_timer()
+        _log(f"MUSIC_RESUME_LAST name={self._current_name!r} path={path} (yield-to-tts)")
         return self._current_name
 
     async def stop(self) -> str:
@@ -215,13 +236,14 @@ class MusicPlayer:
         """TTS 起来时调用:暂停推帧(已推的浏览器播完,新帧阻塞)。"""
         if self.is_playing:
             self._resume_ev.clear()
-            _log("MUSIC_PAUSE (TTS yield)")
+            _log("MUSIC_PAUSE")
 
     def resume(self) -> None:
         """TTS 结束后调用:恢复推帧。"""
         if self.is_playing and not self._resume_ev.is_set():
             self._resume_ev.set()
             _log("MUSIC_RESUME")
+        self._waiting_start_ack = False
         # 无论如何都 disarm 兜底 timer:要么正常 resume 了,要么本来就没 clear
         self._disarm_yield_timer()
 
@@ -241,6 +263,7 @@ class MusicPlayer:
             await asyncio.sleep(MUSIC_YIELD_TIMEOUT_S)
             if not self._resume_ev.is_set():
                 self._resume_ev.set()
+                self._waiting_start_ack = False
                 _log(f"MUSIC_YIELD_TIMEOUT auto-resume after {MUSIC_YIELD_TIMEOUT_S}s")
         except asyncio.CancelledError:
             pass
@@ -257,6 +280,7 @@ class MusicPlayer:
 
     async def _stop_internal(self) -> None:
         self._stopping = True
+        self._waiting_start_ack = False
         self._disarm_yield_timer()
         self._resume_ev.set()  # 唤醒可能阻塞的循环
         task = self._task

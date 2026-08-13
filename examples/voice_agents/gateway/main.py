@@ -9,7 +9,7 @@
 5. 宽限窗(D-16):由 proxy 持有上游 + 本模块 sweep 循环驱动超时收尾。
 6. 双标签页(R3):根页面允许刷新;同 cookie 已有活跃音频时由 WS 层拒绝第二路音频。
 
-安全(§6.2):`/api/*` 白名单(mic/asr/tts,余 404);亲和 cookie Secure+HttpOnly+SameSite=Strict;
+安全(§6.2):`/api/*` 白名单(mic/asr/tts/knowledge,余 404);亲和 cookie Secure+HttpOnly+SameSite=Strict;
 每连接帧大小+速率上限(proxy);错误响应不泄漏内部拓扑。
 """
 
@@ -21,18 +21,20 @@ import hashlib
 import hmac
 import json
 import logging
+import random
 import ssl
 import time
 from pathlib import Path
 from typing import Any
 
+import aiohttp
 import aiohttp.web as web
 
 from gateway import affinity as af
 from gateway.apikey import ApiKeyStore
 from gateway.config import GatewayConfig
 from gateway.pool_client import PoolClient
-from gateway.proxy import Proxy
+from gateway.proxy import _HOP_HEADERS, Proxy
 
 logger = logging.getLogger("gateway")
 
@@ -40,6 +42,7 @@ COOKIE = "xg_aff"  # 亲和 cookie
 ACCESS_COOKIE = "xg_access"  # 准入凭证 cookie(D-18)
 # §6.2 ①:白名单转发 mic/asr/tts。asr/tts 隐藏由 agent 侧 XIAOGE_ADMIN_ROUTES 门控(M5/D-19:
 # 池管理器服务器形态注入 0 → 不注册 → 404;本地默认显示);网关照常反代、取回 agent 的 404 原样回。
+# knowledge 已迁至独立 /api/knows/* 路由(apikey 准入 + 无亲和反代,见 _Router.knows_api)。
 _API_WHITELIST = {"mic", "asr", "tts"}
 _SWEEP_INTERVAL_S = 2.0
 _PENDING_SESSION_TTL_S = 30.0
@@ -298,9 +301,7 @@ class _Router:
         token = request.query.get("access_token", "").strip()
         return await self._serve_ws_session(request, token)
 
-    async def _serve_ws_session(
-        self, request: web.Request, token: str
-    ) -> web.WebSocketResponse:
+    async def _serve_ws_session(self, request: web.Request, token: str) -> web.WebSocketResponse:
         await self._cleanup_pending_sessions()
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
@@ -356,6 +357,78 @@ class _Router:
             return web.json_response({"error": "session expired"}, status=409)
         return await self._proxy.proxy_http(request, session)
 
+    # ── /knows 知识库独立管理(apikey 准入 + 无亲和反代)──────────────────────────
+    async def _pick_any_port(self) -> int | None:
+        """从池里取一个 READY 端口(不 alloc/release,不占槽不杀进程)。
+
+        /knows 是高频运维请求,绝不能走 pool.alloc/release——alloc 占 ASSIGNED 槽,
+        release 触发 _recycle **kill 进程并重启**(manager.py:185),高频请求会清空整个池。
+        用 list_ready 拿 READY 端口,任意选一个;空时 fallback 取已分配端口(罕见,启动初期)。
+        """
+        ports = await self._pool.list_ready()
+        if ports:
+            return int(random.choice(ports)["port"])
+        # 兜底:pool 全 SPAWNING/RECYCLING 时取一个 ASSIGNED 端口(避免 503)
+        status = await self._pool.status()
+        if status.get("assigned", 0) > 0:
+            # list_ready 只返 READY,ASSIGNED 取不到端口——只能再等等 READY
+            return None
+        return None
+
+    async def _proxy_to_port(self, request: web.Request, port: int, *, prefix: str) -> web.Response:
+        """无亲和反代:把 request 透传到 http://127.0.0.1:{port}{prefix}{tail}。
+
+        与 Proxy.proxy_http 的区别:不依赖 Session(无 cookie 亲和);每次请求新建上游连接
+        (够用,知识库不是高频热路径)。逐跳头剔除 + body 原样转发 + 响应原样回。
+        """
+        tail = request.match_info.get("tail", "")
+        url = f"http://127.0.0.1:{port}{prefix}{tail}"
+        if request.query_string:
+            url = f"{url}?{request.query_string}"
+        sess = aiohttp.ClientSession()
+        try:
+            fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+            body = await request.read()
+            try:
+                async with sess.request(request.method, url, data=body, headers=fwd) as up:
+                    data = await up.read()
+                    return web.Response(status=up.status, body=data, content_type=up.content_type)
+            except Exception as exc:
+                logger.warning("knows proxy upstream failed port=%d: %s", port, exc)
+                return web.json_response({"error": f"upstream unavailable: {exc}"}, status=502)
+        finally:
+            await sess.close()
+
+    async def knows_page(self, request: web.Request) -> web.Response:
+        """GET /knows:apikey 准入 → 选任意 READY agent → 反代 webpanel 的 /knows 页面。
+
+        浏览器加载 HTML 时无法带自定义头,所以这条路由额外支持 query string
+        `?apikey=<KEY>`(仅页面本身,/api/knows/* 仍只认头)。knows.html 加载后
+        会把 key 写入 localStorage 并清掉 URL 上的 token,避免泄露到 history。
+        """
+        presented = _api_key_from_request_headers(request) or request.query.get("apikey") or request.query.get("api_key")
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        port = await self._pick_any_port()
+        if port is None:
+            return web.json_response({"code": "resource_exhausted"}, status=503)
+        return await self._proxy_to_port(request, port, prefix="/knows")
+
+    async def knows_api(self, request: web.Request) -> web.Response:
+        """* /api/knows/{tail}:apikey 准入 → 选任意 READY agent → 反代 webpanel 的 /api/knows/{tail}。
+
+        无亲和:任意 agent 都能写/读 user_knowledge.md(文件共享),rebuild 后 meta.json mtime
+        变化触发其他 agent 的 _maybe_reload 热更新。高频运维请求,**不走 alloc/release**
+        (release 会 kill 进程,见 _pick_any_port 注释)。
+        """
+        presented = _api_key_from_request_headers(request)
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        port = await self._pick_any_port()
+        if port is None:
+            return web.json_response({"code": "resource_exhausted"}, status=503)
+        return await self._proxy_to_port(request, port, prefix="/api/knows/")
+
     async def healthz(self, _: web.Request) -> web.Response:
         return web.json_response({"ok": True, "pool": await self._pool.status()})
 
@@ -380,6 +453,10 @@ def build_gateway_app(
         app.router.add_get("/debug/ws/session", r.debug_ws_session)
     app.router.add_get("/ws", r.ws_state)
     app.router.add_get("/ws/audio", r.ws_audio)
+    # 知识库独立管理界面:apikey 准入 + 无亲和反代。必须在 /api/{tail:.*} 之前注册,
+    # 否则 /api/knows/list 会被 r.api(白名单 + cookie 亲和)拦截 → 404/409。
+    app.router.add_get("/knows", r.knows_page)
+    app.router.add_route("*", "/api/knows/{tail:.*}", r.knows_api)
     app.router.add_route("*", "/api/{tail:.*}", r.api)
     return app
 

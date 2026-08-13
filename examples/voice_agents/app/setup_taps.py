@@ -157,14 +157,10 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage) -> None:
 
 def _handle_agent_state(w: SessionWiring, event) -> None:
     broadcast({"type": "state", "agent_state": event.new_state})
-    # 音乐让 TTS:speaking → 暂停音乐;其他状态(listening/idle)→ 恢复音乐
     player = runtime.music_player
-    if player is not None:
-        if event.new_state == "speaking":
-            player.pause()
-        else:
-            player.resume()
     if event.new_state != "speaking":
+        if player is not None and getattr(player, "waiting_start_ack", False):
+            player.resume()
         return
     w.online_state["accum"] = ""
     user_stopped = w.turn_trace.get("user_stopped_at")
