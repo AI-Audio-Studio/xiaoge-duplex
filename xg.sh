@@ -79,11 +79,16 @@ _pool_ready() {
 }
 
 _kill_agents() {
-    # agent 进程监听 XG_POOL_BASE_PORT 起始的端口段
-    local start end pids
+    # agent 进程监听 XG_POOL_BASE_PORT 起始的端口段。
+    # 双来源:① ss 端口段提取 pid;② pgrep -f web_ui_agent.py 兜底。
+    # 单靠 ss 在本环境会漏:agent 的 listening socket 在 ss -p 里常不显示 pid
+    # (SO_REUSEPORT / fork 后 socket 所有权分散),导致 stop 留下孤儿 agent 占着
+    # 19100-19105,下次 start bind 冲突 -> spawn timeout -> recycle -> 死循环。
+    # pgrep 抓 web_ui_agent.py(进程名独有,不误伤),补上 ss 漏掉的孤儿。
+    local start end pids ss_pids pgrep_pids
     start="${XG_POOL_BASE_PORT:-19100}"
     end=$((start + ${XG_POOL_PORT_SPAN:-100} - 1))
-    pids=$(ss -tnlp 2>/dev/null \
+    ss_pids=$(ss -tnlp 2>/dev/null \
         | awk -v start="$start" -v end="$end" '
             {
                 port = ""
@@ -95,6 +100,8 @@ _kill_agents() {
                 }
             }' \
         | sort -u)
+    pgrep_pids=$(pgrep -f "web_ui_agent\.py" 2>/dev/null | sort -u || true)
+    pids=$(printf '%s\n%s\n' "$ss_pids" "$pgrep_pids" | grep -E '^[0-9]+$' | sort -u || true)
     if [[ -n "$pids" ]]; then
         echo "  killing agents: $(echo "$pids" | tr '\n' ' ')"
         echo "$pids" | xargs kill -9 2>/dev/null || true
