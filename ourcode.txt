@@ -74,6 +74,7 @@ clients/python/xiaoge_client.py
 clients/python/demo_file.py
 clients/python/demo_mic.py
 clients/python/selftest.py
+clients/package_python_sdk.py
 clients/matlab/bridge/xiaoge_bridge.py
 tests/test_ours_text_rules.py
 tests/test_ours_text_sanitizer.py

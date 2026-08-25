@@ -1,14 +1,14 @@
 classdef XiaogeAudioBlock < matlab.System
-    % XiaogeAudioBlock  小歌全双工音频块(Simulink「MATLAB System」块)。
-    %   经 xiaoge_bridge.py 的 TCP 桥对接小歌(B 方案,无需 Java)。
-    %   每步:输入一帧麦克风 PCM(int16 列向量)→ 发往小歌;输出一帧 TTS PCM。
+    % XiaogeAudioBlock  R5.2.2 audio block for xiaoge_bridge.py.
+    %   The Python bridge owns create_session, WSS Bearer auth, ctrl.hello,
+    %   command ack/result, and fake executor behavior.
     %
     %   用法(先在主机起桥):
-    %     python clients/matlab/bridge/xiaoge_bridge.py 60.205.197.165 10099 --up 5001 --down 5002 --tls --insecure
+    %     python clients/matlab/bridge/xiaoge_bridge.py <create_session_url> <device_id> <credential> --up 5001 --down 5002 --events 5003
     %   再把本块拖入模型,设 BridgeHost/UpPort/DownPort/FrameSize。
     %
     %   音频格式:16000 Hz、单声道、16-bit。FrameSize 默认 320(20ms@16k)。
-    %   状态:R2022b 适配,**未在交付环境运行**,请按 README 验证。
+    %   Status:R2022b compatible; validate on your MATLAB/Simulink host.
 
     properties (Nontunable)
         BridgeHost = '127.0.0.1'   % 桥主机

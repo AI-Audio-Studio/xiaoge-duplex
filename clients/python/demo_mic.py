@@ -1,25 +1,28 @@
-"""实时 demo:麦克风 ↔ 小歌 ↔ 扬声器(全双工)。
-
-用法::  python demo_mic.py <host> <port>
-依赖:websockets + sounddevice(见 requirements.txt)。Ctrl-C 退出。
-收到 clear → 立即清空待播缓冲(自然的 barge-in)。
-"""
+"""R5.2.2 real-time microphone demo."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import threading
 
 import sounddevice as sd
-from xiaoge_client import NUM_CHANNELS, SAMPLE_RATE, XiaogeClient
 
-BLOCK = 320  # 20ms @ 16k(单声道,样本数)
+from xiaoge_client import (
+    CommandEvent,
+    NUM_CHANNELS,
+    SAMPLE_RATE,
+    CmdAckStatus,
+    CmdResultStatus,
+    XiaogeClient,
+    default_ssl_context,
+)
+
+BLOCK = 320
 
 
 class _Playback:
-    """线程安全的播放字节缓冲:on_audio 追加,扬声器回调消费,clear 清空。"""
-
     def __init__(self) -> None:
         self._buf = bytearray()
         self._lock = threading.Lock()
@@ -36,7 +39,29 @@ class _Playback:
         with self._lock:
             out = bytes(self._buf[:n])
             del self._buf[:n]
-        return out.ljust(n, b"\x00")  # 不足补静音
+        return out.ljust(n, b"\x00")
+
+
+def _credential(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
+
+
+def _print_final_stt(text: str, is_final: bool) -> None:
+    if is_final:
+        text = text.strip()
+        if text:
+            print("stt final:", text)
+
+
+async def _handle_cmd(client: XiaogeClient, event: CommandEvent) -> None:
+    print("cmd:", event.cmd_id, event.capability_id, event.action)
+    await client.send_command_ack(event, CmdAckStatus.ACCEPTED, "ok")
+    await client.send_command_result(event, CmdResultStatus.RUNNING, "ok")
+    await asyncio.sleep(1.0)
+    await client.send_command_result(event, CmdResultStatus.SUCCEEDED, "ok")
 
 
 async def _run(client: XiaogeClient) -> None:
@@ -44,15 +69,19 @@ async def _run(client: XiaogeClient) -> None:
     up_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
     play = _Playback()
 
-    def mic_cb(indata, frames, time_info, status) -> None:  # sounddevice 线程
+    def mic_cb(indata, frames, time_info, status) -> None:
         loop.call_soon_threadsafe(_offer, up_q, bytes(indata))
 
-    def spk_cb(outdata, frames, time_info, status) -> None:  # sounddevice 线程
+    def spk_cb(outdata, frames, time_info, status) -> None:
         outdata[:] = play.take(len(outdata))
 
+    client.on_ready = lambda sr: print("ready", sr)
     client.on_audio = play.push
-    client.on_clear = play.clear
-    client.on_busy = lambda m: print("服务器忙:", m)
+    client.on_clear = lambda event: play.clear()
+    client.on_stt_text = _print_final_stt
+    client.on_reply = lambda event: print("reply:", event.text)
+    client.on_command = lambda event: asyncio.create_task(_handle_cmd(client, event))
+    client.on_error = lambda event: print("error:", event.code, event.message)
 
     mic = sd.RawInputStream(
         samplerate=SAMPLE_RATE,
@@ -69,40 +98,42 @@ async def _run(client: XiaogeClient) -> None:
         callback=spk_cb,
     )
     with mic, spk:
-        print(f"通话中(16k 单声道)→ {client.host}:{client.port};Ctrl-C 退出")
         runner = asyncio.create_task(client.run())
+        while client.frontend_state is None:
+            await asyncio.sleep(0.01)
+        await client.send_frontend_state(trust_level="hint", wake_state="awake", vad="speech")
+        print("talking; press Ctrl-C to exit")
         while not runner.done():
             await client.send_pcm(await up_q.get())
 
 
-def _offer(q: asyncio.Queue, data: bytes) -> None:
+def _offer(q: asyncio.Queue[bytes], data: bytes) -> None:
     if not q.full():
         q.put_nowait(data)
 
 
-def _ssl_context(insecure: bool) -> object | None:
-    if not insecure:
-        return None
-    import ssl
-
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
 def main() -> None:
-    p = argparse.ArgumentParser(description="小歌实时麦克风 demo")
-    p.add_argument("host")
-    p.add_argument("port", type=int)
-    p.add_argument("--tls", action="store_true", help="用 wss")
-    p.add_argument("--insecure", action="store_true", help="wss 不校验证书(自签)")
+    p = argparse.ArgumentParser(description="Xiaoge R5.2.2 microphone demo")
+    p.add_argument("create_session_url")
+    p.add_argument("device_id")
+    p.add_argument("credential", help="JSON object/string credential")
+    p.add_argument("--insecure", action="store_true", help="do not verify TLS certs for HTTPS/WSS test env")
+    p.add_argument("--ca-cert", default=None, help="PEM CA file for HTTPS/WSS; defaults to ../certs/cloud-ca.pem")
+    p.add_argument("--api-key", default="", help="create_session x-api-key header value; defaults to no header")
+    p.add_argument("--trace-log", default=None, help="optional client JSONL trace path")
     a = p.parse_args()
-    client = XiaogeClient(a.host, a.port, tls=a.tls, ssl=_ssl_context(a.insecure))
+    client = XiaogeClient(
+        a.create_session_url,
+        a.device_id,
+        _credential(a.credential),
+        api_key=a.api_key,
+        ssl=default_ssl_context(ca_cert=a.ca_cert, insecure=a.insecure),
+        trace_log_path=a.trace_log,
+    )
     try:
         asyncio.run(_run(client))
     except KeyboardInterrupt:
-        print("\n已退出")
+        print("\nexited")
 
 
 if __name__ == "__main__":

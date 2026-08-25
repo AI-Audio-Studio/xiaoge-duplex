@@ -1,54 +1,82 @@
-# 小歌 `/ws/audio` 对接协议
+# Xiaoge Duplex Client Protocol R5.2.2
 
-客户端通过一条 WebSocket 与小歌做全双工语音收发。本文件是三个 SDK(Python/C/MATLAB)的共同依据。
+Contract version: `xiaoge-duplex-protocol-r5.2.2`
 
-## 0. 前置
-- 服务端需以 `WEB_AUDIO=1` 启动。
-- 路径:`/ws/audio`。通用形式 `ws(s)://<host>:<port>/ws/audio`。
-- **当前部署**:`wss://60.205.197.165:10099/ws/audio`(HTTPS,自签证书)。
-- **单客户端**:同一时刻只接受一个音频连接;新连接会顶替或被拒。
+Manifest SHA256:
 
-## 1. 音频格式(上行/下行一致,必须严格匹配)
-| 项 | 值 |
-|---|---|
-| 采样率 | 16000 Hz |
-| 声道 | 单声道 |
-| 采样位深 | 16-bit 有符号整型 |
-| 字节序 | 小端(little-endian) |
-| 封装 | 裸 PCM(无 WAV/容器头),走 WebSocket **二进制**帧 |
-
-建议每帧 10–20ms(160–320 样本 = 320–640 字节);服务端会自行重组,不强制帧长。
-
-## 2. 消息类型
-- **二进制帧**:音频 PCM。上行=麦克风;下行=TTS。
-- **文本帧**:JSON 控制消息,字段 `type`:
-
-| 方向 | 消息 | 含义 / 客户端动作 |
-|---|---|---|
-| 服务端→客户端 | `{"type":"ready","sample_rate":16000}` | 握手完成,可以开始发音频 |
-| 服务端→客户端 | `{"type":"clear"}` | **打断**:立即清空本地待播缓冲 |
-| 服务端→客户端 | `{"type":"busy","message":"..."}` | 服务端忙/连接被拒(随后关闭) |
-| 服务端→客户端 | `{"type":"user_partial","text":"..."}` | 用户语音的实时转写(增量,同轮内整句置换显示) |
-| 服务端→客户端 | `{"type":"message","role":"user"\|"assistant","text":"...","ts":1720000000.0}` | 定稿消息:用户轮的最终转写 / 助手回复文本;`ts` 为服务端 Unix 秒 |
-
-> **完整性(对齐服务端 `_handle_ws_audio` 与 `webpanel/bridge.py`)**:服务端→客户端**只有**上述五种控制消息 + 二进制 PCM,无其它(`state/listening` 等仍仅在浏览器 UI 通道 `/ws`)。`user_partial`/`message` 与 `/ws` 通道同源同格式。
-> **客户端→服务端只发二进制音频**,不需要(也不会被解析)任何控制消息。
-> 连接建立后服务端会先播一段**欢迎语 TTS**(故连上很快就能收到下行音频)。
-
-## 3. 时序
-```
-客户端                              服务端
-  | ── WS 连接 ───────────────────▶ |
-  | ◀── {"type":"ready",sr:16000} ─ |   (on_ready)
-  | ── PCM ─▶ PCM ─▶ PCM ─▶ ...     |   (持续上行)
-  | ◀────────── PCM(TTS)────────── |   (on_audio → 播放)
-  | ◀────────── {"type":"clear"} ── |   (on_clear → 清空播放;用户插话打断)
-  | ◀────────── PCM(新一轮 TTS)─── |
+```text
+845F0F4125061FF37A7F4DA20E0C88BC089200A08B319F1035D6522C80B56559
 ```
 
-## 4. 心跳与连接
-- 服务端约 30s 一次心跳;各 SDK 用所在 WS 库的内建 ping/pong 保活(无需业务层处理)。
-- 连接断开即结束会话;重连后重新等待 `ready`。
+## Main Path
 
-## 5. 一致性说明
-本协议以服务端 `/ws/audio` 现有实现为准。三个 SDK 的行为应与本文件一致;如服务端调整,以服务端为准并同步更新本文件。
+```text
+HTTPS create_session
+  -> x-api-key header
+  -> session.created(trace_id, session_id, access_token, expires_in_ms, ws_url, granted_caps, config_snapshot)
+WSS /ws/session
+  -> Authorization: Bearer <access_token>
+  -> ctrl.hello
+  -> ctrl.ready / ctrl.state / ctrl.clear / data.* + binary PCM
+  -> data.cmd_ack / data.cmd_result / data.error
+```
+
+The API key and token are carried only by transport headers. `ctrl.hello` must
+not contain token or API-key fields.
+
+## Audio
+
+| Field | Value |
+| --- | --- |
+| Sample rate | 16000 Hz |
+| Channels | mono |
+| Sample format | signed 16-bit little-endian |
+| Container | raw PCM over WebSocket binary frames |
+| Binary frame max | 32768 bytes |
+
+Recommended upstream frame size is 10-20 ms: 320-640 bytes.
+
+## JSON Transport
+
+JSON text frames are compact UTF-8 bytes. `8192` bytes pass; `8193` bytes fail.
+Clients must not add fields, enums, delivery values, error codes, or close codes
+outside the frozen R5.2.2 contract.
+
+## Client Responsibilities
+
+- Build `create_session` request with `device_id`, `credential`, `caps`,
+  `audio_format={16000,1,int16le}`, and `client_version`.
+- Send `x-api-key` only on create_session HTTP when explicitly configured; WebSocket session authentication uses only `Authorization: Bearer <access_token>`.
+- Connect to `ws_url` using `Authorization: Bearer <access_token>`.
+- Send `ctrl.hello` with `proto=2`, `role=device`, `device_id`, and granted caps.
+- Send optional `ctrl.frontend_state` with monotonic `seq`, `ttl_ms`, and
+  `trust_level` in `authoritative/hint/observe`.
+- Send PCM as binary frames and handle downlink TTS PCM.
+- Handle `ctrl.clear` by clearing local playback buffers.
+- Consume only `data.cmd` and `data.cmd after confirmation` as executable
+  deliveries. Before high-risk confirmation, cancel, or timeout, no command
+  reaches the executor.
+- Return `data.cmd_ack` status `accepted/rejected/duplicate`; unknown `cmd_id`
+  uses `data.error` or audit, never `data.cmd_ack.status=unknown`.
+
+## Error And Close Handling
+
+Clients log and recover according to R5.2.2 close-code cases:
+
+| Case | Client action |
+| --- | --- |
+| HTTP 401 create_session | fix credential or reprovision |
+| WSS 4401 token/auth | create_session then reconnect |
+| HTTP/WSS 403 permission | show permission denied |
+| WSS 4400 protocol_error | log trace and reconnect if closed |
+| WSS 4009 duplicate_connection | keep or reconnect by policy |
+| HTTP 503/resource_exhausted | backoff retry |
+| runtime `data.error=busy/resource_exhausted` or WSS 1013 | show busy and backoff |
+
+Legacy close code `4001` is not part of R5.2.2.
+
+## Historical Reference
+
+Old `/ws/audio` clients were a pre-R5.2.2 audio-only reference. They are not the
+current client main path and must not be used for new SDK demos, replay, or
+forward-compatibility work.

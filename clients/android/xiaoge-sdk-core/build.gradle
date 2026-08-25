@@ -1,0 +1,39 @@
+plugins {
+    id "com.android.library"
+}
+
+android {
+    namespace "com.xiaoge.client"
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 23
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    testOptions {
+        unitTests.all { test ->
+            [
+                    "xiaoge.e2e.enabled",
+                    "xiaoge.e2e.createSessionUrl",
+                    "xiaoge.e2e.wavPath",
+                    "xiaoge.e2e.reportPath"
+            ].each { name ->
+                if (System.getProperty(name) != null) {
+                    test.systemProperty name, System.getProperty(name)
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    api "com.squareup.okhttp3:okhttp:4.12.0"
+    implementation "org.json:json:20240303"
+    testImplementation "junit:junit:4.13.2"
+}

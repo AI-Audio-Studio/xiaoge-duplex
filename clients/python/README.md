@@ -1,53 +1,100 @@
-# 小歌 Python 客户端 SDK
+# Xiaoge Python Client SDK R5.2.2
 
-对接小歌服务端的 `/ws/audio`(服务端需 `WEB_AUDIO=1`)。协议见 [../PROTOCOL.md](../PROTOCOL.md)。
+中文客户调用说明见 `PYTHON_SDK_README.md`。
 
-## 安装
+## Install
+
 ```bash
-pip install -r requirements.txt   # websockets(核心)+ sounddevice(仅 demo_mic 需要)
+pip install -r requirements.txt
 ```
 
-## SDK 用法(`xiaoge_client.py`)
+`sounddevice` is needed only by `demo_mic.py`.
+
+## Self Test
+
+```bash
+python selftest.py
+```
+
+This starts a local create_session HTTP endpoint and mock `/ws/session` server.
+Expected:
+
+```text
+records=local-selftest failures=0
+```
+
+## Contract Replay
+
+```bash
+python contract_replay.py --contract-dir <path-to-r5.2.2-02_contracts>
+```
+
+Expected:
+
+```text
+records=56 failures=0
+```
+
+## SDK Usage
+
 ```python
-import asyncio
-from xiaoge_client import XiaogeClient
+import os
 
-async def main():
-    # 当前部署:60.205.197.165:10099(wss/自签)。自签需传不校验的 SSLContext:
-    import ssl
-    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-    c = XiaogeClient("60.205.197.165", 10099, tls=True, ssl=ctx)
-    c.on_ready = lambda sr: print("已就绪", sr)
-    c.on_audio = lambda pcm: my_speaker(pcm)  # 播放 TTS(16k/单声道/int16 小端)
-    c.on_clear = lambda: my_speaker_flush()   # 打断:清空播放
-    c.on_busy  = lambda m: print("忙:", m)
+from xiaoge_client import XiaogeClient, default_ssl_context
 
-    async def feed():
-        while True:
-            await c.send_pcm(my_mic_read())    # 上行麦克风 PCM(同格式)
-
-    await asyncio.gather(c.run(), feed())
-
-asyncio.run(main())
+client = XiaogeClient(
+    "https://60.205.197.165:10099/create_session",
+    "robot-x3-001",
+    {"key_id": "dev", "signature": "mock"},
+    api_key=os.environ["XIAOGE_CLOUD_API_KEY"],  # sent as create_session x-api-key header
+    ssl=default_ssl_context(),
+    trace_log_path="client_trace.jsonl",
+)
+client.on_audio = speaker.write
+client.on_clear = lambda event: speaker.flush()
+client.on_json = lambda payload: print("downlink", payload["type"])
+await client.run()
 ```
-**音频格式(必须严格匹配)**:16000 Hz、单声道、16-bit 有符号小端、裸 PCM。
 
-## 示例(当前部署 60.205.197.165:10099,wss 自签)
+The SDK performs:
+
+```text
+create_session -> WSS /ws/session + Bearer -> ctrl.hello
+```
+
+Business callbacks receive typed event objects such as `SttEvent`, `ReplyEvent`,
+and `CommandEvent`. Use `on_json(payload)` when you need raw downlink JSON for
+logging, debugging, or protocol audits.
+
+`data.cmd` is delivered to `on_command(event)`. The SDK does not auto-send
+`data.cmd_ack` or `data.cmd_result`, and no real robot action is called.
+
+### Command status constants
+
+Use the SDK enums or constants when replying to downlink commands so status
+values stay within the R5.2.2 protocol set:
+
+```python
+from xiaoge_client import CmdAckStatus, CmdResultStatus, ProtocolCodec
+
+ack = ProtocolCodec.cmd_ack(command, CmdAckStatus.ACCEPTED, "ok")
+result = ProtocolCodec.cmd_result(command, CmdResultStatus.SUCCEEDED, "ok")
+```
+
+Valid raw strings remain accepted for backwards compatibility, but invalid
+`cmd_ack` or `cmd_result` status values raise `XiaogeProtocolError` before any
+frame is sent.
+
+## Demos
+
 ```bash
-python demo_mic.py  60.205.197.165 10099 --tls --insecure                 # 实时麦克风↔扬声器(需 sounddevice)
-python demo_file.py 60.205.197.165 10099 in.wav [out.wav] --tls --insecure   # 无声卡:发 wav、存回复 wav
-#   --tls       用 wss(HTTPS 部署)
-#   --insecure  wss 不校验证书(自签)。ws 明文部署则去掉这两个开关。
+python demo_file.py <create_session_url> <device_id> <credential-json-or-string> in.wav out.wav [--ca-cert ../certs/cloud-ca.pem]
+python demo_mic.py  <create_session_url> <device_id> <credential-json-or-string> [--ca-cert ../certs/cloud-ca.pem]
 ```
 
-## 自测(冒烟)
-```bash
-python selftest.py    # 本地 mock 服务验证握手/收发/clear/busy,退出码 0=通过
-```
+If `--ca-cert` is omitted, the demos use the bundled `../certs/cloud-ca.pem`
+when present. `api_key` defaults to the `XIAOGE_CLOUD_API_KEY` environment
+variable; pass `--api-key` to override the create_session `x-api-key` header.
+`--insecure` remains test-only.
 
-## 真机验证(已通过)
-已对部署服务器 `wss://60.205.197.165:10099/ws/audio` 用本 SDK 端到端验证:握手 `ready`、
-发真实中文语音、收到数秒 TTS 音频。复现:
-```bash
-python demo_file.py 60.205.197.165 10099 speech16k.wav reply.wav --tls --insecure
-```
+`in.wav` must be 16000 Hz, mono, signed 16-bit PCM.

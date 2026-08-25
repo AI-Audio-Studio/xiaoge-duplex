@@ -1,88 +1,63 @@
 classdef Client < handle
-    %xiaoge.Client  小歌全双工音频客户端(A 方案:Java-WebSocket,直连 /ws/audio)。
-    %   依赖:Java-WebSocket jar + 编译好的 XiaogeWsAdapter.jar(见 java/ 与 lib/)。
-    %
-    %   ⚠️ 状态:**未在交付环境测试**(本机无 MATLAB/JDK)。若不想编译 Java 适配器,
-    %      请改用 B 方案(XiaogeAudioBlock + xiaoge_bridge.py),那条链路已自测通过。
-    %
-    %   用法:
-    %     c = xiaoge.Client('60.205.197.165', 10099, true);   % 当前部署(wss)
-    %     c.OnAudio = @(pcm) playFcn(pcm);   % pcm: int16 列向量(16k/单声道)
-    %     c.OnClear = @() flushFcn();        % 打断:清空播放
-    %     c.connect();
-    %     c.sendPcm(int16Frame);             % 上行
-    %
-    %   回调(可选):OnReady(sampleRate) / OnAudio(int16) / OnClear() / OnBusy(msg)。
+    %xiaoge.Client R5.2.2 MATLAB TCP client for xiaoge_bridge.py.
+    %   The Python bridge owns create_session, WSS Bearer auth, ctrl.hello,
+    %   cmd_ack/cmd_result, and fake executor behavior. MATLAB sends PCM to the
+    %   bridge and receives TTS PCM plus JSONL events.
 
     properties
-        OnReady = []
         OnAudio = []
-        OnClear = []
-        OnBusy = []
+        OnEvent = []
     end
 
     properties (Access = private)
-        Ws
-        Url
+        UpClient
+        DownClient
+        EventsClient
     end
 
     methods
-        function obj = Client(host, port, tls)
-            if nargin < 3, tls = false; end
-            scheme = "ws"; if tls, scheme = "wss"; end
-            obj.Url = sprintf('%s://%s:%d/ws/audio', scheme, host, port);
-            obj.addJars();
-        end
-
-        function connect(obj)
-            uri = java.net.URI(obj.Url);
-            obj.Ws = XiaogeWsAdapter(uri);
-            set(obj.Ws, 'PropertyChangeCallback', @(s, e) obj.onEvent(e));
-            obj.Ws.connectBlocking();
+        function obj = Client(bridgeHost, upPort, downPort, eventsPort)
+            if nargin < 1, bridgeHost = '127.0.0.1'; end
+            if nargin < 2, upPort = 5001; end
+            if nargin < 3, downPort = 5002; end
+            if nargin < 4, eventsPort = 5003; end
+            obj.UpClient = tcpclient(bridgeHost, upPort, 'Timeout', 1);
+            obj.DownClient = tcpclient(bridgeHost, downPort, 'Timeout', 1);
+            obj.EventsClient = tcpclient(bridgeHost, eventsPort, 'Timeout', 1);
         end
 
         function sendPcm(obj, pcm)
-            % pcm: int16 → 转 little-endian 字节(typecast 在小端机上即小端)
-            obj.Ws.sendPcm(typecast(int16(pcm(:)).', 'int8'));
+            write(obj.UpClient, int16(pcm(:)), 'int16');
+        end
+
+        function pcm = readAudio(obj, maxSamples)
+            if nargin < 2, maxSamples = 320; end
+            k = min(floor(obj.DownClient.NumBytesAvailable / 2), maxSamples);
+            pcm = int16([]);
+            if k > 0
+                pcm = read(obj.DownClient, k, 'int16');
+                if ~isempty(obj.OnAudio), obj.OnAudio(pcm); end
+            end
+        end
+
+        function events = readEvents(obj)
+            events = {};
+            n = obj.EventsClient.NumBytesAvailable;
+            if n <= 0, return; end
+            raw = char(read(obj.EventsClient, n, 'uint8')');
+            lines = regexp(raw, '\r?\n', 'split');
+            for i = 1:numel(lines)
+                if strlength(lines{i}) == 0, continue; end
+                ev = jsondecode(lines{i});
+                events{end + 1} = ev; %#ok<AGROW>
+                if ~isempty(obj.OnEvent), obj.OnEvent(ev); end
+            end
         end
 
         function close(obj)
-            if ~isempty(obj.Ws), obj.Ws.close(); end
-        end
-    end
-
-    methods (Access = private)
-        function addJars(~)
-            here = fileparts(mfilename('fullpath'));
-            libdir = fullfile(here, '..', 'lib');
-            jars = dir(fullfile(libdir, '*.jar'));
-            for i = 1:numel(jars)
-                jp = fullfile(libdir, jars(i).name);
-                if ~any(strcmp(javaclasspath, jp)), javaaddpath(jp); end
-            end
-        end
-
-        function onEvent(obj, e)
-            name = char(e.getPropertyName());
-            val = e.getNewValue();
-            switch name
-                case 'Text'
-                    obj.onText(char(val));
-                case 'Audio'
-                    if ~isempty(obj.OnAudio)
-                        obj.OnAudio(typecast(int8(val).', 'int16').');
-                    end
-            end
-        end
-
-        function onText(obj, txt)
-            if contains(txt, '"ready"')
-                if ~isempty(obj.OnReady), obj.OnReady(16000); end
-            elseif contains(txt, '"clear"')
-                if ~isempty(obj.OnClear), obj.OnClear(); end
-            elseif contains(txt, '"busy"')
-                if ~isempty(obj.OnBusy), obj.OnBusy(txt); end
-            end
+            obj.UpClient = [];
+            obj.DownClient = [];
+            obj.EventsClient = [];
         end
     end
 end

@@ -1,14 +1,13 @@
-/* 小歌全双工语音 · C 客户端 SDK(基于 libwebsockets)。
+/* Xiaoge R5.2.2 C client SDK.
  *
- * 对接服务端 /ws/audio(服务端需 WEB_AUDIO=1)。协议见 ../PROTOCOL.md:
- * 上行 = 连续发 16kHz/单声道/16-bit 小端裸 PCM;下行 = 同格式 PCM(TTS)
- * + 文本控制 {"type":"ready"|"clear"|"busy"}。本 SDK 只做协议与收发,
- * 音频采集/播放由调用方在回调里处理(回调式、可移植、无声卡依赖)。
+ * Main path:
+ *   create_session request JSON -> caller/cloud HTTP layer
+ *   -> session.created -> WSS /ws/session with Authorization: Bearer
+ *   -> ctrl.hello -> JSON ctrl/data frames + binary PCM.
  *
- * 线程模型:单线程事件循环。创建后循环调用 xiaoge_service() 泵事件;
- * 回调在该线程触发。send_pcm 线程安全(内部加锁入队)。
- *
- * 依赖:libwebsockets(>=4.0)。构建见 CMakeLists.txt。
+ * The C SDK keeps libwebsockets as its only transport dependency. It builds the
+ * create_session JSON request but leaves the HTTPS POST to the embedding app, so
+ * embedded targets can reuse their existing HTTP/TLS stack.
  */
 #ifndef XIAOGE_CLIENT_H
 #define XIAOGE_CLIENT_H
@@ -19,35 +18,190 @@
 extern "C" {
 #endif
 
+#define XIAOGE_SAMPLE_RATE 16000
+#define XIAOGE_JSON_MAX_BYTES 8192
+#define XIAOGE_BINARY_MAX_BYTES 32768
+#define XIAOGE_MANIFEST_SHA256 "845F0F4125061FF37A7F4DA20E0C88BC089200A08B319F1035D6522C80B56559"
+#define XIAOGE_DEFAULT_API_KEY ""
+#define XIAOGE_AUTO_FAKE_CMD_DEFAULT 0
+#define XIAOGE_AUTO_FAKE_CMD_DISABLED -1
+#define XIAOGE_AUTO_FAKE_CMD_ENABLED 1
+#define XIAOGE_CMD_ACK_STATUS_ACCEPTED "accepted"
+#define XIAOGE_CMD_ACK_STATUS_REJECTED "rejected"
+#define XIAOGE_CMD_ACK_STATUS_DUPLICATE "duplicate"
+#define XIAOGE_CMD_RESULT_STATUS_RUNNING "running"
+#define XIAOGE_CMD_RESULT_STATUS_SUCCEEDED "succeeded"
+#define XIAOGE_CMD_RESULT_STATUS_FAILED "failed"
+#define XIAOGE_CMD_RESULT_STATUS_CANCELED "canceled"
+#define XIAOGE_CMD_RESULT_STATUS_TIMEOUT "timeout"
+
+#define XIAOGE_ERROR_AUTH_FAILED "auth_failed"
+#define XIAOGE_ERROR_PERMISSION_DENIED "permission_denied"
+#define XIAOGE_ERROR_BUSY "busy"
+#define XIAOGE_ERROR_PROTOCOL_ERROR "protocol_error"
+#define XIAOGE_ERROR_CAPABILITY_UNSUPPORTED "capability_unsupported"
+#define XIAOGE_ERROR_TOKEN_EXPIRED "token_expired"
+#define XIAOGE_ERROR_DUPLICATE_CONNECTION "duplicate_connection"
+#define XIAOGE_ERROR_RESOURCE_EXHAUSTED "resource_exhausted"
+#define XIAOGE_ERROR_UNKNOWN_CMD_ID "unknown_cmd_id"
+
 typedef struct xiaoge_client xiaoge_client;
 
-/* 回调(均可为 NULL;在 xiaoge_service() 的线程触发)。user 为创建时透传的指针。 */
 typedef struct {
-    void (*on_ready)(int sample_rate, void *user); /* 收到握手 ready */
-    void (*on_audio)(const void *pcm, size_t len, void *user); /* 一段 TTS PCM */
-    void (*on_clear)(void *user);                  /* 打断:请清空本地播放 */
-    void (*on_busy)(const char *message, void *user); /* 服务端忙、被拒 */
+    const char *device_id;
+    const char *credential_json; /* object JSON or quoted/string JSON */
+    const char *caps_csv;        /* default: audio,text,cmd,state */
+    const char *client_version;  /* default: xiaoge-c-sdk-r5.2.2 */
+    const char *prefs_json;      /* optional object JSON */
+    const char *api_key;         /* create_session HTTP x-api-key; default: no header */
+    int auto_fake_cmd_executor;  /* disabled=-1, default/enabled: built-in fake executor */
+} xiaoge_config;
+
+typedef struct {
+    const char *trace_id;
+    const char *session_id;
+    const char *access_token;
+    const char *ws_url;          /* ws(s)://host[:port]/ws/session */
+    const char *granted_caps_csv;
+    const char *config_version;
+} xiaoge_session;
+
+
+typedef struct {
+    int sample_rate;
+    const char *granted_caps;
+    const char *config_version;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_ready_event;
+
+typedef struct {
+    const char *reason;
+    const char *utterance_id;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_clear_event;
+
+typedef struct {
+    const char *link_state;
+    const char *interaction_mode;
+    const char *engine_gate;
+    const char *resource_state;
+    const char *pending_confirmation_json;
+    long long ts_ms;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_state_event;
+
+typedef struct {
+    const char *text;
+    int final;
+    const char *utterance_id;
+    const char *trace_id;
+    const char *session_id;
+    long long ts_ms;
+    const char *raw_json;
+} xiaoge_stt_event;
+
+typedef struct {
+    const char *text;
+    int final; /* SDK-derived for R5.2.2 data.reply, always 1. */
+    const char *utterance_id;
+    const char *intent_type;
+    const char *speak_policy; /* nullable */
+    const char *trace_id;
+    const char *session_id;
+    long long ts_ms;
+    const char *raw_json;
+} xiaoge_reply_event;
+
+typedef struct {
+    const char *cmd_id;
+    const char *capability_id;
+    const char *action;
+    const char *params_json;
+    const char *risk_level;
+    long long ack_timeout_ms;
+    long long result_timeout_ms;
+    long long issued_at_ms;
+    const char *utterance_id;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_command_event;
+
+typedef struct {
+    const char *code;
+    const char *message;
+    int retryable;
+    long long ts_ms;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_error_event;
+
+typedef struct {
+    size_t struct_size;
+    void (*on_ready)(const xiaoge_ready_event *event, void *user);
+    void (*on_audio)(const void *pcm, size_t len, void *user);
+    void (*on_clear)(const xiaoge_clear_event *event, void *user);
+    void (*on_state)(const xiaoge_state_event *event, void *user);
+    void (*on_stt)(const xiaoge_stt_event *event, void *user);
+    void (*on_reply)(const xiaoge_reply_event *event, void *user);
+    void (*on_command)(const xiaoge_command_event *event, void *user);
+    void (*on_error)(const xiaoge_error_event *event, void *user);
+    void (*on_json)(const char *json, void *user);
+    void (*on_failure)(int code, const char *message, void *user);
     void *user;
 } xiaoge_callbacks;
 
-/* 创建并发起连接。host 如 "60.205.197.165"(当前部署)。
- * tls!=0 用 wss;insecure!=0 允许自签证书、跳过主机名校验(仅测试/内网,勿用于公网)。
- * 失败返回 NULL。 */
-xiaoge_client *xiaoge_create(const char *host, int port, int tls, int insecure,
-                             const xiaoge_callbacks *cb);
+/* Build a compact create_session request JSON. Returns bytes written excluding
+ * NUL, or -1 if the buffer is too small or config is invalid. */
+int xiaoge_build_create_session_request(const xiaoge_config *cfg, char *out, size_t out_len);
 
-/* 入队一段上行 PCM(16k/单声道/int16 小端)。线程安全。成功返回 0。 */
+/* Connect to session.ws_url using Authorization: Bearer <access_token>. */
+xiaoge_client *xiaoge_create_from_session(const xiaoge_config *cfg,
+                                          const xiaoge_session *session,
+                                          int insecure,
+                                          const xiaoge_callbacks *cb);
+
+/* Connect with an explicit PEM CA bundle for WSS server verification.
+ * ca_cert_path may be NULL to use the platform/libwebsockets default trust
+ * store. insecure is still supported for test-only environments. */
+xiaoge_client *xiaoge_create_from_session_with_ca(const xiaoge_config *cfg,
+                                                  const xiaoge_session *session,
+                                                  const char *ca_cert_path,
+                                                  int insecure,
+                                                  const xiaoge_callbacks *cb);
+
 int xiaoge_send_pcm(xiaoge_client *c, const void *pcm, size_t len);
+int xiaoge_send_frontend_state(xiaoge_client *c, const char *trust_level,
+                               const char *wake_state, const char *vad, int ttl_ms);
 
-/* 泵一次事件循环,最多阻塞 timeout_ms 毫秒。需在循环里反复调用。
- * 返回 0 正常,<0 表示连接已结束(应停止循环并 destroy)。 */
+/* Send command acknowledgement/result frames derived from a downlink data.cmd JSON.
+ * cmd_json must contain trace_id, session_id, utterance_id, and cmd_id. */
+int xiaoge_send_cmd_ack(xiaoge_client *c, const char *cmd_json,
+                        const char *status, const char *code, const char *message);
+int xiaoge_send_cmd_result(xiaoge_client *c, const char *cmd_json,
+                           const char *status, const char *code, const char *message,
+                           int retryable);
+int xiaoge_send_cmd_result_ex(xiaoge_client *c, const char *cmd_json,
+                              const char *status, const char *code, const char *message,
+                              int retryable, long long started_at_ms,
+                              long long finished_at_ms, long long duration_ms);
+int xiaoge_send_cmd_ack_event(xiaoge_client *c, const xiaoge_command_event *event,
+                              const char *status, const char *code, const char *message);
+int xiaoge_send_cmd_result_event(xiaoge_client *c, const xiaoge_command_event *event,
+                                 const char *status, const char *code, const char *message,
+                                 int retryable);
 int xiaoge_service(xiaoge_client *c, int timeout_ms);
-
-/* 关闭并释放。 */
 void xiaoge_destroy(xiaoge_client *c);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* XIAOGE_CLIENT_H */
+#endif

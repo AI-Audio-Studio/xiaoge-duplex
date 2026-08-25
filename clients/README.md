@@ -1,24 +1,49 @@
-# 小歌客户端 SDK
+# Xiaoge Client SDKs R5.2.2
 
-把第三方设备/程序接入小歌全双工语音引擎。三个端共用一套协议:[PROTOCOL.md](PROTOCOL.md)。
+This directory contains the approved client-side implementation area for G3.
+Only files under `clients` are changed.
 
-## 前置
-服务端以 `WEB_AUDIO=1` 启动,暴露 `/ws/audio`。
-**当前部署**:`wss://60.205.197.165:10099/ws/audio`(HTTPS,自签证书;连接用 `--tls --insecure`)。
+Main protocol: [PROTOCOL.md](PROTOCOL.md)
 
-## 三个客户端
-| 目录 | 适用 | 依赖 | 自测状态 |
-|---|---|---|---|
-| [python/](python/) | Python 应用、快速验证 | `websockets`(+`sounddevice` 仅实时 demo) | ✅ 本机自测通过(SDK + 文件 demo + 冒烟) |
-| [c/](c/) | 嵌入式/原生程序 | libwebsockets ≥4.0 | ⚠️ 代码完整,需在你方工具链 build+验证 |
-| [matlab/](matlab/) | MATLAB / Simulink(R2022b) | B:Python 桥;A:Java-WebSocket jar | ⚠️ B 的桥已自测;MATLAB 侧待你方运行验证 |
+## SDKs
 
-## 共同音频格式
-16000 Hz、单声道、16-bit 有符号小端、裸 PCM。详见 [PROTOCOL.md](PROTOCOL.md)。
+| Directory | Purpose | Status |
+| --- | --- | --- |
+| `python/` | Reference R5.2.2 SDK, local mock selftest, contract replay, file/mic demos | Implemented and locally tested |
+| `c/` | libwebsockets R5.2.2 session transport, embedded-friendly API | Implemented; build on target toolchain |
+| `matlab/` | MATLAB/Simulink through Python TCP bridge | Bridge self-testable; MATLAB host validation required |
+| `android/` | Android Java Core SDK with OkHttp and AudioRecord/AudioTrack helper | Scaffold implemented; Android Gradle host required |
 
-## 各端快速入口
-- Python:`cd python && pip install -r requirements.txt && python selftest.py`
-- C:见 [c/README.md](c/README.md)(cmake + libwebsockets)
-- MATLAB/Simulink:见 [matlab/README.md](matlab/README.md)(**推荐 B 方案 TCP 桥**)
+## Required Path
 
-> 自测边界(诚实说明):打包环境无 C 工具链、无 MATLAB,故 C 与 MATLAB 为"代码完整 + 验证步骤",由你方在对应工具链上验收;Python 全链路与 MATLAB 的 TCP 桥已在本机自测通过。
+```text
+create_session -> /ws/session + Bearer -> ctrl.hello -> ctrl/data.* + PCM
+```
+
+`/ws/audio` is historical only. It is not a default demo path and not a forward
+compatibility target.
+
+## Cloud TLS CA
+
+The cloud-provided PEM certificate is bundled at `certs/cloud-ca.pem` for
+client-side HTTPS/WSS verification. Production client paths should trust this
+CA or an updated cloud CA bundle instead of using `--insecure`.
+
+Current bundled CA fingerprint:
+
+```text
+sha256=460e09d5d59b91df0e2eb6fe2d47d28db1229cdf561b3e2e2623ae8a0ac6fabf
+subject=CN=60.205.197.165
+not_after=2027-05-28 10:56 Asia/Shanghai
+```
+
+
+
+## Safety Boundary
+
+- No real robot action is connected.
+- Built-in command execution is fake executor only.
+- Frozen R5.2.2 schema/examples/close-code/registry/manifest files are read-only
+  external inputs and are not copied into this implementation tree.
+- Any real Gateway or robot-action联调 requires the separate G3 gate described
+  by the review package.

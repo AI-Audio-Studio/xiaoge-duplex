@@ -1,4 +1,5 @@
 # 核心 SDK(xiaoge_client.py / demo_file.py / selftest.py 必需)
 websockets>=12
+jsonschema>=4
 # 仅 demo_mic.py(实时麦克风/扬声器)需要
 sounddevice>=0.4
