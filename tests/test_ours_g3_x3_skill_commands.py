@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from examples.voice_agents.common.g3_intent import G3IntentEngine, SessionState
 from tests._g2_contract_r5_2_2 import MiniJsonSchema, load_json
 
@@ -86,6 +88,18 @@ def test_x3_gesture_side_and_count_params() -> None:
     assert water["params"] == {"gesture": "fetch_water", "count": 2}
 
 
+def test_x3_laugh_and_cry_emit_simulator_failure_gestures() -> None:
+    laugh = _frame("笑一个")
+    cry = _frame("哭一个")
+
+    assert laugh["action"] == laugh["capability_id"] == "gesture.perform"
+    assert laugh["params"] == {"gesture": "laugh"}
+    assert cry["action"] == cry["capability_id"] == "gesture.perform"
+    assert cry["params"] == {"gesture": "cry"}
+    _validator().assert_valid_ref("#/$defs/dataCmd", laugh)
+    _validator().assert_valid_ref("#/$defs/dataCmd", cry)
+
+
 def test_x3_tour_and_volume_params() -> None:
     lang = _frame("切换到英文讲解")
     volume = _frame("音量调到60%")
@@ -128,6 +142,27 @@ def test_x3_motion_turn_has_independent_positive_case() -> None:
     assert frame["params"]["direction"] == "right"
     assert frame["params"]["angle_deg"] == 15
     _validator().assert_valid_ref("#/$defs/dataCmd", frame)
+
+
+@pytest.mark.parametrize(("text", "direction"), [("向左转", "left"), ("向右转", "right")])
+def test_x3_common_turn_phrases_use_registry_fast_path(text: str, direction: str) -> None:
+    engine = G3IntentEngine()
+    intent = engine.route(text, _state())
+    frame = _frame(text)
+
+    assert intent.route_reason == "registry_exact"
+    assert frame["type"] == "data.cmd"
+    assert frame["action"] == "motion.turn"
+    assert frame["params"] == {"direction": direction}
+
+
+@pytest.mark.parametrize("text", ["你能向左转吗", "你会向右转吗"])
+def test_x3_turn_capability_questions_remain_reply_only(text: str) -> None:
+    frame = _frame(text)
+
+    assert frame["type"] == "data.reply"
+    assert frame["intent_type"] == "info_query"
+    assert "cmd_id" not in frame
 
 
 def test_x3_face_eyebrow_has_independent_positive_case() -> None:

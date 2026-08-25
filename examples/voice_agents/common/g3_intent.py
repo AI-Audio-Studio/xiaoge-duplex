@@ -39,12 +39,48 @@ Decision = Literal[
     "cancel",
     "timeout",
 ]
+NonExecutionAct = Literal[
+    "capability_query",
+    "prohibit",
+    "hypothetical",
+    "future_plan",
+    "quotation",
+]
 
 EXECUTABLE_DELIVERIES = {"data.cmd", "data.cmd after confirmation"}
 _MULTI_MARKERS = ("然后", "同时", "并且", "接着", "顺便")
-_AFFIRMATIVE_CONFIRM = ("确认", "执行", "可以", "是的", "好的", "同意")
-_CANCEL_CONFIRM = ("取消", "算了", "不要", "停止")
+_AFFIRMATIVE_CONFIRM = frozenset({"确认", "确认执行", "执行", "可以", "是的", "好的", "同意"})
+_CANCEL_CONFIRM = frozenset({"取消", "取消执行", "算了", "不要了", "停止执行"})
 _ASK_WORDS = ("什么", "怎么", "为什么", "多少", "哪里", "在哪", "介绍", "查询", "查一下")
+_PROHIBIT_MARKERS = ("不要", "别", "先别", "不用", "禁止", "不准", "别让")
+_HYPOTHETICAL_MARKERS = ("如果", "假如", "假设", "要是", "万一")
+_FUTURE_MARKERS = ("等会", "待会", "稍后", "以后", "明天", "下次", "过一会", "将来")
+_QUOTATION_MARKERS = ("他说", "她说", "他们说", "有人说", "刚才说", "原话", "转述")
+_POLITE_EXECUTE_MARKERS = ("请", "帮我", "麻烦", "给我")
+_COMMAND_RELEVANT_MARKERS = (
+    "走",
+    "挪",
+    "移动",
+    "转",
+    "头",
+    "眼",
+    "眉",
+    "挥手",
+    "举手",
+    "握手",
+    "点赞",
+    "比心",
+    "讲解",
+    "导览",
+    "音量",
+    "声音",
+    "wifi",
+    "wi-fi",
+    "蓝牙",
+    "重启",
+    "关机",
+    "充电",
+)
 _STEP_DISTANCE_CM = 50
 
 
@@ -75,6 +111,10 @@ class RegistryEntry:
     extract: Callable[[str], dict[str, Any]] | None = None
 
 
+_COMMAND_ACK_TIMEOUT_MS = 3000
+_COMMAND_RESULT_TIMEOUT_MS = 3000
+
+
 @dataclass(frozen=True)
 class SessionState:
     trace_id: str = "trace-g3-local"
@@ -84,8 +124,8 @@ class SessionState:
     )
     interaction_mode: Literal["active", "sleeping", "closed"] = "active"
     engine_gate: Literal["open", "closed"] = "open"
-    command_dry_run: bool = True
-    robot_action_enabled: bool = False
+    command_dry_run: bool = False
+    robot_action_enabled: bool = True
     pending_high_risk: dict[str, Any] | None = None
 
 
@@ -371,7 +411,7 @@ class G3IntentEngine:
                 delivery="cloud_tool + data.reply",
             )
 
-        if _is_confirmation_cancel(normalized):
+        if state.pending_high_risk is not None and _is_confirmation_cancel(normalized):
             return IntentResult(
                 intent_type="control_cmd",
                 confidence=1.0,
@@ -379,7 +419,7 @@ class G3IntentEngine:
                 raw_text=text,
                 delivery="data.cmd after confirmation",
             )
-        if _is_confirmation_accept(normalized):
+        if state.pending_high_risk is not None and _is_confirmation_accept(normalized):
             return IntentResult(
                 intent_type="control_cmd",
                 confidence=1.0,
@@ -390,6 +430,29 @@ class G3IntentEngine:
 
         matched = self._matched_entries(normalized)
         control = [entry for entry in matched if entry.intent_type == "control_cmd"]
+        referenced_control = [
+            entry
+            for entry in self._candidate_entries(normalized)
+            if entry.intent_type == "control_cmd"
+        ]
+        non_execution = _non_execution_act(normalized)
+        if non_execution is not None and (
+            referenced_control or _has_command_relevant_marker(normalized)
+        ):
+            entry = (
+                referenced_control[0]
+                if referenced_control
+                else self._entry(_capability_action(normalized))
+            )
+            return IntentResult(
+                intent_type="info_query" if non_execution == "capability_query" else "chat",
+                confidence=0.99,
+                route_reason=non_execution,
+                raw_text=text,
+                delivery="cloud_tool + data.reply",
+                candidate_action=entry.action if entry is not None else None,
+                source_seed=entry.source_seed if entry is not None else "semantic_safety_gate",
+            )
         if len(control) >= 2 or (len(control) == 1 and _has_multi_marker(normalized)):
             return IntentResult(
                 intent_type="control_cmd_multi",
@@ -485,7 +548,27 @@ class G3IntentEngine:
                     "ask_clarify", intent, reason="no pending high risk command"
                 )
             pending_action = str(state.pending_high_risk.get("action", ""))
-            return ValidationResult("accept", intent, self._entry(pending_action), "confirmed")
+            pending_entry = self._entry(pending_action)
+            pending_slots = state.pending_high_risk.get("slots", {})
+            if not isinstance(pending_slots, dict):
+                pending_slots = {}
+            pending_intent = IntentResult(
+                intent_type="control_cmd",
+                confidence=float(state.pending_high_risk.get("confidence", 1.0)),
+                route_reason="high_risk_confirm",
+                raw_text=str(state.pending_high_risk.get("raw_text", intent.raw_text)),
+                delivery=pending_entry.delivery if pending_entry is not None else intent.delivery,
+                candidate_action=pending_action,
+                slots=dict(pending_slots),
+                needs_validator=True,
+                source_seed=str(state.pending_high_risk.get("source_seed", "pending_high_risk")),
+            )
+            if pending_entry is None:
+                return ValidationResult("ask_clarify", pending_intent, reason="unknown pending action")
+            invalid = _invalid_param_reason(pending_intent.slots, pending_entry)
+            if invalid:
+                return ValidationResult("reject_policy", pending_intent, pending_entry, invalid)
+            return ValidationResult("accept", pending_intent, pending_entry, "confirmed")
 
         entry = self._entry(intent.candidate_action or "")
         if entry is None:
@@ -526,6 +609,7 @@ class G3IntentEngine:
 
         if (
             result.decision == "accept"
+            and intent.intent_type == "control_cmd"
             and result.entry
             and result.entry.delivery in EXECUTABLE_DELIVERIES
         ):
@@ -540,8 +624,8 @@ class G3IntentEngine:
                     "action": result.entry.action,
                     "params": dict(intent.slots),
                     "risk_level": result.entry.risk_level,
-                    "ack_timeout_ms": 800,
-                    "result_timeout_ms": 5000,
+                    "ack_timeout_ms": _COMMAND_ACK_TIMEOUT_MS,
+                    "result_timeout_ms": _COMMAND_RESULT_TIMEOUT_MS,
                     "issued_at_ms": now_ms,
                 }
             ]
@@ -555,6 +639,19 @@ class G3IntentEngine:
             return [_reply(base, "system", "当前状态不允许执行这个请求。", "ack")]
         if result.decision == "cancel":
             return [_reply(base, "control_cmd", "已取消，不会下发控制指令。", "ack")]
+        if intent.route_reason == "capability_query":
+            available = result.entry is not None and "cmd" in state.caps
+            text = "可以，这项能力当前可用。" if available else "当前设备不支持这项能力。"
+            return [_reply(base, "info_query", text, "final_only")]
+        if intent.route_reason in {
+            "prohibit",
+            "hypothetical",
+            "future_plan",
+            "quotation",
+        }:
+            return [
+                _reply(base, "chat", "明白，我不会把这句话当成现在要执行的指令。", "final_only")
+            ]
         if intent.intent_type == "control_cmd_multi":
             return [
                 _reply(
@@ -615,14 +712,63 @@ class G3IntentEngine:
         )
         return ValidationResult("accept", intent, reason="reply-only function")
 
+    def semantic_candidate(
+        self,
+        *,
+        raw_text: str,
+        action: str,
+        slots: dict[str, Any],
+        confidence: float,
+        state: SessionState | None = None,
+    ) -> ValidationResult:
+        """Validate an untrusted semantic candidate through the command authority."""
+        entry = self._entry(action)
+        payload = {
+            "raw_text": raw_text,
+            "action": action,
+            "delivery": entry.delivery if entry is not None else "data.cmd",
+            "slots": slots,
+            "confidence": confidence,
+            "source_seed": "semantic_router",
+        }
+        result = self.function_call_output("parse_command_slots", payload, state)
+        if entry is None:
+            return result
+        unexpected = set(slots).difference(spec.name for spec in entry.params)
+        if unexpected:
+            names = ",".join(sorted(unexpected))
+            return ValidationResult(
+                "reject_policy", result.intent, entry, f"unexpected slots: {names}"
+            )
+        return result
+
+    def command_relevant(self, text: str) -> bool:
+        """Return whether unresolved text is worth the semantic-control fallback."""
+        normalized = _normalize_text(text)
+        return bool(self._candidate_entries(normalized)) or _has_command_relevant_marker(normalized)
+
+    def action_catalog(self) -> tuple[RegistryEntry, ...]:
+        """Expose the current allow-list to side-effect-free semantic classification."""
+        return tuple(
+            entry
+            for entry in self.registry
+            if entry.intent_type == "control_cmd" and entry.delivery in EXECUTABLE_DELIVERIES
+        )
+
     def _entry(self, action: str) -> RegistryEntry | None:
         return next((entry for entry in self.registry if entry.action == action), None)
 
     def _matched_entries(self, normalized: str) -> list[RegistryEntry]:
         return [
+            entry for entry in self.registry if entry.match is not None and entry.match(normalized)
+        ]
+
+    def _candidate_entries(self, normalized: str) -> list[RegistryEntry]:
+        reference = _reference_text(normalized)
+        return [
             entry
             for entry in self.registry
-            if (entry.match and entry.match(normalized))
+            if (entry.match is not None and entry.match(reference))
             or any(_normalize_text(example) in normalized for example in entry.positive_examples)
         ]
 
@@ -674,7 +820,13 @@ def _match_turn(text: str) -> bool:
     if _is_question(text):
         return False
     return (
-        "转身" in text or "向后转" in text or "往左转" in text or "往右转" in text or "再转" in text
+        "转身" in text
+        or "向后转" in text
+        or "往左转" in text
+        or "往右转" in text
+        or "向左转" in text
+        or "向右转" in text
+        or "再转" in text
     )
 
 
@@ -907,6 +1059,8 @@ def _extract_tour(text: str) -> dict[str, Any]:
 
 
 def _match_volume(text: str) -> bool:
+    if _is_question(text):
+        return False
     return ("音量" in text or "声音" in text) and any(
         token in text for token in ("调", "大", "小", "最大", "最小", "%", "百分")
     )
@@ -954,6 +1108,59 @@ def _reply(base: dict[str, Any], intent_type: str, text: str, speak_policy: str)
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", "", text.strip().lower())
+
+
+def _reference_text(text: str) -> str:
+    return re.sub(r"[吗呢？?]+$", "", text)
+
+
+def _has_command_relevant_marker(text: str) -> bool:
+    return any(marker in text for marker in _COMMAND_RELEVANT_MARKERS)
+
+
+def _capability_action(text: str) -> str:
+    if "转头" in text or "转身" in text:
+        return "motion.turn"
+    if "头" in text:
+        return "head.motion"
+    if "走" in text or "移动" in text or "挪" in text:
+        return "navigation.move"
+    return ""
+
+
+def _non_execution_act(text: str) -> NonExecutionAct | None:
+    if _is_quotation(text):
+        return "quotation"
+    if any(marker in text for marker in _PROHIBIT_MARKERS):
+        return "prohibit"
+    if any(marker in text for marker in _HYPOTHETICAL_MARKERS):
+        return "hypothetical"
+    if any(marker in text for marker in _FUTURE_MARKERS):
+        return "future_plan"
+    if _is_capability_query(text) or _is_plain_command_question(text):
+        return "capability_query"
+    return None
+
+
+def _is_plain_command_question(text: str) -> bool:
+    """Treat bare command-shaped yes/no questions as non-executable."""
+    return text.endswith(("吗", "呢", "？", "?"))
+
+
+def _is_quotation(text: str) -> bool:
+    if any(marker in text for marker in _QUOTATION_MARKERS):
+        return True
+    return bool(re.search(r"[‘'\"](?:[^’'\"]+)[’'\"]", text))
+
+
+def _is_capability_query(text: str) -> bool:
+    if not _is_question(text):
+        return False
+    if any(marker in text for marker in _POLITE_EXECUTE_MARKERS):
+        return False
+    return bool(
+        re.search(r"(?:你|小歌)?(?:能|会|可以|支持|能否|可不可以|会不会).*(?:吗|呢|？|\?)$", text)
+    )
 
 
 def _is_question(text: str) -> bool:
@@ -1110,26 +1317,49 @@ def _looks_like_incomplete_move(text: str) -> bool:
 
 
 def _looks_like_knowledge(text: str) -> bool:
-    return any(
+    """Route only product/小歌 knowledge to the deterministic knowledge path.
+
+    Broad open-domain phrases like “什么是/为什么/介绍一下杭州” should stay in
+    normal chat so G3 does not answer with a fixed fake-RAG template.
+    """
+
+    product_subject = any(
+        k in text for k in ("小歌", "产品", "设备", "机器人", "说明书", "手册")
+    )
+    org_subject = any(k in text for k in ("公司", "企业", "智元", "厂商", "厂家", "品牌"))
+    knowledge_topic = any(
         k in text
         for k in (
-            "什么是",
-            "介绍",
             "知识",
-            "为什么",
-            "怎么理解",
-            "企业",
-            "公司",
-            "商品",
-            "产品",
+            "功能",
+            "能力",
+            "本事",
+            "硬件",
+            "规格",
             "参数",
             "价格",
             "地址",
+            "网络要求",
+            "升级",
+            "隐私",
+            "使用场景",
+            "全双工",
         )
     )
+    if (product_subject or org_subject) and knowledge_topic:
+        return True
+    return "全双工" in text and any(k in text for k in ("小歌", "语音", "通话", "对话"))
 
 
 def _looks_like_info(text: str) -> bool:
+    """Route only device-self state queries to the deterministic info path.
+
+    Open-domain external queries (天气/时间/百科/菜谱/健康/单位换算/日历) are
+    deliberately NOT matched here: they have no device-side source and would
+    otherwise hit the fixed ``_info_answer`` placeholder, cutting off the LLM.
+    Letting them fall through to ``chat_fallback`` lets the model (and any
+    downstream tools) answer them normally.
+    """
     return any(
         k in text
         for k in (
@@ -1137,39 +1367,32 @@ def _looks_like_info(text: str) -> bool:
             "能力",
             "配置",
             "还能做什么",
-            "天气",
-            "时间",
-            "日历",
-            "单位换算",
-            "百科",
-            "健康",
-            "菜谱",
         )
     )
 
 
 def _is_confirmation_accept(text: str) -> bool:
-    return any(token in text for token in _AFFIRMATIVE_CONFIRM)
+    return text in _AFFIRMATIVE_CONFIRM
 
 
 def _is_confirmation_cancel(text: str) -> bool:
-    return any(token in text for token in _CANCEL_CONFIRM)
+    return text in _CANCEL_CONFIRM
 
 
 def _rag_answer(text: str) -> str:
-    if "全双工" in text:
-        return "全双工表示听和说可以并行处理，但知识问答路径只返回回答，不触发端侧执行。"
-    if "小歌" in text:
-        return "小歌是当前语音交互助手；知识查询只走 data.reply，不生成控制命令。"
     if "不存在" in text or "这个" in text:
         return "暂未找到高置信度知识结果，请换个问法。"
-    return "这个问题属于知识库或商品信息查询，我会走 data.reply 返回答案，不生成控制命令。"
+    return "这个问题需要查询产品知识库后回答；如果暂时查不到，我会如实说不确定。"
 
 
 def _info_answer(text: str, slots: dict[str, Any]) -> str:
     if slots.get("topic") == "battery" or "电量" in text or "多少电" in text:
         return "电量查询属于状态信息路径，只返回 data.reply，不下发控制指令。"
-    return "当前云侧链路正常，真实机器人动作保持关闭。"
+    # Non-battery info queries have no device-side source; surface that honestly
+    # rather than claiming a fake "cloud link normal" status. Normal open-domain
+    # queries should never reach here (they fall through to chat/LLM upstream);
+    # this branch only guards residual state-shaped queries.
+    return "这个问题我暂时没有对应的设备状态来源，请稍等我直接回答你。"
 
 
 def _cmd_id(trace_id: str, utterance_id: str, now_ms: int) -> str:

@@ -105,10 +105,16 @@ def setup_stt(ctx: JobContext) -> tuple[Any, Any, bool]:
     return stt_engine, stt_for_session, live_from_main
 
 
-def _log_user_item(w: SessionWiring, item: ChatMessage) -> None:
+def _log_user_item(w: SessionWiring, item: ChatMessage, event) -> None:
     """TURN_USER 指标日志 + 用户气泡广播。"""
     w.qa_log.add_user(item.text_content or "")
-    w.turn_trace["started_at"] = item.metrics.get("started_speaking_at", time.time())
+    started = item.metrics.get("started_speaking_at", time.time())
+    w.turn_trace["started_at"] = started
+    # user_state_changed 的 speaking 在 web/headless 形态不派发,_handle_user_state
+    # 设不上 user_stopped_at;此处用 conversation_item_added(user) 的 created_at 作
+    # 用户停说近似(该事件=用户这轮文本提交完成 ≈ 用户停说时刻)兜底。
+    if w.turn_trace.get("user_stopped_at") is None:
+        w.turn_trace["user_stopped_at"] = event.created_at
     line = (
         "TURN_USER "
         f"text={item.text_content!r} "
@@ -120,11 +126,15 @@ def _log_user_item(w: SessionWiring, item: ChatMessage) -> None:
     )
     logger.info(line)
     _log(line)
-    # push to browser
+    # push to browser; conversation_item_added is the authoritative display-turn close.
+    utterance_id = item.id
+    if w.live is not None:
+        utterance_id = w.live.finish_turn("conversation_item_added", item.id)
     broadcast(
         {
             "type": "message",
             "role": "user",
+            "utterance_id": utterance_id,
             # 仅显示净化:去掉句首游离标点(FunASR 把上句尾标点带到句首);上下文用原文不变
             "text": LEADING_PUNCT_RE.sub("", item.text_content or ""),
             "ts": time.time(),
@@ -132,14 +142,22 @@ def _log_user_item(w: SessionWiring, item: ChatMessage) -> None:
     )
 
 
-def _log_assistant_item(w: SessionWiring, item: ChatMessage) -> None:
-    """TURN_ASSISTANT 指标日志(文本已由 transcription_node 广播,此处不再广播)。"""
+def _log_assistant_item(w: SessionWiring, item: ChatMessage, event) -> None:
+    """TURN_ASSISTANT 指标日志 + e2e/felt 计算。
+
+    conversation_item_added(assistant)是本形态下确定触发的锚点(timeline 证实
+    agent_state_changed → speaking 在 web/headless 形态从不派发,旧"等 speaking"
+    路径恒空)。该事件=文本生成完、正要送 TTS 的时刻,距音频实际起播差一个
+    tts_node_ttfb(item.metrics 已回填),用 created_at + tts_ttfb 作起播近似足够
+    稳。started_speaking_at 框架常未回填仍为 `-`,故不依赖它。
+    """
     w.qa_log.add_assistant(item.text_content or "")
-    wall_clock_e2e = None
-    started_at = w.turn_trace.get("started_at")
-    assistant_started = item.metrics.get("started_speaking_at")
-    if started_at is not None and assistant_started is not None:
-        wall_clock_e2e = assistant_started - started_at
+    tts_ttfb = item.metrics.get("tts_node_ttfb")
+    speak_at = (event.created_at + tts_ttfb) if isinstance(tts_ttfb, (int, float)) else event.created_at
+    user_started = w.turn_trace.get("started_at")
+    user_stopped = w.turn_trace.get("user_stopped_at")
+    felt = speak_at - user_stopped if user_stopped is not None else None
+    wall_clock_e2e = speak_at - user_started if user_started is not None else None
     line = (
         "TURN_ASSISTANT "
         f"text={item.text_content!r} "
@@ -147,12 +165,17 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage) -> None:
         f"tts_ttfb={_ms(item.metrics.get('tts_node_ttfb'))} "
         f"playback_latency={_ms(item.metrics.get('playback_latency'))} "
         f"e2e_latency={_ms(item.metrics.get('e2e_latency'))} "
-        f"wall_clock_e2e={_ms(wall_clock_e2e)} "
         f"speaking={_ms(item.metrics.get('started_speaking_at'))}"
-        f"->{_ms(item.metrics.get('stopped_speaking_at'))}"
+        f"->{_ms(item.metrics.get('stopped_speaking_at'))} "
+        f"wall_clock_e2e={_ms(wall_clock_e2e)} felt={_ms(felt)}"
     )
     logger.info(line)
     _log(line)
+    _log(
+        f"WALL_CLOCK_E2E e2e={_ms(wall_clock_e2e)} felt={_ms(felt)} "
+        f"tts_ttfb={_ms(tts_ttfb)} "
+        f"(user_start->agent_speak / user_stop->agent_speak)"
+    )
 
 
 def _handle_agent_state(w: SessionWiring, event) -> None:
@@ -162,10 +185,10 @@ def _handle_agent_state(w: SessionWiring, event) -> None:
         if player is not None and getattr(player, "waiting_start_ack", False):
             player.resume()
         return
+    # 注:web/headless 形态下 agent_state_changed 从不派发 speaking(实测 27 会话
+    # 仅 listening),故 e2e 不在此算——改由 _log_assistant_item(conversation_item_added)
+    # 用 created_at+tts_ttfb 作起播近似。保留此分支供房间形态(LiveKit)真派发 speaking 时用。
     w.online_state["accum"] = ""
-    user_stopped = w.turn_trace.get("user_stopped_at")
-    felt = event.created_at - user_stopped if user_stopped is not None else None
-    _log(f"FELT_LATENCY felt={_ms(felt)} (user_stop->agent_speak)")
 
 
 def register_session_handlers(w: SessionWiring) -> None:
@@ -178,9 +201,9 @@ def register_session_handlers(w: SessionWiring) -> None:
         if not isinstance(item, ChatMessage):
             return
         if item.role == "user":
-            _log_user_item(w, item)
+            _log_user_item(w, item, event)
         elif item.role == "assistant":
-            _log_assistant_item(w, item)
+            _log_assistant_item(w, item, event)
 
     @session.on("agent_state_changed")
     def _on_agent_state(event) -> None:
@@ -230,6 +253,10 @@ def _handle_stt_event(w: SessionWiring, event) -> None:
         w.live.feed_commit(event.transcript)
     _log(f"STT_FINAL text={event.transcript!r}")
     if should_ignore_user_turn(event.transcript):
+        player = runtime.music_player
+        if player is not None and getattr(player, "is_playing", False):
+            _log(f"MUSIC_STOP_DEFER_TO_TURN text={event.transcript!r}")
+            return
         if not listen_interrupt_blocked():  # 聆听期/保护窗内的"停"等不打断小歌
             session.interrupt(force=True)
             _log(f"STOP_PHRASE_EARLY text={event.transcript!r} -> force_interrupt")

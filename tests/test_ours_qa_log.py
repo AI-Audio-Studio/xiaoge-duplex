@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,6 +22,34 @@ def _wait_for(predicate, timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.02)
     return False
+
+
+def test_deployment_override_wins_after_dotenv_loading(tmp_path: Path) -> None:
+    stale = tmp_path / "other" / "qwen_voice_qa.log"
+    deployment = tmp_path / "current" / "qwen_voice_qa.log"
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(f"QA_LOG={stale}\n", encoding="utf-8")
+    env = dict(os.environ)
+    env.update(
+        {
+            "XIAOGE_DOTENV": str(dotenv),
+            "XIAOGE_DEPLOY_QA_LOG": str(deployment),
+            "PYTHONPATH": str(_AGENT_DIR),
+        }
+    )
+    probe = "import env_bootstrap; from common.qa_log import QA_LOG; print(QA_LOG)"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+        timeout=30,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert Path(proc.stdout.strip()) == deployment.resolve()
 
 
 def test_format_qa_record_has_only_requested_fields() -> None:

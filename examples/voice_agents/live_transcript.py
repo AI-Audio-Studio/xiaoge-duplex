@@ -25,11 +25,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from common.config_utils import env_bool as _env_bool
+from common.text_rules import LEADING_PUNCT_RE
 
 logger = logging.getLogger("live-transcript")
 
@@ -69,6 +71,7 @@ class LiveTranscript:
         self._seg = ""  # 当前段落的在线增量累计
         self._committed = ""  # 本轮内主STT 已提交的中途 FINAL 累计(防 interim 清零→气泡缩水)
         self._last_ts = 0.0
+        self._utterance_id: str | None = None
 
     # ── 安装:自注册 session 监听(与现有处理器并存,各自 try/except)────────
     def attach(self, session: Any) -> None:
@@ -79,16 +82,6 @@ class LiveTranscript:
                 try:
                     if getattr(ev, "new_state", None) == "speaking":
                         self._maybe_open()
-                except Exception:
-                    pass
-
-            @session.on("conversation_item_added")
-            def _on_item(ev: Any) -> None:
-                try:
-                    item = getattr(ev, "item", None)
-                    if getattr(item, "role", None) == "user":
-                        # 真正的 final 到了 -> 本显示轮次收尾(前端用已有 message 定稿)
-                        self._close("final")
                 except Exception:
                     pass
         except Exception as exc:  # 安装失败绝不影响主流程
@@ -107,9 +100,7 @@ class LiveTranscript:
                 self._seg += piece or ""
             self._last_ts = now
             text = (self._prefix + self._seg).strip()
-            if text:
-                self._emit({"type": "user_partial", "text": text})
-                self._debug("partial", {"len": len(text)})
+            self._emit_partial(text, "partial")
         except Exception:
             pass
 
@@ -125,15 +116,16 @@ class LiveTranscript:
             now = time.monotonic()
             if not self._open:
                 self._open = True
-                self._emit({"type": "user_speaking", "state": "start"})
+                utterance_id = self._ensure_utterance_id()
+                self._emit(
+                    {"type": "user_speaking", "state": "start", "utterance_id": utterance_id}
+                )
                 self._debug("open", {})
             self._prefix = ""
             self._seg = text or ""
             self._last_ts = now
             t = (self._committed + self._seg).strip()  # 已提交累计 + 当前 interim
-            if t:
-                self._emit({"type": "user_partial", "text": t})
-                self._debug("partial_full", {"len": len(t)})
+            self._emit_partial(t, "partial_full")
         except Exception:
             pass
 
@@ -151,11 +143,21 @@ class LiveTranscript:
             self._seg = ""
             self._last_ts = time.monotonic()
             t = self._committed.strip()
-            if t:
-                self._emit({"type": "user_partial", "text": t})
-                self._debug("partial_commit", {"len": len(t)})
+            self._emit_partial(t, "partial_commit")
         except Exception:
             pass
+
+    def current_turn_id(self, fallback_id: str | None = None) -> str:
+        """Return/create the active display-turn identity without closing the turn."""
+        if self._utterance_id is None:
+            self._utterance_id = fallback_id or self._new_utterance_id()
+        return self._utterance_id
+
+    def finish_turn(self, reason: str = "final", fallback_id: str | None = None) -> str:
+        """Return the authoritative turn ID, then clear the active display turn."""
+        utterance_id = self.current_turn_id(fallback_id)
+        self._close(reason)
+        return utterance_id
 
     def reset_turn(self, reason: str = "handled") -> None:
         """Clear the current display turn after an upstream handler consumes it."""
@@ -164,15 +166,27 @@ class LiveTranscript:
         except Exception:
             pass
 
+    @staticmethod
+    def _new_utterance_id() -> str:
+        return f"utt-{uuid.uuid4().hex}"
+
+    def _ensure_utterance_id(self) -> str:
+        if self._utterance_id is None:
+            self._utterance_id = self._new_utterance_id()
+        return self._utterance_id
+
     # ── 单一判定点:开新轮 vs 续用当前气泡(以后联动判停只改这里)──────────
     def _maybe_open(self, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
         if (not self._open) or (now - self._last_ts) > self._cfg.new_turn_gap_s:
+            if self._open:
+                self._close("gap")
             self._open = True
             self._prefix = ""
             self._seg = ""
             self._last_ts = now
-            self._emit({"type": "user_speaking", "state": "start"})
+            utterance_id = self._ensure_utterance_id()
+            self._emit({"type": "user_speaking", "state": "start", "utterance_id": utterance_id})
             self._debug("open", {})
         else:
             self._last_ts = now  # 连续说话:沿用同一气泡
@@ -184,7 +198,21 @@ class LiveTranscript:
         self._seg = ""
         self._prefix = ""
         self._last_ts = 0.0
+        self._utterance_id = None
         self._debug("close" if was_open else "reset", {"reason": reason})
+
+    def _emit_partial(self, text: str, debug_kind: str) -> None:
+        display_text = LEADING_PUNCT_RE.sub("", text)
+        if not display_text:
+            return
+        self._emit(
+            {
+                "type": "user_partial",
+                "text": display_text,
+                "utterance_id": self._ensure_utterance_id(),
+            }
+        )
+        self._debug(debug_kind, {"len": len(display_text)})
 
     def _emit(self, msg: dict[str, Any]) -> None:
         try:

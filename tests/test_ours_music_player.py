@@ -83,6 +83,7 @@ class _FakeOutput:
         self.frames: list[Any] = []
         self.captures: int = 0
         self.clears: int = 0
+        self.music_clears: int = 0
         self._pushed_duration: float = 0.0
 
     async def capture_frame(self, frame: Any) -> None:
@@ -92,6 +93,9 @@ class _FakeOutput:
 
     def clear_buffer(self) -> None:
         self.clears += 1
+
+    def clear_music_buffer(self) -> None:
+        self.music_clears += 1
 
 
 class _FakeRuntime:
@@ -200,7 +204,9 @@ class TestMusicLibraryResolve:
 # ──────────────────────────── MusicPlayer 状态机 ────────────────────────────
 
 
-def _new_player(loop: asyncio.AbstractEventLoop, library: MusicLibrary) -> tuple[MusicPlayer, _FakeRuntime]:
+def _new_player(
+    loop: asyncio.AbstractEventLoop, library: MusicLibrary
+) -> tuple[MusicPlayer, _FakeRuntime]:
     runtime = _FakeRuntime()
     player = MusicPlayer(runtime, library, loop=loop)
     runtime.music_player = player
@@ -210,12 +216,14 @@ def _new_player(loop: asyncio.AbstractEventLoop, library: MusicLibrary) -> tuple
 def test_play_starts_task_and_returns_prompt(music_dir: Path) -> None:
     async def run() -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
-        player, _ = _new_player(asyncio.get_running_loop(), lib)
+        player, runtime = _new_player(asyncio.get_running_loop(), lib)
         prompt = await player.play("song_one")
         assert "song_one" in prompt
         assert any(tpl.split("{name}")[0] in prompt for tpl in PROMPT_TEMPLATES)
         assert player.is_playing is True
         assert player.current_name == "song_one"
+        assert runtime.ws_audio_output.music_clears == 0
+        assert runtime.ws_audio_output.clears == 0
         assert not player._resume_ev.is_set()
         assert player.waiting_start_ack is True
         await player.aclose()
@@ -258,8 +266,8 @@ def test_stop_clears_state(music_dir: Path) -> None:
         assert player.current_name == ""
         # stop 在播放中应返回停止语
         assert msg in ("好的,音乐停了。", "")
-        # clear_buffer 应被调用(只要 ws_audio_output 存在)
-        assert runtime.ws_audio_output.clears >= 1
+        assert runtime.ws_audio_output.music_clears == 1
+        assert runtime.ws_audio_output.clears == 0
         await player.aclose()
 
     asyncio.run(run())
@@ -460,6 +468,7 @@ def test_decode_wav_multichannel_takes_left(tmp_path: Path) -> None:
     d = tmp_path / "music"
     d.mkdir()
     _write_wav(d / "stereo.wav", samples=200, n_channels=2)
+
     async def run() -> None:
         lib = MusicLibrary(music_dir=d, refresh_s=60.0)
         player, _ = _new_player(asyncio.get_running_loop(), lib)
@@ -480,6 +489,7 @@ def test_decode_wav_resamples_to_16k(tmp_path: Path) -> None:
     d.mkdir()
     # 8kHz → 16kHz(2 倍上采样)
     _write_wav(d / "low.wav", samples=100, sample_rate=8000)
+
     async def run() -> None:
         lib = MusicLibrary(music_dir=d, refresh_s=60.0)
         player, _ = _new_player(asyncio.get_running_loop(), lib)
@@ -496,6 +506,7 @@ def test_decode_wav_resamples_to_16k(tmp_path: Path) -> None:
 
 def test_decode_dispatches_by_extension(music_dir: Path) -> None:
     """_decode 应根据后缀分发:wav → _decode_wav,mp3 → ffmpeg。"""
+
     async def run() -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
         player, _ = _new_player(asyncio.get_running_loop(), lib)
@@ -514,6 +525,7 @@ def test_decode_dispatches_by_extension(music_dir: Path) -> None:
 
 def test_ffmpeg_unavailable_does_not_raise(music_dir: Path, tmp_path: Path) -> None:
     """ffmpeg 不可用时,_decode_via_ffmpeg 不应抛出(优雅降级,记日志后结束)。"""
+
     async def run() -> None:
         lib = MusicLibrary(music_dir=music_dir, refresh_s=60.0)
         player, _ = _new_player(asyncio.get_running_loop(), lib)

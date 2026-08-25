@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
+import uuid
 
 import aiohttp.web
 
@@ -37,20 +39,47 @@ async def _ws_session_broadcast(messages: list[str]) -> None:
 
 # 转写类消息同步发给 /ws/audio 客户端(嵌入式/SDK 形态只连音频通道也能拿到字幕)。
 _AUDIO_FORWARD_TYPES = frozenset({"user_partial", "message"})
+_fallback_turn_lock = threading.Lock()
+_fallback_turn_id: str | None = None
 
 
-def broadcast(msg: dict) -> None:
-    """Thread-safe broadcast from any thread to all WebSocket clients."""
+def _correlate_user_turn(msg: dict, *, final: bool) -> str:
+    global _fallback_turn_id
+    explicit = msg.get("utterance_id")
+    if explicit:
+        if final:
+            with _fallback_turn_lock:
+                _fallback_turn_id = None
+        return str(explicit)
+    with _fallback_turn_lock:
+        if _fallback_turn_id is None:
+            _fallback_turn_id = f"utt-{uuid.uuid4().hex}"
+        utterance_id = _fallback_turn_id
+        if final:
+            _fallback_turn_id = None
+    msg["utterance_id"] = utterance_id
+    return utterance_id
+
+
+def broadcast(msg: dict) -> bool:
+    """Thread-safe broadcast and return whether a real command was newly issued."""
     loop = panel.web_loop
     if loop is None or not loop.is_running():
-        return
+        return False
+    typ = msg.get("type")
+    if typ == "user_partial":
+        _correlate_user_turn(msg, final=False)
+    elif typ == "message" and msg.get("role") == "user":
+        _correlate_user_turn(msg, final=True)
+    frames = _to_session_frames(msg) if panel.session_ws_clients else []
     data = json.dumps(msg, ensure_ascii=False)
     asyncio.run_coroutine_threadsafe(_ws_broadcast(data), loop)
-    session_messages = _to_session_messages(msg)
+    session_messages = [json.dumps(frame, ensure_ascii=False) for frame in frames]
     if session_messages and panel.session_ws_clients:
         asyncio.run_coroutine_threadsafe(_ws_session_broadcast(session_messages), loop)
     if msg.get("type") in _AUDIO_FORWARD_TYPES and panel.audio_ws_clients:
         asyncio.run_coroutine_threadsafe(_ws_audio_ctrl_broadcast(data), loop)
+    return any(frame.get("type") == "data.cmd" for frame in frames)
 
 
 async def _ws_audio_broadcast(data: bytes) -> None:
@@ -87,6 +116,11 @@ def broadcast_audio_ctrl(data: dict) -> None:
     loop = panel.web_loop
     if loop is None or not loop.is_running():
         return
+    typ = data.get("type")
+    if typ == "user_partial":
+        _correlate_user_turn(data, final=False)
+    elif typ == "message" and data.get("role") == "user":
+        _correlate_user_turn(data, final=True)
     legacy = json.dumps(data, ensure_ascii=False)
     asyncio.run_coroutine_threadsafe(_ws_audio_ctrl_broadcast(legacy), loop)
     session_messages = _to_session_messages(data)
@@ -99,15 +133,27 @@ def _to_session_messages(msg: dict) -> list[str]:
     return [json.dumps(frame, ensure_ascii=False) for frame in frames]
 
 
+def _filter_protocol_frames(msg: dict) -> list[dict]:
+    frames = [frame for frame in msg.get("frames", []) if isinstance(frame, dict)]
+    dry_run = bool(msg.get("dry_run", False))
+    accepted: list[dict] = []
+    for frame in frames:
+        if frame.get("type") != "data.cmd":
+            accepted.append(frame)
+        elif not dry_run and panel.command_lifecycle.issue(frame):
+            accepted.append(frame)
+    return accepted
+
+
 def _to_session_frames(msg: dict) -> list[dict]:
     typ = msg.get("type")
     if typ == "g3_protocol":
-        frames = [frame for frame in msg.get("frames", []) if isinstance(frame, dict)]
-        for frame in frames:
-            panel.command_lifecycle.issue(frame)
+        frames = _filter_protocol_frames(msg)
     elif isinstance(typ, str) and (typ.startswith("data.") or typ.startswith("ctrl.")):
-        panel.command_lifecycle.issue(msg)
-        frames = [msg]
+        if typ != "data.cmd" or panel.command_lifecycle.issue(msg):
+            frames = [msg]
+        else:
+            frames = []
     elif typ == "user_partial":
         trace_id, session_id, now_ms = _frame_context(msg)
         frames = [
@@ -115,7 +161,7 @@ def _to_session_frames(msg: dict) -> list[dict]:
                 "type": "data.stt",
                 "trace_id": trace_id,
                 "session_id": session_id,
-                "utterance_id": str(msg.get("utterance_id") or f"utt-{now_ms}"),
+                "utterance_id": _correlate_user_turn(msg, final=False),
                 "text": str(msg.get("text") or ""),
                 "final": False,
                 "ts_ms": now_ms,
@@ -130,7 +176,7 @@ def _to_session_frames(msg: dict) -> list[dict]:
                     "type": "data.stt",
                     "trace_id": trace_id,
                     "session_id": session_id,
-                    "utterance_id": str(msg.get("utterance_id") or f"utt-{now_ms}"),
+                    "utterance_id": _correlate_user_turn(msg, final=True),
                     "text": str(msg.get("text") or ""),
                     "final": True,
                     "ts_ms": now_ms,

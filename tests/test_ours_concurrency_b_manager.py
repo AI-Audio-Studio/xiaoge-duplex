@@ -25,6 +25,7 @@ from poolmgr.manager import (  # noqa: E402
     PoolTuning,
     default_agent_env,
     default_kill,
+    default_spawn,
 )
 
 
@@ -341,7 +342,8 @@ def test_recycle_rebinds_same_port_real_process() -> None:
 
 
 def test_env_injection_table() -> None:
-    env = default_agent_env("abc123", 19105, metrics_dir=Path("/tmp/run"))
+    run_dir = Path("/tmp/run")
+    env = default_agent_env("abc123", 19105, run_dir=run_dir)
     assert env["WEB_UI_HOST"] == "127.0.0.1"  # M3 内网绑定
     assert env["WEB_UI_PORT"] == "19105"
     assert env["XIAOGE_KWS_ENABLE_NATIVE"] == "0"  # D-06
@@ -349,7 +351,39 @@ def test_env_injection_table() -> None:
     assert env["XIAOGE_RECORD_MODE"] == "full" and env["XIAOGE_RECORD_CODEC"] == "opus"
     assert env["XIAOGE_TIMELINE_LEVEL"] == "audit"  # D-14 近期组合
     assert env["XIAOGE_ADMIN_ROUTES"] == "0"  # M5/D-19 显式隐藏 asr/tts
-    assert "abc123" in env["TURN_METRICS_LOG"]
+    assert env["TURN_METRICS_LOG"] == str(run_dir / "turn_metrics_abc123.log")
+    assert env["QA_LOG"] == str(run_dir / "qwen_voice_qa.log")
+    assert env["XIAOGE_DEPLOY_QA_LOG"] == env["QA_LOG"]
+    assert "abc123" not in Path(env["QA_LOG"]).name
+
+
+def test_env_injection_overrides_stale_parent_qa_log() -> None:
+    parent = {"QA_LOG": "/other/deployment/.run/qwen_voice_qa.log"}
+    parent.update(default_agent_env("abc123", 19105, run_dir=Path("/current/.run")))
+
+    assert parent["QA_LOG"] == str(Path("/current/.run/qwen_voice_qa.log"))
+
+
+def test_default_spawn_injects_deployment_run_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_popen(args, **kwargs):
+        captured.update(args=args, **kwargs)
+        return object()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("QA_LOG", "/other/deployment/.run/qwen_voice_qa.log")
+
+    default_spawn("abc123", 19105)
+
+    agent_dir = Path(__file__).resolve().parents[1] / "examples" / "voice_agents"
+    run_dir = agent_dir.parents[1] / ".run"
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert captured["cwd"] == str(agent_dir)
+    assert env["TURN_METRICS_LOG"] == str(run_dir / "turn_metrics_abc123.log")
+    assert env["QA_LOG"] == str(run_dir / "qwen_voice_qa.log")
+    assert env["XIAOGE_DEPLOY_QA_LOG"] == env["QA_LOG"]
 
 
 def test_env_injection_respects_recording_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

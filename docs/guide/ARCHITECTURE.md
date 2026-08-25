@@ -1,376 +1,728 @@
-# Xiaoge Duplex Speech — 工程架构分析
+# 小歌 Duplex 当前系统架构
 
-> 面向二次开发的系统架构说明。读者:软件架构师。
-> 入口应用:`examples/voice_agents/web_ui_agent.py`(console 模式 + 浏览器测试面板)。
-> 框架底座:LiveKit Agents(`livekit-agents/`)的二次开发 fork。
-> 配套文档:源码级导读见 `examples/voice_agents/qwen_voice_agent_code_guide.md`(注:其中部分阈值是“本应用覆盖值”,不是框架默认值,见本文 §10 的对照表)。
-
-> 注:文中 `文件:行号` 为撰写时快照,代码已演进,**以符号名/当前代码为准**。
+> 本文是面向开发、联调和排障的**当前实现总览**，覆盖云侧 Gateway、预热 Worker
+> 进程池、R5.2.2 会话协议、LiveKit 语音管线、多域意图路由、控制指令闭环、音乐、
+> 知识库和日志。运行命令与配置清单见 [RUN.md](RUN.md)，客户端协议细节见
+> [CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md)，自有代码边界见
+> [CODE_GUIDELINES.md](../project/CODE_GUIDELINES.md)。
 >
-> **⚠ 2026-07 重构(功能不变)**:自有代码已按职责拆包,旧文件名 → 新位置:
-> `custom_audio_providers.py` → `providers/`(每后端一文件;旧名保留为 re-export shim);
-> `funasr_stream_stt.py`/`iflytek_stt.py` → `providers/stt/`(shim 保留);
-> `web_ui_agent.py`(2100 行)→ 主入口 ~300 行 + `app/`(装配层:backends 注册表/
-> switchable/listening_host/web_audio/setup_taps/session_state)+ `webpanel/`(面板:
-> server/state/bridge + static/index.html)+ `common/`(text_rules/config_utils/
-> runtime/taps 基类)。模块级全局收敛为 `app.session_state.runtime`(AppRuntime)与
-> `webpanel.state.panel`。本文行文中的旧文件引用按上表对照;文件索引见 §13(已更新)。
+> `docs/design/` 下的文档记录设计背景、评审过程或目标态；其中尚未落地的能力不能当作
+> 当前运行事实。本文以仓库中的现有符号和可执行测试为准，刻意不依赖易漂移的行号。
 
 ---
 
-## 1. 项目定位与能力
+## 1. 系统定位与边界
 
-一个**全双工中文语音交互引擎**(小歌):用户说话与引擎应答可同时进行,支持随时打断、即时反应。它把 LiveKit Agents 框架当作“语音对话编排内核”,在其上接入**自建/第三方的远程模型**并叠加**多层打断机制**与**可视化测试面板**。
+小歌是基于 LiveKit Agents 二次开发的中文全双工语音应用。当前系统同时支持两种入口：
 
-**技术栈(可运行时切换的部分用 ⇄ 标注):**
+1. **云侧协议入口（部署主路径）**：客户端通过 TLS Gateway 创建会话，再经合并的
+   `/ws/session` 传输 JSON 控制帧和 16 kHz 单声道 int16le PCM。Gateway 把一条会话固定
+   代理到一个预热 Worker。
+2. **本地/浏览器调试入口**：直接运行 `web_ui_agent.py console`，由本地 WebPanel、
+   `/ws`、`/ws/audio` 和 console 音频 I/O 服务开发调试。Gateway 仍保留这些旧入口的
+   代理与浏览器重连宽限语义，但新协议客户端应优先使用 `/create_session` + `/ws/session`。
 
-| 能力 | 实现 | 后端 |
+系统的核心职责分为五层：
+
+| 层 | 当前职责 | 主要代码 |
 | --- | --- | --- |
-| LLM | `livekit.plugins.openai.LLM`(OpenAI 兼容) | Qwen3-4B 网关(自建) |
-| STT | 随 `XIAOGE_STACK` 装配:`upstream`(默认)→ 离线 FunASR 经 `StreamAdapter` + Silero VAD 切片(可热切换 ⇄);`optimized` → `funasr-stream`(FunASR 2pass 流式,**不过 StreamAdapter**) | FunASR 离线(默认)/ FunASR 流式 / Qwen3-ASR / Qwen3-流式 / 讯飞 RTASR(`STT_BACKEND=iflytek`) |
-| TTS ⇄ | 自定义 `TTS`(流式) | CosyVoice DashScope `cosyvoice-v3-flash`(**默认**)/ 百炼 `qwen-tts-realtime` / HTTP-TTS |
-| VAD | `livekit.plugins.silero` | 本地 ONNX |
-| 判停(EOU) | `livekit.plugins.turn_detector.MultilingualModel` | 本地 ONNX(独立推理进程) |
-| 强打断 KWS | `examples/voice_agents/kws_interrupt.py` | sherpa-onnx(本地,`models/kws/`) |
-| 早打断 | `examples/voice_agents/online_interrupt.py` | FunASR 2pass 并行流 |
-| 录音 | `examples/voice_agents/audio_recorder.py` | 本地 WAV |
-| 控制面板 | 内嵌 aiohttp + WebSocket | 浏览器 `http://localhost:8787`(`start.ps1`/`.env` 的 `WEB_UI_PORT`,被占用自动顺延;直接跑 `web_ui_agent.py` 无该 env 时代码回退 8765) |
+| 客户端/设备 | 采集 PCM、展示转写/回复、执行 `data.cmd`、回传 ACK/result | WebPanel 静态客户端或自研协议客户端 |
+| TLS Gateway | 按配置执行 API key 准入、会话令牌、亲和、限流、HTTP/WS 反代、释放会话 | `examples/voice_agents/gateway/` |
+| Pool Manager | 预热 Worker、状态机、健康检查、分配/回收、录音转码旁路 | `examples/voice_agents/poolmgr/` |
+| 一次性 Worker | WebPanel 协议端、`AgentSession`、语音编排、业务路由、媒体和知识工具 | `web_ui_agent.py`、`webpanel/`、`app/`、`common/` |
+| 模型与本地资源 | STT、TTS、普通对话 LLM、语义分类 LLM、VAD/EOU、音乐和向量索引 | `providers/`、`app/backends.py`、`app/knowledge_index.py` |
+
+“Worker”在本仓库有两层含义，阅读时要区分：
+
+- `poolmgr` 管理的 **OS Worker 进程**是 `web_ui_agent.py console` 的一次性实例；一条云会话
+  用完后整个进程被回收。
+- LiveKit 框架里的 `AgentServer`（旧称 Worker）负责 job/`AgentSession` 编排，它运行在
+  上述 OS 进程内部。
 
 ---
 
-## 2. 系统架构总览
+## 2. 部署拓扑与组件职责
 
-![系统架构图](../diagrams/architecture.svg)
+```mermaid
+flowchart LR
+    C[协议客户端或浏览器] -->|HTTPS / WSS| G[TLS Gateway]
+    G -->|loopback HTTP| P[Pool control API]
+    P --> M[PoolManager]
+    M -->|spawn / healthz / kill| W1[一次性 Worker 1]
+    M -->|spawn / healthz / kill| WN[一次性 Worker N]
+    G -->|亲和 HTTP / WS 代理| W1
+    G -->|亲和 HTTP / WS 代理| WN
 
-分四层:**本地音频 I/O → 框架编排内核 → 应用编排层(小歌) → 远程模型/控制面**。
+    subgraph Worker[每个 Worker 内部]
+      WP[WebPanel aiohttp 与协议端]
+      B[跨事件循环 Bridge]
+      A[LiveKit AgentSession]
+      R[G3 / Semantic / LLM Tools]
+      IO[STT TTS VAD 音乐 RAG]
+      WP <--> B
+      B <--> A
+      A --> R
+      R --> IO
+    end
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│  本地 I/O (console, cli.py)   麦克风 ──sounddevice(PortAudio线程)──┐          │
-│                               扬声器 ◄─sounddevice + WebRTC AEC ──┐ │          │
-└───────────────────────────────────────────────────────────────┼─┼──────────┘
-            call_soon_threadsafe ▲ (跨线程入事件循环)             │ │
-┌───────────────────────────────┴───────────────────────────────┼─┼──────────┐
-│  应用编排层 (web_ui_agent.py, 单事件循环)                        │ │          │
-│                                                                 ▼ │          │
-│  session.input.audio ──► [KWS tap] ──► [Online tap] ──► [Recorder tap] ──┐   │
-│        (taps 链:每个包住前一个,旁路观测后原样透传)                       │   │
-│                                                                          ▼   │
-│  AgentSession ── AudioRecognition ──┬─► VAD(Silero)──► 判停(EOU)             │
-│     │                               └─► STT 管线:                            │
-│     │                                  upstream(默认)→ StreamAdapter(自带VAD切片)→ SwitchableSTT ⇄ 远程ASR│
-│     │                                  optimized → funasr-stream(流式,绕过 StreamAdapter)│
-│     ├─ on_user_turn_completed:停止词/附和/数字归一化 → StopResponse           │
-│     ├─ LLM(Qwen) ─► transcription_node(广播文本)─► tts_node(去markdown)─► TTS(默认CosyVoice)─► output.audio│
-│     └─ 事件:agent_state/user_state/transcribed/item_added → 指标&广播         │
-│                                                                              │
-│  打断信号源:  KWS.on_hit ──┐  Online.on_text ──┐  停止词(offline final)──┐   │
-│               session.interrupt(force) ◄────────┴──────────────────────────┘   │
-└────────────────────────────────────────────────────────────────────────────┘
-        ▲ run_coroutine_threadsafe(双向跨循环)
-┌───────┴──────────────────────────────────────────────────────────────────────┐
-│  控制面板 (独立线程 + 独立事件循环, aiohttp)                                    │
-│  GET / (HTML)  GET /ws (实时日志/状态)  POST /api/{mic,asr,tts}                 │
-└────────────────────────────────────────────────────────────────────────────┘
+    W1 -.同构.-> Worker
+    WN -.同构.-> Worker
+    G -.不直接 spawn.-> M
 ```
 
-**关键设计取向**
-- 应用逻辑全部跑在**一个 asyncio 事件循环**(job loop)上;一切阻塞操作(DashScope SDK、sherpa 解码、WAV 落盘)都被推到**真线程**,再用 `call_soon_threadsafe` / `run_coroutine_threadsafe` 桥回。
-- 远程模型通过**自定义 `STT`/`TTS`/`LLM` 适配器**接入,框架对它们只认 `capabilities`(能力探测)接口,因此后端可热插拔。
-- 打断是本工程的核心特色:**4 条互补的打断通路**(见 §6),覆盖“快但盲(VAD)/快且懂命令(KWS)/懂内容(在线 ASR)/兜底(离线文本)”的不同权衡。
+### 2.1 Gateway
+
+`gateway.main._Router` 是外部路由入口：
+
+- `/create_session`：按 Gateway 配置校验 API key（强制模式下缺失或错误即拒绝），分配 Worker，
+  把请求代理到 Worker 的同名接口，记录 access token 与 `session_id` 的绑定，并把外部
+  `ws_url` 改写为 Gateway 的 `/ws/session`。
+- `/ws/session`：只接受 Bearer token；拒绝未知 token 和同一会话的重复连接；在一个 WSS
+  中双向透传 JSON 与 PCM，并在连接结束后关闭亲和记录、调用 Pool `/release`。
+- `/ws/audio`、`/ws`、`/api/*`：兼容浏览器/旧协议路径，使用 HMAC 亲和 cookie；
+  `gateway.affinity.AffinityTable` 负责 `IDLE/ACTIVE/PENDING_DISCONNECT/CLOSED` 状态。
+- `/knows`、`/api/knows/*`：按同一 API key 配置准入后从 `list_ready()` 选择任一 READY
+  Worker，**不调用** `alloc()/release()`，因此知识管理不会占用会话或导致 Worker 被回收。
+- `/healthz`：返回 Gateway 状态及 Pool 摘要。
+
+`gateway.proxy.Proxy` 只做代理和连接生命周期，不做业务路由。它还实施每连接消息速率、
+单帧大小限制。旧 `/ws/audio` 模式在浏览器短暂断线时保留上游并允许重接；宽限窗中未能
+送达客户端的下行帧直接丢弃，不做重放。合并 `/ws/session` 则在断开后立即进入释放流程。
+
+Gateway 只通过 `gateway.pool_client.PoolClient` 调本地控制 API，绝不直接创建 Worker。
+Pool API 失败时采用安全默认：`alloc → None`、`release → False`、`status → {}`。
+
+### 2.2 Pool Manager 与一次性 Worker
+
+`poolmgr.launcher` 根据 `XG_POOL_*` 配置构建 `PoolManager`、转码器和仅绑定 loopback 的
+控制 API。控制面只有四个操作：`/alloc`、`/release`、`/status`、`/list_ready`。
+
+每个进程槽位遵循：
+
+```mermaid
+stateDiagram-v2
+    [*] --> SPAWNING: spawn 同端口 Worker
+    SPAWNING --> READY: healthz ready
+    SPAWNING --> RECYCLING: 冷启动超时
+    READY --> ASSIGNED: alloc
+    READY --> RECYCLING: 连续 healthz 失败
+    ASSIGNED --> RECYCLING: release 或 healthz 失败
+    RECYCLING --> SPAWNING: kill 确认退出后同端口补位
+```
+
+关键语义：
+
+- Pool 大小 `N` 是理想状态下可立即分配的会话数，不是排队容量。
+- `alloc()` 只取 READY Worker，并把 `session_id` 设为该一次性进程的 `proc_id`。
+- `release()` 不把 Worker 简单复位，而是回收整个进程，避免上一会话的全局状态、模型流、
+  音频缓冲或工具状态泄漏到下一会话。
+- `_recycle()` 在锁内只移除状态并调度 reaper；`kill/wait` 在锁外执行。
+- `_reap_work()` 必须先确认旧进程退出、端口释放，再在同端口 spawn；录音目录也只在进程
+  收尾后交给转码器，避免端口抢占和录音写入竞态。
+- SPAWNING 期间普通 healthz 失败不会按“连续失败”误杀；只有越过 spawn timeout 才回收。
+
+回收和冷启动期间该槽位不 READY，所以瞬时可用容量会下降。Pool 满时，当前 Gateway 在清理
+待连接会话后每 250 ms 重试分配，最长约 15 秒，之后返回 503 `resource_exhausted`。
+
+### 2.3 Worker 内部
+
+一个 Worker 主要包含：
+
+- `AgentServer`/console 执行器与一个 `AgentSession`；
+- 独立线程和事件循环上的 WebPanel aiohttp 服务；
+- `webpanel.server` 的 `/create_session`、`/ws/session`、旧 Web 页面和管理 API；
+- `webpanel.bridge`，在 Agent loop 与 Web loop 之间传消息；
+- STT/TTS/VAD/EOU、KWS、在线打断、录音和实时字幕 tap；
+- `VoiceAgent` 的确定性路由、语义兜底以及普通 LLM tools；
+- 每 Worker 的 `MusicPlayer`，以及从共享持久化文件加载的 `KnowledgeIndex`。
+
+Pool 启动时为 Worker 注入 loopback host/port、会话标识、录音模式、审计级别和部署目录下的
+日志路径。生产池默认隐藏 ASR/TTS 管理路由并关闭 native KWS，避免外部管理面和服务端误唤醒。
 
 ---
 
-## 3. 运行时与进程模型
+## 3. 云会话的控制流
 
-### 3.1 框架对象
-- **`AgentServer`**(`worker.py:295`,旧称 Worker):调度器,不跑 agent 代码本身。`server.setup_fnc = prewarm` 注册预热;`@server.rtc_session()` 注册每会话入口。
-- **`prewarm(proc)`**(`web_ui_agent.py:834`):每个 job 进程**仅执行一次**,把昂贵的 Silero VAD(`min_silence_duration=0.35`)装进 `proc.userdata["vad"]`,跨 job 复用。
-- **`JobContext`**(`job.py:153`):提供 `ctx.room`、`ctx.proc`、`ctx.add_shutdown_callback` 等;入口 `entrypoint(ctx)` 在此基础上构建 `AgentSession`。
+### 3.1 创建、建连、释放和补位
 
-### 3.2 console 模式(本工程的实际运行方式)
-`python web_ui_agent.py console` → `cli/cli.py:_run_console`:
-- 用 **`ThreadJobExecutor`**(不是子进程),job 跑在**进程内一条专用线程**上,有自己的事件循环;主线程跑 Rich UI。预热照常执行。
-- 注入一个 `fake_job`(mock room,无 WebRTC),`server.run(devmode=True, unregistered=True)`——不向 LiveKit 注册。
-- **本地音频**:`ConsoleAudioInput/Output`(`cli.py:109/132`)用 sounddevice;采集/播放回调跑在 **PortAudio 线程**,经 `call_soon_threadsafe` 入事件循环。**console 模式自带 WebRTC AEC**(`AudioProcessingModule`,回声消除/降噪/AGC,`cli.py:325`)——生产 room 模式没有这个免费 AEC。
+```mermaid
+sequenceDiagram
+    participant C as 客户端
+    participant G as Gateway
+    participant P as PoolManager
+    participant W as 已预热 Worker
 
-> 结论:console 下进程内其实有**多条线程/循环**(UI 主线程、server 线程、job 线程、PortAudio 线程、各 SDK 线程),并非单循环。理解这点对调试跨线程问题至关重要。
+    C->>G: POST /create_session + API key + 能力/音频参数
+    G->>G: 按配置校验凭证，清理过期待连接会话
+    G->>P: POST /alloc
+    P-->>G: proc_id, port, session_id
+    G->>G: 注册 affinity/token
+    G->>W: 代理 POST /create_session
+    W-->>G: access_token + 协议参数
+    G-->>C: access_token + 外部 wss /ws/session
 
-### 3.3 线程 vs 事件循环全景
+    C->>G: WSS /ws/session + Bearer token
+    G->>G: 校验 token，拒绝重复连接
+    G->>W: loopback WS /ws/session
+    C->>W: ctrl.hello
+    W-->>C: ctrl.ready + ctrl.state
+    loop 会话期间
+      C->>W: PCM binary / data.text / ACK / result
+      W-->>C: PCM binary / STT / reply / cmd / state
+    end
 
-| 角色 | 载体 | 入循环的桥 |
+    C-xG: WebSocket 断开
+    G->>G: 删除 token 和 affinity
+    G->>P: POST /release
+    P->>W: terminate，必要时 kill，等待退出
+    P->>P: 同端口 spawn 新 Worker
+    P->>P: healthz ready 后恢复容量
+```
+
+创建会话的几个边界：
+
+- 根页面本身不占 Pool；只有 `/create_session` 或兼容协议的直接 `/ws/audio` 才分配。
+- Worker 的 `/create_session` 仍会校验设备标识、客户端版本、能力集合以及 16 kHz、单声道、
+  int16le 等协议约束；Gateway 不是唯一校验层。
+- Gateway 返回给客户端的 token 只映射到已分配会话；同一会话只允许一条活跃
+  `/ws/session`。
+- 创建后长期不建 WS 的 token 会被清理；资源紧张时当前实现还会强制清理所有待连接会话，
+  因而客户端应拿到 token 后立即建连。
+- `/ws/session` 关闭即释放一次性 Worker。旧浏览器 `/ws/audio` 才使用 cookie 重连宽限窗。
+
+### 3.2 合并 WebSocket 帧流
+
+`/ws/session` 同时承载：
+
+- **上行二进制**：16 kHz、mono、int16le PCM；
+- **下行二进制**：TTS 或音乐 PCM；
+- **上行 JSON**：`ctrl.hello`、`ctrl.frontend_state`、`data.text`、`data.cmd_ack`、
+  `data.cmd_result`；
+- **下行 JSON**：`ctrl.ready`、`ctrl.state`、`data.stt`、`data.reply`、`data.cmd` 等。
+
+Gateway 对客户端上行文本只验证合法 JSON，并实施帧大小和速率限制；具体 schema、命令身份和
+状态机由 Worker 处理。完整字段以 [R5.2.2 JSON Schema](../g1_contract_signoff_package_r21_r5_2_2_20260804/02_contracts/xiaoge-duplex-protocol-r5.2.2.schema.json)
+和 [CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md) 为准。
+
+---
+
+## 4. 一轮语音的数据流
+
+```mermaid
+flowchart TD
+    IN[PCM 或 data.text] --> TAP[场景注入 / Web 音频 / Mute / Recorder / KWS / Online taps]
+    TAP --> VAD[VAD 与端点检测]
+    TAP --> STT[STT interim / final]
+    VAD --> TURN[AgentSession 轮次管理]
+    STT --> TURN
+    TURN --> FILTER[聆听态 / 停止词 / 附和 / 打断 / 音乐过滤]
+    FILTER --> MUSIC[确定性音乐快路径]
+    MUSIC -->|未命中| G3[G3 route → validate → build_outputs]
+    G3 -->|明确 reply| REPLY[data.reply 与固定话术]
+    G3 -->|data.cmd| CMD[命令生命周期]
+    G3 -->|chat_fallback 且 command-relevant| SEM[无副作用 SemanticRouter]
+    SEM -->|execute candidate| AUTH[重新进入 G3 Registry 与 Validator]
+    SEM -->|media / knowledge / cloud / chat| LLM[普通 AgentSession LLM]
+    G3 -->|普通 chat_fallback| LLM
+    AUTH --> REPLY
+    AUTH --> CMD
+    LLM --> TOOLS[Music / Knowledge function tools]
+    TOOLS --> LLM
+    LLM --> TEXT[流式回复文本]
+    REPLY --> TEXT
+    TEXT --> TTS[TTS 与字幕/回复帧]
+    TTS --> OUT[下行 PCM + JSON]
+```
+
+### 4.1 音频识别与判停
+
+`entrypoint()` 通过 `setup_stt()` 选择主 STT，并构建：
+
+- Silero VAD（在 `prewarm()` 中加载）；
+- `MultilingualModel` 语义判停；
+- `AgentSession` 的 endpointing、打断和 preemptive generation 配置；
+- 可热切换的 `SwitchableSTT`/`SwitchableTTS`（具体适用范围取决于 STT 栈）；
+- 实时字幕、录音、KWS、在线 ASR 打断、音乐等 tap。
+
+默认 upstream 栈中，非流式 STT 通过 `StreamAdapter` 用 VAD 切出整段后识别；optimized
+FunASR 2-pass 和讯飞流式后端绕过该适配器。非流式路径必须等到语音段结束，因而其结构性
+延迟高于真正流式 STT。`preemptive_generation` 会尝试把 LLM/TTS 首包计算与判停窗口重叠。
+
+### 4.2 打断与轮次过滤
+
+当前打断来源互补：
+
+| 来源 | 作用 | 失败/降级方式 |
 | --- | --- | --- |
-| 应用编排 / 网络 STT / 在线打断 | job 事件循环(asyncio task) | — |
-| 麦克风/扬声器回调 | PortAudio 线程 | `loop.call_soon_threadsafe` |
-| KWS 解码(sherpa,CPU 密集) | 专用 daemon 线程 + `queue.Queue` | `loop.call_soon_threadsafe(on_hit)` |
-| 百炼 TTS(DashScope 同步 SDK) | SDK 自带 WS 线程;调用经 `asyncio.to_thread` | `queue.Queue` + `threading.Event` |
-| 判停 EOU(ONNX) | 独立推理 executor 进程 | 框架内部 |
-| 录音落盘 | `asyncio.to_thread`(close 时) | `threading.Lock` 保护缓冲 |
-| 控制面板 | 独立线程 + 独立事件循环 | `run_coroutine_threadsafe`(双向) |
+| LiveKit VAD 打断 | 内容无关的通用 barge-in | 核心路径 |
+| native KWS | 本地快速识别“停/别说了”等 | 缺依赖或模型时 no-op；生产池默认关闭 |
+| online interrupt ASR | AI 播报时按识别文本提前打断 | 网络异常后重连，不作为主转写 |
+| final STT 文本规则 | 停止词与附和兜底 | 最慢但始终可参与 |
+
+`VoiceAgent.on_user_turn_completed()` 的实际顺序不是“直接把转写交给 LLM”，而是：
+
+1. 聆听模式吞入、退出尾巴与整理请求；
+2. 连续对话确认和自动进入聆听态；
+3. 确定性音乐播放/停止/恢复；
+4. 停止词、当前音乐状态、附和与 overlap ACK 过滤；
+5. G3/semantic 业务路由；
+6. 未被消费的轮次才进入普通 LLM；
+7. 必要时做口述数字归一化。
+
+音频 tap 是承载链：输入 tap 必须把帧继续返回，输出 tap 必须透传 `flush()` 和
+`clear_buffer()`，否则可能导致下游“变聋”或打断后仍继续播放。框架在不可打断播报或 AEC
+预热期间还可能让 VAD 收帧但跳过 STT；排查“VAD 在动却没有转写”时应优先检查这一点。
+
+### 4.3 文本输入
+
+`data.text` 经 `VoiceAgent.handle_manual_text()` 进入同一套音乐过滤、G3 与 semantic 路由；
+若未被确定性路径消费，再调用 `AgentSession.generate_reply()`。它与真实音频共享业务安全边界，
+但不完全等同于一个由 STT 产生的标准 conversation item，见 §11 的 QA 日志限制。
 
 ---
 
-## 4. 主要模块详解(应用层)
+## 5. 意图识别与多域路由
 
-> 行号以本次分析时为准,会随代码漂移;漂了按符号名搜索。
+### 5.1 路由优先级
 
-### 4.1 `web_ui_agent.py` —— 应用心脏
-职责:构建会话、接后端、装打断 tap、跑控制面板、采集指标。
+当前优先级是有意设计的仲裁顺序：
 
-- **入口流程**(`@server.rtc_session()` `:841`):捕获 `_agent_loop` → `build_stt/tts/llm` → 构建 `AgentSession`(`:861`)→ 注册 6 个事件处理器 → `_warmup_llm()` 火忘任务 → `await session.start(VoiceAgent(), room)` → **start 之后**依次装 `AudioRecorder`、KWS tap、Online tap(`:976-1041`)。
-- **`AgentSession` 配置**(本应用生效值;判停旋钮统一来自 `turn_config.py` 的 `TurnConfig.from_env()`,`TURN_*` 环境变量可覆盖):
-  | 项 | 值 | 含义 |
-  | --- | --- | --- |
-  | `turn_detection` | `MultilingualModel(unlikely_threshold=…)` | 语义判停(多语);阈值默认 None(用模型默认) |
-  | `interruption` | `min_words=3, min_duration=2.0, backchannel_boundary=(1.8,3.5)` | 打断需达 3 词/2s;1.8–3.5s 视作附和 |
-  | `endpointing` | `min_delay=0.3, max_delay=0.6` | 判停静默等待区间(很紧,为低延迟) |
-  | `preemptive_generation` | `preemptive_tts=True` | 抢先生成 LLM+TTS,叠到判停窗里省延迟 |
-- **`VoiceAgent`**:系统提示要求简短、不用 markdown、数字逐位读、命中停止词则沉默。重写了**两个**节点:**`transcription_node`** 把 LLM 文本流“偷看”一份,生成一结束就 `strip_markdown` 后 `broadcast` 给浏览器(早于 TTS 播完);**`tts_node`** 在合成前对文本流跑 `sanitize_stream`(去 markdown/符号),避免 TTS 把 `**`/`###`/`→` 读出来。`on_user_turn_completed` 做停止词/附和/抢说过滤 + 数字归一化(详见 §6.4)。另外 entrypoint 在所有 tap 装好后用 `session.say(...)` 播固定开场白。
-- **`build_llm()`**(`:742`):裸 `openai.AsyncClient`(`max_retries=0`,自调 httpx 超时 15/30/30、50 连接池),`Qwen3-4B`,`temp0.7/top_p0.9/top_k20/max_tokens512/presence_penalty1.5`,`enable_thinking=False`(关 Qwen3 思考模式降延迟)。SSL 默认不校验。
-- **`SwitchableSTT`/`SwitchableTTS`**:见 §7。
-- **控制面板**:见 §8。
-- **指标日志**:见 §10.3。
+1. **会话/聆听/停止词/附和过滤**：决定该轮是否应被吞掉或只用于打断；
+2. **确定性音乐语音快路径**：播放、停止、恢复直接操作共享 `MusicPlayer`；
+3. **G3 确定性路由**：言语行为安全门、命令 Registry、槽位抽取、查询/知识模板；
+4. **SemanticRouter 兜底**：只处理 G3 `chat_fallback` 且仍有 command-relevant 特征的文本；
+5. **普通 AgentSession/LLM**：聊天以及被 semantic 判定为 media/cloud/knowledge/chat 的委托；
+6. **LLM function tools**：当前主要是音乐与真实向量知识库。
 
-### 4.2 `custom_audio_providers.py` —— 远程模型适配器
-实现多类 Provider,统一服从框架 `STT`/`TTS` 抽象(`_recognize_impl` / `synthesize`+`stream` / `capabilities` / `provider`)。
+越靠前的路径越确定、越低延迟；越靠后的路径泛化更强，但不能绕过控制授权边界。
 
-- **`FunASROfflineSTT`**(`:89`,默认 STT):离线模式 WS。**持久连接复用**(省 ~190ms/turn)+ `asyncio.Lock` 串行化;握手 JSON(`mode:offline / chunk_size / audio_fs / is_speaking / hotwords / itn`),全速上传 PCM,发 `{is_speaking:false}` 触发识别,收 `text`/`is_final`;超时未拿到 final 则 `_reset_ws` 防“串台”。连接超时 `_WS_CONNECT_TIMEOUT`(5s,`asyncio.wait_for`)。失败重连重试一次。
-- **`Qwen3ASROfflineSTT` / `_Qwen3StreamSTT`**(`:277`/`:687`):growing-buffer WS,无握手,发 `{action:finalize}`,取最后的 `full_text`。**预热连接**机制(`prewarm_connection`/`_warm_ws`):用户一开口就提前建连,把握手延迟藏进说话窗;无锁(靠 asyncio 单线程原子性),且**预热未完成不阻塞识别**(直接开新连)。**每轮一条连接**(与 FunASR 的持久复用相反)。
-- **`FunASRStreamingSTT`(2pass)**(`:466`):`streaming=True, interim_results=True`,发 interim(2pass-online)+ final(2pass-offline);剥前导标点避免判停拖到 `max_delay`。
-- **`CosyVoiceStreamingTTS`(DashScope CosyVoice,**默认 TTS**)**:默认 `model=cosyvoice-v3-flash`、`voice=longxiaochun_v3`(`COSYVOICE_MODEL`/`COSYVOICE_VOICE` 可覆盖);DashScope SDK 流式合成,与 `QwenStreamingTTS` 同属 DashScope 系。
-- **`QwenStreamingTTS`(百炼,可选)**:DashScope 同步 SDK 包进 `to_thread`;**每轮一条连接**(connect/update_session → 逐句 append_text → finish/close),打断即 `close()` 中止服务端合成。**size-1 预热连接池**(`threading.Lock`,TTL 20s)把 ~1s 握手藏到上一轮播放期;**按句边界增量合成**(首包延迟从“整段”降到“首句”)。
-- **`HttpStreamingTTS`(可选)**:流式 HTTP POST(`audio/L16`,24kHz),逐句 POST。
-- TTS 后端集合 = `{cosyvoice, qwen, http}`(`TTS_BACKEND` 默认 `cosyvoice`)。
-- 通用:重采样(ASR 16kHz、TTS 24kHz 单声道 16bit;`rtc.AudioResampler`)。已抽公共 `_resample_pcm()` / `_acquire_http_session()`(A 档去重);DashScope `api_key` 是**进程级全局**(已加注释,单 key 场景 OK)。
+### 5.2 G3 是控制指令的唯一权威
 
-### 4.3 `kws_interrupt.py` —— 本地关键词强打断
-- **`KwsConfig.from_env()`**:`XIAOGE_KWS_ENABLE_NATIVE` 默认 **1**(开),`XIAOGE_KWS_MODEL_DIR` 默认指向 `<repo>/models/kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20`(按 `__file__` 的 `parents[2]` 定位,不依赖 cwd)。
-- **`NativeKwsSpotter`**:sherpa-onnx `KeywordSpotter`。**解码跑真线程**,`push()` 只做非阻塞入队(队满丢最旧),命中经 `call_soon_threadsafe(on_hit, keyword)` 桥回循环;800ms 去抖。关键词需转**拼音音素 token**(pypinyin INITIALS+FINALS_TONE,`d ing2 ... @停下`)。
-- **`KwsTapAudioInput`**:tap,`__anext__` 取帧→喂 spotter→**原样透传**。
-- **优雅降级**:缺 sherpa/numpy/pypinyin/模型 → `_unavailable_reason` 返回原因,no-op,不阻塞启动。
-- **命中动作不在本模块**:`on_hit` 回调(在 `web_ui_agent.py` 里)执行 `session.interrupt(force=True)`。
+`common.g3_intent.G3IntentEngine` 把控制能力收敛到 `RegistryEntry`：
 
-### 4.4 `online_interrupt.py` —— 在线 ASR 早打断
-- 第二条**并行** FunASR 2pass WS,只为“在 AI 说话时数用户说了多少字”做 barge-in 判定(转写内容不进对话)。
-- **全程 asyncio**(无线程):`asyncio.Queue` + `create_task`;`chunk_size:[5,8,4]`(480ms,比主链路更短以降首包);reconnect-only,异常全吞。
-- `on_text(text, segment_end)`:online 增量 → 上层累计;offline → 清累计避免重复计数。**判定阈值 `min_chars=3` 在 config,策略在 agent 文件**。
-- `OnlineTapAudioInput`:同 KWS 的 tap 模式。
+- `action`/`capability_id`；
+- 参数 schema、枚举、范围和必填项；
+- 风险级别；
+- 允许的 delivery；
+- 确定性 matcher/extractor 和示例。
 
-### 4.5 `audio_recorder.py` —— 会话录音
-- 同样用 tap:`RecordingTapAudioInput`(麦克风)+ `RecordingTapAudioOutput`(TTS,`next_in_chain`,**先转发再观测**,且转发 `flush`/`clear_buffer` 以不破坏打断语义)。
-- 以**麦克风帧为时间轴**,把 TTS 帧缓冲后混音写入 `recordings/<时间戳>/conversation.wav`(16kHz 单声道,int16 加和裁剪)。`close` 经 `to_thread`,缓冲有 `threading.Lock`。
+执行链固定为：
 
-### 4.6 其余应用模块(按职责)
-- **`funasr_stream_stt.py`** —— **流式主 STT**(`FunASRStreamSTT`):FunASR 2pass 流式,内置独立 silero VAD + GAP 聚合,**不过 StreamAdapter**;`XIAOGE_STACK=optimized`(或 `STT_BACKEND=funasr-stream`)时启用,`_switchable_stt=None`(面板 ASR 热切换不适用,需重启切换)。
-- **`iflytek_stt.py`** —— 讯飞 RTASR(`IFlyTekRTASR`),`STT_BACKEND=iflytek` 启用的可选第三方流式 STT(同样绕过 StreamAdapter)。
-- **`listening_mode.py`** —— 聆听模式控制器(`ListeningController`,纯状态机):唤醒词进入/退出、临时内容 TTL、退出尾巴 final 处理等(host 助手在 agent 循环线程串行执行)。
-- **`mute_gate.py`** —— **真关麦**(`MuteGate`):包住 `session.input.audio`,在输入**源头**静音,对**所有** STT 后端统一生效。这是关麦的**主机制**(见 §7/§8)。
-- **`live_transcript.py`** —— Web 实时转写气泡(`LiveTranscript`/`LiveTranscriptConfig`):驱动浏览器“聆听中”live 气泡(开口出现、partial 边长、final 定稿)。
-- **`text_sanitizer.py`** —— `sanitize_stream` / `strip_markdown`:净化 `tts_node`(合成前去 markdown/符号)与 `transcription_node`(气泡显示纯口语)。
-- **`turn_config.py`** —— `TurnConfig`:判停旋钮(VAD 静音、endpointing、打断阈值、抢跑、`unlikely_threshold`)集中一处,`TURN_*` 环境变量可覆盖,默认 = 原写死值(见 §10.4)。
-
----
-
-## 5. 核心流程:一轮对话的完整生命周期
-
-![一轮对话时序图](../diagrams/sequence-turn.svg)
-
-```
-麦克风帧
-  └─►(taps 透传:KWS/Online/Recorder 旁路观测)
-     └─► AgentSession._forward_audio_task → AgentActivity.push_audio
-          │  计算 should_discard(见 §6.5);否则 skip_stt=False
-          └─► AudioRecognition.push_audio(frame, skip_stt)
-               ├─►(总是)VAD 通道:Silero VAD → START/END_OF_SPEECH → 用户状态/判停触发
-               └─►(除非 skip_stt)STT 管线:_STTPipeline → stt_node
-                     └─► StreamAdapter(对非流式 STT):用“自己的”VAD 把音频切成整段
-                            └─► 整段 await SwitchableSTT.recognize() → FINAL_TRANSCRIPT
-  FINAL_TRANSCRIPT
-   └─► AudioRecognition._on_stt_event:累计 transcript;(本应用 VAD-based)触发抢先生成 + 判停
-        └─► 判停 EOU:MultilingualModel.predict_end_of_turn(prob, unlikely_threshold)
-              prob≥阈值 → endpointing=min_delay(0.3) ; 否则 → max_delay(0.6)
-              等待锚定“最后一帧语音”(已过的静默被抵扣)
-   └─► on_end_of_turn → Agent.on_user_turn_completed(停止词/附和→StopResponse;否则数字归一化)
-        └─► _generate_reply:llm_node(Qwen 流式)→ transcription_node(广播文本)
-              → tts_node(去 markdown → 默认 CosyVoice 流式)→ output.audio → 扬声器
-```
-> 上图是 `upstream`(默认)装配:离线 STT 经 `StreamAdapter` 整段识别。`optimized`(`funasr-stream`)/讯飞为流式 STT,**绕过 StreamAdapter**(自带 VAD/聚合),无“等整段”这一结构性延迟。
-
-**几个易被忽略的点**
-- **两个 VAD 实例**跑在同一份音频上:一个给 `AudioRecognition`(用户状态/打断/判停),一个在 `StreamAdapter` 内部(把音频切成整段喂离线 STT)。
-- 非流式 STT **必须等整段说完**才能识别(`StreamAdapter` 等 VAD 的 END_OF_SPEECH);这是延迟的结构性来源。
-- **抢先生成(preemptive)**:在 final/preflight transcript 上就启动 LLM(及 TTS),把判停+EOU 的等待窗与 LLM 首 token / TTS 首包**重叠**;若最终提交的 turn 变了(如 `on_user_turn_completed` 改写了消息),抢先成果作废。
-
----
-
-## 6. 全双工打断机制(本工程的核心)
-
-四条互补通路,从“最快最盲”到“最慢最稳”:
-
-| 层 | 来源 | 运行处 | 触发条件 | 相对延迟 | 失败行为 |
-| --- | --- | --- | --- | --- | --- |
-| ① VAD 打断 | 框架内置 | 事件循环 | 语音能量 + `min_duration=2.0` 且 `min_words≥3` | 最低但**内容盲** | 核心,不失效 |
-| ② KWS 强打断 | `kws_interrupt.py`(本地 sherpa) | **真线程** | 命中停止词(停/别说了/等等…) | 比离线 STT final **早 0.5–1.5s**,无网络 | 缺模型/依赖→no-op |
-| ③ 在线 ASR 早打断 | `online_interrupt.py`(FunASR 2pass) | asyncio task | AI 说话时识别到 ≥`min_chars=3` 字;停止词→强打断 | 早于离线 final,慢于 KWS | reconnect-only |
-| ④ 离线文本兜底 | 停止词表 + `on_user_turn_completed` | 事件循环 | 离线 STT final 命中停止词/附和 | 最慢(等整段) | 始终可用 |
-
-### 6.1 ②KWS:`on_hit` → `session.interrupt(force=True)`(`web_ui_agent.py:982-998`),日志 `STOP_KWS_EARLY`。
-### 6.2 ③在线:`_on_online_text`(`:1003-1029`)仅在 `agent_state=="speaking"` 时动作,1s 限频;停止词→`interrupt(force=True)`(`STOP_ONLINE_EARLY`),否则达 `min_chars`→软 `interrupt()`(`OVERLAP_ONLINE_INTERRUPT`)。
-### 6.3 ④离线/早判:`user_input_transcribed` 处理器(`:944`)在 final 上可提前 `interrupt(force=True)`(`STOP_PHRASE_EARLY`)或 `clear_user_turn()`(附和重叠)。
-### 6.4 停止词语义(`:94-170`):`_STOP_WORDS` + 允许引导词(那/你/就…)+ 尾词(一下/吧/呢…)的正则;`on_user_turn_completed` 决策序:停止词→`interrupt(force)`+`raise StopResponse`;附和→`StopResponse`;抢说+附和→`StopResponse`;否则把纯数字串改写成“1、2、3”逐位读。
-### 6.5 ⚠️ 打断的“暗面”——音频丢弃(本会话实际踩过的坑)
-`AgentActivity.push_audio`(`agent_activity.py:1012`)计算
-`should_discard = aec_warmup_active OR uninterruptible_speech_active`,为真时 **VAD 照常收帧、但 STT 被 `skip_stt` 跳过**(`:1036` 注释明确)。后果:**VAD 显示“用户在说话”,但根本没送去识别**。当某个 speech handle 卡在未完成/状态卡在 speaking,会出现“能听到问候、用户说话却不识别”的现象。`discard_audio_if_uninterruptible` 默认 True;AEC 预热默认 3s。二次开发改打断/状态机时务必注意这条。
-
-> tap 的承载式不变量:任何 input tap 的 `__anext__` 若没把帧 `return`(异常逃逸/被过滤),**下游整条 STT/VAD 会断粮、agent 变聋**;output tap 必须转发 `clear_buffer`/`flush` 否则打断切不断播放。
-
----
-
-## 7. STT/TTS 可切换后端架构
-
-- **`SwitchableSTT`/`SwitchableTTS`** 是代理:`AgentSession`/`StreamAdapter` 持有代理引用,`switch_backend()` 原子换内部 `_backend`(GIL 安全),**下一句生效**,无需重启会话/适配器。旧后端 `aclose()` 在 agent 循环上**火忘**执行。⚠️ **仅 `upstream`(离线 + StreamAdapter)装配下面板 ASR 热切换可用**;流式后端(`funasr-stream`/讯飞)`_switchable_stt=None`、不经 SwitchableSTT,**面板 ASR 热切换不可用**,切后端需重启。TTS 热切换不受此限。
-- **关麦 = MuteGate(主机制)**:关麦的**主**实现是 `mute_gate.MuteGate`——它包住 `session.input.audio`,在输入**源头**静音,对**所有** STT 后端(含流式/讯飞,不经 SwitchableSTT 的也包含在内)统一生效=**真关麦**。面板 `/api/mic` 翻转 `_mute_gate.muted`。`SwitchableSTT.muted`(muted 时 `_recognize_impl` 直接返回空 FINAL transcript)只是**冗余同步**保持状态一致,流式后端根本不经过它。
-- **失败不致命(本会话新增)**:`SwitchableSTT._recognize_impl` 用 `try/except` 包住后端调用,**异常→返回空**而不是抛出。原因:抛出会**杀死 `StreamAdapter` 的识别流**,导致即便切回也永久变聋。这样切到不可达后端最多“暂时没反应”,切回即恢复。✅ **`SwitchableTTS` 已有对称保护**(B 档):把后端 TTS 的 `error` 事件转发到代理,框架的“可恢复错误→记录并继续”逻辑生效;`HttpStreamingTTS` POST 加了连接超时(`TTS_CONNECT_TIMEOUT`,默认 5s),切到不可达 TTS 也是快速失败、切回即恢复,不崩。
-- **连接超时**:`_WS_CONNECT_TIMEOUT=5s` 让不可达后端快速失败(否则 Windows 上 TCP 连接卡 ~21s)。
-- **加新后端**(A 档后已简化):构造逻辑收敛到 `_make_stt_backend()` / `_make_tts_backend()` **单一来源**(`build_*` 与 `/api/{asr,tts}` 切换共用)。加后端只需:在该工厂加分支、把 key 加进 `_STT_BACKENDS`/`_TTS_BACKENDS`、再加 `_HTML` 里的 tab。
-
----
-
-## 8. Web 控制面板架构
-
-- **独立线程 + 独立事件循环**:`__main__` 起 daemon 线程跑 `asyncio.run(_run_web_server)`;两个全局桥 `_web_loop`(web 循环)、`_agent_loop`(agent 循环)。
-- **路由**:`GET /`(内嵌 HTML)、`GET /ws`(实时日志/状态,5s 自动重连)、`POST /api/mic|asr|tts`。
-- **跨循环纪律**:
-  - agent→web:`broadcast()` 用 `run_coroutine_threadsafe(_ws_broadcast, _web_loop)`(转写、状态)。
-  - web→agent:切后端时旧后端 `aclose()` 用 `run_coroutine_threadsafe(old.aclose(), _agent_loop)`(必须在后端所属循环销毁)。
-  - **绝不**在 web 处理器里直接 `await` agent 侧协程。
-- 面板是“监视 + 控制”,**对话靠语音**(没有文字输入框);点麦克风按钮是**切换静音**(易误解为“开麦”)。
-
----
-
-## 9. 并发模型与线程桥接
-
-见 §3.3 全景表。核心原则:**循环上只做最少的事,重活下真线程,跨界只走 `call_soon_threadsafe`(线程→循环)/`run_coroutine_threadsafe`(循环→另一循环)**。
-- KWS = 真线程(CPU 解码)+ 队列丢最旧 backpressure。
-- 在线打断 = 纯 asyncio。
-- 百炼 TTS = 同步 SDK(`to_thread`)+ SDK 自带 WS 线程(`queue.Queue`+`Event`)+ 预热池(`threading.Lock`)。
-- 判停 EOU = 独立推理进程。
-- console 音频 = PortAudio 线程 + AEC。
-
----
-
-## 10. 性能特征与延迟预算
-
-### 10.1 一轮延迟构成(用户停说→开始听到回答)
-```
-VAD 静默判定(min_silence_duration=0.35)
-  + 离线 STT 整段识别 RTT(持久连接省握手)
-  + 判停等待(endpointing 0.3 快 / 0.6 慢,锚定最后语音帧,已过静默被抵扣)
-  + EOU ONNX 推理(并发在等待窗内)
-  + LLM 首 token(TTFT)
-  + TTS 首包(TTFB)
-  └─ 抢先生成把 LLM TTFT / TTS TTFB 与判停窗重叠 ⇒ 实测 wall-clock e2e 可压到 ~1.1s 量级
+```text
+route(text, state)
+  → validate(intent, state)
+  → build_outputs(validation, state)
+  → data.cmd 或 reply-only data.reply
 ```
 
-### 10.2 已落地的性能手段
-- FunASR **持久 WS 复用**(~190ms/turn);Qwen3-ASR **预热连接**(藏握手,且不阻塞识别)。
-- 百炼 TTS **预热连接池**(藏 ~1s 握手,TTL 20s 防半死连接)+ **按句增量合成**(首包=首句)。
-- FunASR 2pass **剥前导标点**(避免判停拖到 max_delay);离线 **全速上传**(不拖“说完”信号)。
-- LLM 关思考模式、`max_retries=0`、自调连接池/超时。
-- 在线打断用更短 `chunk_size`(480ms)换更早 barge-in。
+Validator 检查单命令策略、`cmd` capability、必填槽位、类型/范围、额外槽位、风险确认和
+当前 engine gate。`build_outputs()` 只有在 `intent_type == control_cmd`、验证接受且 delivery
+可执行时才能生成 `data.cmd`。普通工具调用不能调用 `send_data_cmd`；`function_call_output()`
+会拒绝任何试图直接发送命令的函数结果。
 
-### 10.3 可观测性
-- `qwen_voice_turn_metrics.log`:`TURN_USER`(transcription_delay/end_of_turn_delay…)、`TURN_ASSISTANT`(llm_ttft/tts_ttfb/playback_latency/e2e_latency/wall_clock_e2e)、`FELT_LATENCY`(用户停说→开口的体感延迟)。仍在。
-- **`.run/agent.log` 已废除**:正常运行**不再写任何文件日志处理器**(零开销)。DEBUG 全量日志(VAD/STT/KWS/dashscope)改由测试模式承载——设 `AGENT_TIMELINE=1` 时写 `runs/<时间戳>/debug.log`(见 `event_timeline.install_debug_log`);设 `LIVEKIT_LOG_LEVEL=DEBUG` 更详。
+### 5.3 先判断言语行为，再识别动作
 
-### 10.4 ⚠️ 重要:阈值的“本应用值” vs “框架默认值”
-源码导读里的若干数字其实是**本应用在 `turn_handling` 里覆盖的值**,不是框架默认值:
+动作词出现不等于立即执行。G3 在动作匹配前识别非执行言语行为：
 
-| 项 | 本应用生效值 | 框架默认值(`endpointing.py`) |
+| 用户表达 | 识别 | 当前结果 |
 | --- | --- | --- |
-| `endpointing.min_delay/max_delay` | 0.3 / 0.6 | 0.5 / 3.0 |
-| `interruption.min_words` | 3 | 0 |
-| `interruption.min_duration` | 2.0 | 1.2 |
-| `preemptive_tts` | True | False |
-| Silero `min_silence_duration` | 0.35 | 插件层设定 |
+| “请向前走一米” | 立即执行 + robot control | 进入 Registry/Validator |
+| “你能向前走吗” | capability query | 只回复能力，不生成 `cmd_id` |
+| “不要向前走” | prohibit | 只回复，不执行 |
+| “如果前面有人你会走吗” | hypothetical | 只回复，不执行 |
+| “等会儿向前走” | future plan | 只回复，不执行 |
+| “他说‘向前走一米’” | quotation | 只回复，不执行 |
+| “向前走一米再挥手” | multi command | 要求拆分，不批量下发 |
 
-调优时改 `turn_config.py` 的 `TurnConfig`(或设对应 `TURN_*` 环境变量)即可,不必动框架,也不必改 `web_ui_agent.py`。默认值不变。
+这种“speech act → domain/action”的拆分解决了仅按关键词把能力询问误当控制的问题。
 
----
+### 5.4 SemanticRouter：泛化层，不是执行层
 
-## 11. 配置体系
+`common.semantic_router.SemanticRouter` 使用独立、低温、短超时的 LLM 产生严格 schema：
 
-- **唯一配置文件 = 根目录 `.env`**(`python-dotenv` + `start.ps1` 自动加载注入进程环境)。清单见 `.env.example`。无 `config/` 目录(单应用 MVP 不需要)。
-- 代码里每个 `os.getenv("X", 默认)` 都带内置默认,`.env` 缺项也能跑。
-- 关键变量:`QWEN_*`(LLM)、`XIAOGE_STACK`/`STT_BACKEND`/`FUNASR_WS_URL`/`QWEN3_ASR_*`(STT 装配与后端)、`TTS_BACKEND`/`COSYVOICE_MODEL`/`COSYVOICE_VOICE`/`DASHSCOPE_API_KEY`/`BAILIAN_TTS_*`/`HTTP_TTS_URL`(TTS)、`TURN_*`(判停旋钮,见 `turn_config.py`)、`XIAOGE_KWS_*`(强打断)、`XIAOGE_ONLINE_INTERRUPT_*`(早打断)、`WEB_UI_PORT`(代码回退 8765,`.env`/`start.ps1` 用 8787)/`LIVEKIT_LOG_LEVEL`/`AGENT_TIMELINE`、`ASR_WS_CONNECT_TIMEOUT`/`BAILIAN_TTS_WARM_TTL`。
-- `models/`(KWS 模型)是**数据资产**,与配置分开;已 gitignore。
+- `speech_act`；
+- `domain`；
+- Registry 中的 `action`；
+- 受限 `slots`；
+- `confidence`、`ambiguous`、`answer_mode`。
 
----
+它具有以下硬边界：
 
-## 12. 二次开发指南:扩展点、风险、技术债
+- 调用时 `tools=[]`，不能执行工具或产生副作用；
+- 不能创建 `cmd_id`，也没有协议广播权限；
+- Pydantic 使用 strict schema 和 `extra="forbid"`；
+- 只接受“立即执行 + robot_control + 非歧义 + 高于阈值 + 已注册 action + 合法槽位”；
+- 被接受的结果仍通过 `G3IntentEngine.semantic_candidate()` 重新进入确定性 Validator；
+- 超时、HTTP 错误、非法 JSON/schema、低置信度、歧义、未知 action、额外槽位全部 fail closed；
+- `shadow` 模式只记录判断，不改变路由；`off` 完全关闭。
 
-### 12.1 扩展点
-- **加 STT/TTS 后端**:`providers/` 下加一个模块(继承 `stt.STT`/`tts.TTS`,复用
-  `providers.helpers`/`providers.config`),再在 `app/backends.py` 的注册表
-  (`STT_BACKENDS`/`TTS_BACKENDS`)补一行(key/tab_id/工厂)——面板 tab 由服务端按
-  注册表自动生成,`/api/{asr,tts}` 校验与构造走同一张表,**无需改 HTML**。
-- **调对话节奏**:`turn_config.py` 的 `TurnConfig`(或 `TURN_*` 环境变量)一处集中(判停/打断/endpointing/抢先/`unlikely_threshold`)。
-- **管线插桩**:`VoiceAgent` 重写 `stt_node/llm_node/tts_node/transcription_node`(已示范 `transcription_node` 与 `tts_node`)。
-- **打断策略**:KWS 的 `on_hit`、在线的 `on_text` 是注入点;停止词 `_STOP_WORDS`、热词 `_funasr_hotwords`、KWS 关键词 `XIAOGE_KWS_KEYWORDS` 均可配。
-- **新增观测/旁路**:再包一层 `session.input.audio` tap。
+因此语义模型提高的是自然表达的召回率，而不是扩大控制权限。对于 semantic 判断为
+media、knowledge、cloud 或 chat 的非执行轮次，系统把它交还普通 LLM/tool 链，而不是由分类
+模型回答。
 
-### 12.2 风险与坑(务必先读)
-1. **单进程单会话**:大量模块级全局(`_switchable_stt/_tts/_agent_loop/_web_loop/_tts_backend_key/_overlap_turn_state`),并发第二个 job 会互相串。要多会话需重构成会话级状态。
-2. **双事件循环**:跨界必须走对应的 `*_threadsafe`,否则跨循环崩溃;`broadcast()` 在 `_web_loop` 未起时静默 no-op。
-3. **音频丢弃陷阱**(§6.5):`should_discard` 卡住会“VAD 在动但不识别”。
-4. ~~**错误处理不对称**:STT 吞异常返回空、TTS 不吞。~~ **(已修,B 档)** STT 吞异常返回空;TTS 经 `SwitchableTTS` 转发后端 error 事件 + HTTP TTS 连接超时,切坏后端不崩、可恢复。
-5. **静音=返回空 final**(非静音),下游仍会“看到”空 turn。
-6. **后端切换仅下一句生效**;旧后端 `aclose()` 火忘,销毁错误不可见。
-7. **tap 透传是承载式不变量**:不 return 帧→变聋;output tap 不转发 clear_buffer→切不断播放。
-8. **KWS**:~~`KwsConfig()` 直接构造默认**关**~~ **(已修,C 档:dataclass 默认改 True,与 `from_env` 一致)**;模型文件名硬编码(`epoch-13-avg-2-chunk-8-left-64`)——换模型会静默失配,但已加注释说明且 `_unavailable_reason` 会记 "model files missing" 并降级(不崩);路径靠 `parents[2]`,挪文件深度会失效。
-9. **硬编码私网 IP + SSL 默认不校验**(`60.205.197.165`/`10.212.164.230`,`ws://`、`QWEN_VERIFY_SSL=false`)——换部署必须覆盖。
-10. **DashScope `api_key` 进程级全局**;多 key 会竞争。
-11. **技术债**:~~`_resample_to_pcm`/`_ensure_session` 重复;build 与 switch 构造逻辑重复;重复 `import threading`;死字段 `send_interval`~~ **(已清,A 档)**。`HttpStreamingTTS` 已补 `model` 属性(B 档)。**仍存**:`QwenStreamingTTS` 声明 `streaming=True` 但实为单次 commit(延迟≈非流式)——属实现策略,非缺陷。
-12. **继承的上游 CI/示例资产**:上游 `.github/workflows` 已删除;部分 `examples/`、`tests/` 依赖的音频是丢失的 LFS 指针(已移除),跑那些上游示例会缺素材。
+### 5.5 各业务域如何串联
 
-### 12.3 上手路径建议
-1. 先跑通:`setup.ps1` → `start_agent.cmd`,对照 `qwen_voice_turn_metrics.log` 看一轮 `TURN_USER`/`TURN_ASSISTANT`(需更详的 DEBUG 全量日志时设 `AGENT_TIMELINE=1`,落 `runs/<ts>/debug.log`)。
-2. 读 `web_ui_agent.py` 的 entrypoint + `turn_config.py` 的 `TurnConfig` + `on_user_turn_completed`(应用编排全在这)。
-3. 读 `custom_audio_providers.py` 你要改的那个 Provider。
-4. 打断改动前,务必先理解 §5 生命周期 + §6.5 音频丢弃 + 框架 `agent_activity.py`/`audio_recognition.py`。
-5. 深挖框架内核时,配合 `examples/voice_agents/qwen_voice_agent_code_guide.md`(注意 §10.4 的阈值对照)。
+| 业务域 | 入口与实现 | 输出/合流点 |
+| --- | --- | --- |
+| 指令控制 | G3 Registry 快路径；未决且 command-relevant 时可由 SemanticRouter 提候选，再经 G3 校验 | `data.cmd` → lifecycle；或固定 `data.reply` |
+| 音乐 | 确定性语音快路径；普通 LLM 的 `play_music`/`stop_music` tool | 两路共享一个 `MusicPlayer` 和同一 WS 音频输出 |
+| 产品知识 RAG | 普通 LLM 调 `query_knowledge`，查询真实 `KnowledgeIndex` | 命中块作为 LLM 上下文，再自然语言播报 |
+| G3 模板知识 | `_looks_like_knowledge()` → `knowledge_route` → `_rag_answer()` | 直接模板 `data.reply`，不是向量检索 |
+| 状态/信息查询 | G3 `info_query`/`cloud_tool_route` | 当前多为模板回复，真实设备状态覆盖有限 |
+| 普通聊天 | 前述路径均未消费 | 常规 LLM 流式生成 → TTS/字幕 |
+
+需要特别注意：G3 的 `_rag_answer()` 名字虽然带 RAG，但当前只是少量模板回答；真实向量 RAG
+位于 `app.knowledge_index.KnowledgeIndex`，通过 `query_knowledge` tool 使用。由于 G3 路径优先，
+两条知识路由目前有覆盖重叠，不能把所有 `knowledge_qa` 都理解成已调用向量库。
 
 ---
 
-## 13. 关键文件索引
+## 6. 指令控制闭环
 
-| 文件 | 职责 |
+### 6.1 协议与用户话术
+
+```mermaid
+sequenceDiagram
+    participant A as VoiceAgent/G3
+    participant B as Bridge + LifecycleTracker
+    participant D as 端侧客户端
+    participant S as AgentSession/TTS
+
+    A->>B: data.cmd(cmd_id, ack 800ms, result 3000ms)
+    B->>B: issue() 原子登记后才允许转发
+    B-->>D: data.cmd
+    A->>S: “好的，正在执行”
+
+    alt 端侧接受并成功
+      D-->>B: data.cmd_ack accepted
+      D-->>B: data.cmd_result running
+      D-->>B: data.cmd_result succeeded
+      B->>S: “执行成功”
+    else 拒绝、失败或取消
+      D-->>B: ack rejected 或 result failed/canceled/timeout
+      B->>S: “执行失败，请稍后再试！”
+    else ACK 或结果超时
+      B->>B: 100ms sweep 选定 failure
+      B->>S: “执行失败，请稍后再试！”
+    end
+
+    D-->>B: 重复、迟到、未知或身份不一致的回执
+    B->>B: 只审计，不重复播报
+```
+
+当前 G3 在命令帧中设置：
+
+- `ack_timeout_ms = 800`；
+- `result_timeout_ms = 3000`；
+- 唯一 `cmd_id`，以及 `trace_id/session_id/utterance_id` 身份组。
+
+`webpanel.bridge` 在转发前调用 `CommandLifecycleTracker.issue()`；重复 issue 不会二次下发。
+Worker 收到 `data.cmd_ack`/`data.cmd_result` 后调用 `accept_update()`，只有第一次选出的终态 outcome
+可以触发用户话术。成功对应“执行成功”；拒绝、失败、取消、协议 timeout、ACK timeout 或结果
+超时统一对应“执行失败，请稍后再试！”。
+
+### 6.2 exactly-once 终态语义
+
+`CommandLifecycleTracker` 以锁保护 record 与审计事件，处理：
+
+- 未知 `cmd_id` 或 trace/session/utterance 身份不一致 → `unknown`；
+- 相同状态重放 → `duplicate`；
+- 终态后冲突更新或超时后到达 → `late`；
+- `running` 只更新中间态，不播报终态；
+- `succeeded` 只选一次 success；
+- `failed/canceled/timeout` 或 deadline 只选一次 failure。
+
+这里的 exactly-once 指**单 Worker 生命周期内用户终态播报至多一次**，不是跨进程持久化事务。
+Worker 回收后内存 record 不保留；协议客户端也不应在新会话重放旧命令回执。
+
+---
+
+## 7. 音乐、RAG、聊天和查询
+
+### 7.1 音乐
+
+`app.music_player.MusicLibrary` 缓存扫描 `.mp3/.wav`，按随机、精确曲名、子串、
+`SequenceMatcher` 模糊匹配解析。`MusicPlayer` 用一个实时节流 task 解码并每 10 ms 推 PCM：
+
+- WAV 可直接解码，其他情况/MP3 通过 ffmpeg；
+- 复用 `WebSocketAudioOutput`，不建立第二条媒体连接；
+- TTS speaking 时暂停音乐，新播报结束后恢复；若状态回调丢失，有兜底 timer；
+- stop 取消 task，并只清音乐缓冲，避免破坏其他音频；
+- 确定性语音快路径和 LLM tools 操作同一个 player。
+
+当前策略是：音乐播放期间，非音乐用户轮次会被吞掉而不进入聊天，以避免音乐场景下的串音和
+并发回复。这是明确的产品策略/限制，不是通用多任务对话能力。
+
+### 7.2 真实向量 RAG
+
+`KnowledgeIndex` 的路径为：
+
+```text
+Markdown 语料
+  → 按一级标题与长度切块
+  → DashScope text-embedding-v3（每批最多 10 条）
+  → vectors.npy + knowledge.db + meta.json
+  → 查询向量与文档向量余弦相似度
+  → top_k + min_score
+  → KnowledgeHit 列表
+  → query_knowledge tool
+  → 普通 LLM 组织一到三句口语回复
+```
+
+索引在 Worker 启动时 best-effort 加载；没有持久化索引时不阻止 Worker READY，工具会明确返回
+未启用/未命中而不编造。`meta.json` mtime 变化会触发查询前热加载。`/knows` 管理路径可追加、
+列出、删除用户知识并 rebuild；多个 Worker 通过共享文件和 mtime 感知更新。
+
+### 7.3 普通聊天与工具
+
+只有未被前置确定性路径消费的轮次才进入 `AgentSession` 的普通 Qwen LLM。LLM 可调用已注册的
+音乐和知识工具，但没有直接创建 `data.cmd` 的工具。流式文本先经 `transcription_node()` 广播
+干净字幕，再经 `tts_node()` 去 Markdown 后合成音频。
+
+### 7.4 查询能力的当前边界
+
+- 产品知识查询已有真实向量 RAG，但可能被更早的 G3 模板知识路由截获。
+- `power.query`、泛化 `info_query` 等 G3 查询当前主要由 `_info_answer()` 生成固定回复。
+- SemanticRouter 的 `state_query/cloud_tool` 只是分类与委托信号，不代表已经接入完整设备状态 API。
+- 因此“查询”不能笼统描述成实时读取机器人状态；新增真实查询后端时，应保持 reply-only 与
+  command authority 分离。
+
+---
+
+## 8. STT、TTS 与全双工基础设施
+
+### 8.1 后端装配
+
+`app.backends` 是 STT/TTS 注册表和 LLM 工厂的主要入口：
+
+| 能力 | 当前实现 |
 | --- | --- |
-| `examples/voice_agents/web_ui_agent.py` | 主入口:VoiceAgent(人设+轮次钩子)+ entrypoint 编排(~300 行) |
-| `examples/voice_agents/app/backends.py` | STT/TTS 后端注册表+工厂+build_llm(扩展点单一来源) |
-| `examples/voice_agents/app/setup_taps.py` | entrypoint 装配函数:事件处理器/tap 链/测试仪表(SessionWiring) |
-| `examples/voice_agents/app/session_state.py` | `AppRuntime`:agent 侧共享状态(原模块级全局收敛) |
-| `examples/voice_agents/app/switchable.py` | SwitchableSTT/TTS 热切换代理 |
-| `examples/voice_agents/app/listening_host.py` | 聆听模式 host 助手(TTL/保护窗/退出尾巴/横幅) |
-| `examples/voice_agents/app/web_audio.py` | 浏览器 WebSocket 音频 I/O(WEB_AUDIO=1) |
-| `examples/voice_agents/webpanel/` | 控制面板:server(路由/处理器)、state、bridge(跨循环广播)、static/index.html |
-| `examples/voice_agents/common/` | 公共层:text_rules(停止词/附和)、config_utils(env)、runtime(指标日志)、taps(旁路基类) |
-| `examples/voice_agents/providers/` | STT/TTS 适配器包:stt/(funasr_offline·funasr_2pass·funasr_stream·qwen3·iflytek) + tts/(cosyvoice·bailian·qwen_stream·http) + config/helpers |
-| `examples/voice_agents/qwen_funasr_bailian_voice_agent.py` | 纯 console 版(无 Web UI)的同类 agent(复用 app.backends 工厂) |
-| `examples/voice_agents/kws_interrupt.py` | sherpa-onnx 本地关键词强打断 |
-| `examples/voice_agents/online_interrupt.py` | FunASR 2pass 在线早打断 |
-| `examples/voice_agents/audio_recorder.py` | 麦克风+TTS 混音录音 |
-| `examples/voice_agents/mute_gate.py` | `MuteGate`:输入源头静音=真关麦(关麦主机制) |
-| `examples/voice_agents/listening_mode.py` | `ListeningController`:聆听模式状态机 |
-| `examples/voice_agents/live_transcript.py` | `LiveTranscript`:Web 实时转写气泡驱动 |
-| `examples/voice_agents/text_sanitizer.py` | `sanitize_stream`/`strip_markdown`:净化 tts_node/transcription_node |
-| `examples/voice_agents/turn_config.py` | `TurnConfig`:判停旋钮集中(`TURN_*` env 覆盖) |
-| `examples/voice_agents/qwen_voice_agent_code_guide.md` | 源码级框架导读(阈值见 §10.4 对照) |
-| `livekit-agents/livekit/agents/voice/agent_session.py` | 会话容器、音频转发 |
-| `livekit-agents/livekit/agents/voice/agent_activity.py` | 活动状态机、`push_audio`/`should_discard`、打断决策 |
-| `livekit-agents/livekit/agents/voice/audio_recognition.py` | VAD/STT 管线、判停、抢先生成 |
-| `livekit-agents/livekit/agents/stt/stream_adapter.py` | 非流式 STT 的 VAD 切片适配器 |
-| `livekit-agents/livekit/agents/cli/cli.py` | console 模式、本地音频 I/O、AEC |
-| `livekit-plugins/livekit-plugins-turn-detector/` | 多语判停 EOU 模型 |
-| `livekit-plugins/livekit-plugins-silero/` | Silero VAD |
-| `setup.ps1` / `start_agent.cmd` / `stop_agent.cmd` / `RUN.md` / `.env.example` | 本地构建/启停/配置 |
+| 普通 LLM | OpenAI-compatible Qwen client，关闭 thinking，普通对话温度 |
+| 语义 LLM | 独立 client，温度 0、短 timeout、小 token 上限、无 tools |
+| STT | FunASR offline、Qwen3 offline/stream 等注册后端；另有 optimized FunASR/讯飞流式栈 |
+| TTS | CosyVoice、Qwen、HTTP streaming，可通过 `SwitchableTTS` 切换 |
+| VAD/EOU | 本地 Silero VAD + Multilingual turn detector |
+
+增加注册式 STT/TTS 后端时，在 `providers/` 实现统一接口，并更新 `app.backends.STT_BACKENDS`
+或 `TTS_BACKENDS`。是否能在当前会话热切换取决于它是否经过 `SwitchableSTT/TTS`；optimized
+流式 STT 不走 `SwitchableSTT`，切换需重启。
+
+### 8.2 性能与失败语义
+
+主要低延迟手段包括持久/预热 ASR 连接、流式或按句 TTS、preemptive generation、LLM 关闭
+thinking、连接池和短 endpointing。实际端到端耗时仍由 VAD 静默窗、STT final、EOU、LLM TTFT、
+TTS TTFB 和播放调度共同组成，不能只看模型接口耗时。
+
+外部语义 LLM 超时或 5xx 不会放行控制；知识 embedding/索引缺失不会阻止会话启动；可切换 STT
+后端异常按空结果降级，避免杀死整条识别流。故障是否“可恢复”应按各适配器和测试契约判断，
+不能假设所有外部模型都有相同重试策略。
+
+---
+
+## 9. 线程、事件循环与旁路
+
+部署 Worker 不是单线程单循环。关键执行边界如下：
+
+| 执行单元 | 主要工作 | 跨界方式 |
+| --- | --- | --- |
+| Gateway asyncio loop | 外部 HTTP/WSS、代理 pump、token/affinity | aiohttp task |
+| Pool control/manager | 控制 API、Pool 状态和 poll thread | `RLock` + reaper daemon thread |
+| LiveKit job loop | `AgentSession`、路由、STT/TTS 协程、tools | Worker 内主业务 loop |
+| WebPanel loop | Worker-local HTTP/WS、协议解析、timeout sweep | 独立 daemon thread + loop |
+| Agent ↔ Web bridge | 下发帧、状态和手工文本 | `run_coroutine_threadsafe` / `call_soon_threadsafe` |
+| KWS/SDK/音频线程 | sherpa 解码、同步 SDK、PortAudio 回调 | queue/event + thread-safe callback |
+| QA writer | JSONL 批量追加 | 有界 queue + daemon thread |
+| 录音/ffmpeg | 文件收尾、音乐/转码子进程 | `to_thread` 或 subprocess |
+
+两条纪律必须保持：
+
+1. 不在 WebPanel loop 直接 `await` 属于 Agent loop 的协程；
+2. 不在 PoolManager 锁内做 `kill().wait()`、网络调用或长时间文件操作。
+
+`webpanel.bridge.broadcast()` 在 Web loop 尚未就绪时可能 no-op；控制指令以它的布尔返回判断是否
+真正登记并下发，失败时播报执行失败而不是假装已执行。
+
+---
+
+## 10. 安全边界与关键不变量
+
+### 10.1 外部与内部网络边界
+
+- Gateway 是唯一外部 TLS 入口；Pool control API 和 Worker WebPanel 端口只绑定 loopback。
+- `/create_session`、无 cookie 的直接协议 `/ws/audio` 和 `/knows` 都经过 `ApiKeyStore`；
+  `XG_API_KEY_REQUIRED=1` 时必须命中有效 key，兼容/观察模式下则记录但放行。浏览器页面入口
+  可另外启用访问口令。
+- 亲和 cookie 使用 HMAC，并设置 HttpOnly、SameSite；TLS 下设置 Secure。
+- access token 绑定一个已分配会话；重复 `/ws/session` 被拒绝。
+- Gateway 限制消息速率和帧大小，错误响应避免返回内部端口/进程拓扑。
+
+### 10.2 业务不变量
+
+1. **一条云会话独占一个一次性 Worker**，会话结束后回收进程而非复用内存状态。
+2. **Gateway 不直接 spawn**；Pool Manager 是进程生命周期唯一所有者。
+3. **同端口补位必须在旧进程确认退出后发生**。
+4. **G3 Registry + Validator 是 `data.cmd` 的唯一授权边界**。
+5. **SemanticRouter 和普通 LLM 都不能直接发命令**。
+6. **P0 一轮只允许一个控制动作**；多动作要求用户拆分。
+7. **reply-only 意图永远不创建 `cmd_id`**。
+8. **命令终态对用户至多播报一次**；未知、重复和迟到回执只审计。
+9. **音乐两种入口共享同一个 player**，避免重复媒体状态机。
+10. **知识管理不走 alloc/release**，避免管理请求清空 Worker Pool。
+11. **部署日志路径由 Worker 启动环境决定**，不能被复制来的 `.env` 改到其他部署。
+12. **失败默认不扩大权限**：Pool/semantic/schema/capability 失败都不应转化成控制执行。
+
+### 10.3 高风险命令
+
+Registry 已为 reboot/shutdown 等动作定义“确认后下发”。但当前 `VoiceAgent` 每轮新建的
+`SessionState` 没有持久保存 `pending_high_risk`，因此跨轮确认闭环尚不完整；当前运行效果通常是
+先要求确认，但下一轮无法恢复待确认命令。补齐前不能把高风险确认描述为已完整落地的安全能力。
+
+---
+
+## 11. 配置、日志与可观测性
+
+### 11.1 配置
+
+根 `.env` 是应用配置入口，`.env.example` 是变量清单。`env_bootstrap.py` 在自有模块 import 前
+调用 `load_dotenv(..., override=True)`，所以部署启动器需要对不可被复制 `.env` 覆盖的值使用更高
+优先级变量。
+
+配置域大致分为：
+
+- `XG_*`：Gateway、Pool 大小/端口/转码等部署控制；
+- `XIAOGE_*`：语义路由、录音、KWS、知识库、音乐和会话行为；
+- `QWEN_*`、`DASHSCOPE_*`、各 ASR/TTS URL：模型后端；
+- `TURN_*`：VAD、endpointing、打断和抢先生成；
+- `WEB_UI_*`：Worker-local WebPanel。
+
+实际名称和默认值应从 `.env.example`、`gateway.config.GatewayConfig`、
+`poolmgr.launcher.PoolLaunchConfig` 及相应 `from_env()` 读取，不在架构文档复制完整清单。
+
+### 11.2 日志与录音
+
+- `TURN_METRICS_LOG`：按 Worker/进程标识区分的轮次指标日志；
+- `QA_LOG`/`XIAOGE_DEPLOY_QA_LOG`：每个部署共享一个基名，按本地日期生成
+  `<基名 stem>_YYYYMMDD<原后缀>`（默认是 `qwen_voice_qa_YYYYMMDD.log`）；文件内容为
+  JSONL，记录可含 `process` 字段区分 Worker；
+- `QAPairLog`：按正常 `AgentSession` conversation item 将 final user 与后续 assistant 配对；
+- timeline/recording：按运行配置写审计事件和会话录音，进程退出后再转码。
+
+`poolmgr.manager.default_agent_env()` 同时注入 `QA_LOG` 与优先级更高的
+`XIAOGE_DEPLOY_QA_LOG`。这是为了抵抗 `load_dotenv(override=True)` 从复制部署读到陈旧路径，保证
+不同部署不会共同写入另一个目录。
+
+限制：手工 `data.text` 的确定性快路径可以直接广播/`session.say()`，未必形成普通
+AgentSession user/assistant item 对，因此当前不能保证每个手工文本轮次都进入 QA 配对日志。
+
+---
+
+## 12. 当前限制与技术债
+
+| 项 | 当前影响 |
+| --- | --- |
+| Pool 耗尽 | Gateway 最长等待约 15 秒后 503；没有持久排队或预约机制 |
+| 一次性 Worker 冷启动 | release 后到替补 READY 期间可用容量下降 |
+| 待连接会话抢占 | 资源紧张时 forced cleanup 可能释放已创建但尚未建 WS 的会话 |
+| 外部 semantic 服务 | 可能 5xx/timeout；当前安全降级，但自然指令召回下降 |
+| 高风险确认 | `pending_high_risk` 尚未跨轮持久化，确认闭环不完整 |
+| 两套知识路由 | G3 模板知识可能先于真实向量 RAG 命中，行为不统一 |
+| 状态/云查询 | 多数仍是模板或委托信号，真实设备状态 API 覆盖不足 |
+| 音乐中对话 | 非音乐轮次被吞掉，不支持边播音乐边正常聊天 |
+| QA 配对 | 手工 `data.text` 快路径不保证产生标准 conversation item |
+| Worker 编排复杂度 | `web_ui_agent.py` 仍聚合较多跨域仲裁，新增域需谨慎维护优先级 |
+| 内存态 exactly-once | 命令 record 不跨 Worker 持久化，不是分布式事务语义 |
+| 旧/新协议并存 | `/ws/audio` cookie 宽限与 `/ws/session` 即断即释放语义不同，联调时易混淆 |
+
+这些是当前事实边界。目标态讨论可参考
+[DUPLEX_CONTROL_QUERY_ARCHITECTURE.md](../design/DUPLEX_CONTROL_QUERY_ARCHITECTURE.md)，但实施前仍须
+重新对照当前代码和协议契约。
+
+---
+
+## 13. 面向任务的代码阅读路线
+
+### 13.1 主线阅读顺序
+
+1. **外部入口与会话所有权**
+   - `examples/voice_agents/gateway/main.py`：`create_session()`、`_serve_ws_session()`、
+     `knows_api()`、`_sweep_loop()`；
+   - `gateway/affinity.py`：`Session`、`AffinityTable`；
+   - `gateway/proxy.py`：`handle_ws_session()`、旧音频重连 pump。
+2. **Pool 与一次性进程**
+   - `poolmgr/launcher.py`：生产配置和启动；
+   - `poolmgr/manager.py`：`alloc()`、`release()`、`_recycle()`、`_reap_work()`、`poll_once()`；
+   - `poolmgr/control_api.py`：Gateway/Pool 职责边界。
+3. **Worker 协议入口与跨循环桥**
+   - `webpanel/server.py`：Worker `/create_session`、`/ws/session` 和协议帧处理；
+   - `webpanel/bridge.py`：`broadcast()` 与 `data.cmd` 登记/转发。
+4. **语音应用编排**
+   - `web_ui_agent.py`：`entrypoint()`、`VoiceAgent.on_user_turn_completed()`、
+     `_apply_turn_filters()`、`_g3_frames()`、`_semantic_frames()`；
+   - `app/setup_taps.py`：session events 和 tap 装配。
+5. **意图与控制授权**
+   - `common/g3_intent.py`：Registry、`route()`、`validate()`、`build_outputs()`；
+   - `common/semantic_router.py`：严格 schema、LLM 调用与 fail-closed 分类。
+6. **业务工具**
+   - `app/music_player.py`、`app/knowledge_index.py`、`app/backends.py`；
+   - `web_ui_agent.VoiceAgent.play_music()`、`stop_music()`、`query_knowledge()`。
+7. **命令闭环和协议契约**
+   - `webpanel/command_lifecycle.py`；
+   - R5.2.2 schema 和 §14 的测试。
+8. **底层语音框架（需要时）**
+   - `livekit-agents/livekit/agents/voice/agent_session.py`；
+   - `voice/agent_activity.py`、`voice/audio_recognition.py`；
+   - `stt/stream_adapter.py`。
+
+### 13.2 最短排障路径
+
+| 问题 | 优先阅读/检查 |
+| --- | --- |
+| `/create_session` 慢或 503 | `gateway.main.create_session/_alloc_after_cleanup` → Pool `/status` → `PoolManager.poll_once/_reap_work` → Worker healthz/启动日志 |
+| WS 建连后立即断 | Gateway token/duplicate 分支 → `gateway.proxy.handle_ws_session` → Worker `webpanel.server` Bearer/schema 校验 |
+| VAD 在动但没有识别 | `setup_stt`/主 STT → tap 是否透传 → `AgentActivity.push_audio` 的 skip/discard → 后端连接日志 |
+| 自然指令未识别 | `_apply_turn_filters` → G3 `route()` → `command_relevant()` → SemanticRouter 状态/阈值/timeout → `semantic_candidate()` |
+| 能力询问误执行 | G3 `_non_execution_act()` 与 `build_outputs()` 的 `intent_type` 守卫 → semantic speech_act |
+| 命令已下发但没结果播报 | bridge `issue()` → 端侧 ACK/result 身份组 → `CommandLifecycleTracker` audit → Worker 100ms timeout sweep |
+| RAG 没结果 | 是否被 G3 模板先截获 → `query_knowledge` 是否调用 → `KnowledgeIndex.is_ready/_load/query` → embedding key、索引 mtime、min_score |
+| 音乐找不到或不出声 | `_music_control_intent` → `MusicLibrary.resolve` → ffmpeg/WAV 解码 → TTS pause/resume → Web audio output |
+| 日志写到错误部署 | Worker 环境中的 `XIAOGE_DEPLOY_QA_LOG` → `common.qa_log.QA_LOG` → `default_agent_env()` 推导的 run_dir |
+| 手工文本无 QA 记录 | `handle_manual_text()` 是否走确定性快路径 → `setup_taps` conversation item handlers → `QAPairLog` |
+
+---
+
+## 14. 可执行架构契约
+
+静态文档只解释设计；以下测试锁定当前关键行为，改架构时应同步阅读和运行：
+
+| 契约 | 代表测试 |
+| --- | --- |
+| Pool 状态机、锁外回收、同端口补位、部署日志 env | `tests/test_ours_concurrency_b_manager.py` |
+| Pool 控制 API 与 Gateway client 安全默认 | `tests/test_ours_concurrency_b_control_api.py`、`test_ours_concurrency_c_poolclient.py` |
+| affinity、代理和 Gateway 会话集成 | `tests/test_ours_concurrency_c_affinity.py`、`test_ours_concurrency_c_proxy.py`、`test_ours_concurrency_c_main.py`、`test_ours_concurrency_d_integration.py` |
+| Pool 启动配置 | `tests/test_ours_concurrency_poolmgr_launcher.py` |
+| G3 控制/查询/RAG 模板与言语行为 | `tests/test_ours_g3_intent_command_rag.py`、`test_ours_g3_x3_skill_commands.py` |
+| SemanticRouter schema、阈值和 fail closed | `tests/test_ours_g3_semantic_router.py` |
+| R5.2.2 WS 与命令 ACK/result/timeout | `tests/test_ours_g3_ws_session_protocol.py` |
+| 音乐解析、播放与在线打断协调 | `tests/test_ours_music_player.py`、`test_ours_music_voice_controls.py`、`test_ours_online_interrupt_music.py` |
+| 向量知识库 | `tests/test_ours_knowledge.py` |
+| QA JSONL 与部署路径优先级 | `tests/test_ours_qa_log.py` |
+
+常用命令见 [RUN.md](RUN.md) 和仓库根 `AGENTS.md`；本仓库统一使用 `uv`。文档改动至少应执行
+链接/路径检查和 `git diff --check`，运行时代码改动还应选择上述聚焦测试，并按
+[CODE_GUIDELINES.md](../project/CODE_GUIDELINES.md) 运行自有代码检查。
+
+---
+
+## 15. 相关文档
+
+- [运行指南](RUN.md)：安装、配置、启动和运维命令；
+- [客户端接入](CLIENT_INTEGRATION.md)：R5.2.2 WS 端点、音频和消息协议；
+- [自有代码规范](../project/CODE_GUIDELINES.md)：包职责、文件/函数规模和检查命令；
+- [全双工 + 控制 + 查询设计背景](../design/DUPLEX_CONTROL_QUERY_ARCHITECTURE.md)：目标态和设计原则，
+  **不是当前实现清单**；
+- [指令技能设计](../design/command-auth/COMMAND_SKILLS_DESIGN.md) 与
+  [运行时补充规格](../design/command-auth/COMMAND_SKILLS_RUNTIME_SPEC.md)：评审/设计背景；
+- `examples/voice_agents/qwen_voice_agent_code_guide.md`：LiveKit 语音内核源码导读。
+
+`docs/diagrams/architecture.svg` 与 `sequence-turn.svg` 是早期本地语音架构快照，可用于理解基础
+语音链路；云 Gateway、Pool、G3/Semantic 与命令闭环以本文内嵌 Mermaid 和当前代码为准。

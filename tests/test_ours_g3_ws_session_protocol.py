@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Any
@@ -63,8 +64,9 @@ sys.modules.setdefault(
 )
 
 import app.web_audio as web_audio  # noqa: E402
+import webpanel.bridge as web_bridge  # noqa: E402
 import webpanel.server as web_server  # noqa: E402
-from app.session_state import runtime  # noqa: E402
+from app.session_state import COMMAND_SUCCESS, runtime  # noqa: E402
 from app.web_audio import WebSocketAudioOutput  # noqa: E402
 from common.g3_intent import G3IntentEngine, SessionState  # noqa: E402
 from gateway import affinity as af, main as gwmain  # noqa: E402
@@ -201,6 +203,32 @@ def test_ws_audio_output_drops_stale_pcm_immediately_after_clear(monkeypatch) ->
     asyncio.run(_main())
 
 
+def test_ws_audio_output_allows_fresh_pcm_after_music_clear(monkeypatch) -> None:
+    sent_audio: list[bytes] = []
+    sent_ctrl: list[dict] = []
+    monkeypatch.setenv("XIAOGE_CLEAR_SUPPRESS_TAIL_MS", "1000")
+    monkeypatch.setattr(web_audio, "broadcast_audio", sent_audio.append)
+    monkeypatch.setattr(web_audio, "broadcast_audio_ctrl", sent_ctrl.append)
+
+    async def _main() -> None:
+        output = WebSocketAudioOutput(None)
+        frame = rtc.AudioFrame(
+            data=b"\x01\x02" * 160,
+            sample_rate=16_000,
+            num_channels=1,
+            samples_per_channel=160,
+        )
+
+        await output.capture_frame(frame)
+        output.clear_music_buffer()
+        await output.capture_frame(frame)
+
+        assert sent_ctrl == [{"type": "clear"}]
+        assert sent_audio == [b"\x01\x02" * 160, b"\x01\x02" * 160]
+
+    asyncio.run(_main())
+
+
 def test_webpanel_ws_session_rejects_missing_bearer() -> None:
     async def _main() -> None:
         server = TestServer(build_web_app(admin_routes=False, web_audio=True))
@@ -233,9 +261,7 @@ def test_webpanel_ws_session_is_bearer_only_and_supports_header_reconnect() -> N
                 session = await response.json()
                 token = session["access_token"]
 
-                query_only = await client.ws_connect(
-                    f"{base_url}/ws/session?access_token={token}"
-                )
+                query_only = await client.ws_connect(f"{base_url}/ws/session?access_token={token}")
                 assert (await query_only.receive()).type == aiohttp.WSMsgType.CLOSE
                 assert query_only.close_code == 4401
 
@@ -262,9 +288,7 @@ def test_webpanel_ws_session_is_bearer_only_and_supports_header_reconnect() -> N
                 await first.close()
                 await asyncio.sleep(0.01)
 
-                reconnected = await client.ws_connect(
-                    f"{base_url}/ws/session", headers=headers
-                )
+                reconnected = await client.ws_connect(f"{base_url}/ws/session", headers=headers)
                 await reconnected.send_str(json.dumps(hello, ensure_ascii=False))
                 assert json.loads((await reconnected.receive()).data)["type"] == "ctrl.ready"
                 await reconnected.close()
@@ -273,6 +297,92 @@ def test_webpanel_ws_session_is_bearer_only_and_supports_header_reconnect() -> N
                 assert debug_route.status == 404
         finally:
             await server.close()
+
+    asyncio.run(_main())
+
+
+def test_bridge_preserves_and_correlates_user_turn_identity() -> None:
+    web_bridge._fallback_turn_id = None
+
+    explicit_partial = web_bridge._to_session_frames(
+        {"type": "user_partial", "text": "one", "utterance_id": "utt-explicit"}
+    )[0]
+    explicit_final = web_bridge._to_session_frames(
+        {
+            "type": "message",
+            "role": "user",
+            "text": "one final",
+            "utterance_id": "utt-explicit",
+        }
+    )[0]
+    assert explicit_partial["utterance_id"] == "utt-explicit"
+    assert explicit_final["utterance_id"] == "utt-explicit"
+    assert explicit_partial["final"] is False
+    assert explicit_final["final"] is True
+
+    legacy_partial_msg = {"type": "user_partial", "text": "legacy one"}
+    legacy_partial = web_bridge._to_session_frames(legacy_partial_msg)[0]
+    legacy_final_msg = {"type": "message", "role": "user", "text": "legacy final"}
+    legacy_final = web_bridge._to_session_frames(legacy_final_msg)[0]
+    next_final = web_bridge._to_session_frames(
+        {"type": "message", "role": "user", "text": "next final"}
+    )[0]
+
+    legacy_id = legacy_partial["utterance_id"]
+    assert legacy_id
+    assert legacy_partial_msg["utterance_id"] == legacy_id
+    assert legacy_final_msg["utterance_id"] == legacy_id
+    assert legacy_final["utterance_id"] == legacy_id
+    assert next_final["utterance_id"] != legacy_id
+
+
+def test_bridge_explicit_final_clears_stale_legacy_fallback() -> None:
+    web_bridge._fallback_turn_id = None
+    stale = web_bridge._to_session_frames({"type": "user_partial", "text": "legacy"})[0][
+        "utterance_id"
+    ]
+    explicit = web_bridge._to_session_frames(
+        {
+            "type": "message",
+            "role": "user",
+            "text": "authoritative",
+            "utterance_id": "utt-authoritative",
+        }
+    )[0]
+    following = web_bridge._to_session_frames(
+        {"type": "message", "role": "user", "text": "following"}
+    )[0]
+
+    assert explicit["utterance_id"] == "utt-authoritative"
+    assert following["utterance_id"] not in {stale, "utt-authoritative"}
+
+
+def test_bridge_translates_user_turn_once_for_all_session_recipients() -> None:
+    class Recipient:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def send_str(self, data: str) -> None:
+            self.messages.append(data)
+
+    async def _main() -> None:
+        first = Recipient()
+        second = Recipient()
+        previous = panel.session_ws_clients
+        panel.session_ws_clients = {first, second}  # type: ignore[assignment]
+        web_bridge._fallback_turn_id = None
+        try:
+            message = {"type": "user_partial", "text": "shared"}
+            wire_messages = web_bridge._to_session_messages(message)
+            await web_bridge._ws_session_broadcast(wire_messages)
+        finally:
+            panel.session_ws_clients = previous
+
+        assert message["utterance_id"]
+        assert first.messages == second.messages
+        assert {json.loads(data)["utterance_id"] for data in first.messages} == {
+            message["utterance_id"]
+        }
 
     asyncio.run(_main())
 
@@ -291,9 +401,34 @@ def test_webpanel_debug_demo_requires_user_key_and_uses_isolated_route() -> None
                 assert 'id="apiKeyInput"' in html
                 assert "var DEMO_QUERY_TOKEN_ENABLED=true;" in html
                 assert "DEFAULT_RUOYI_API_KEY" not in html
-                assert "localStorage" not in html
+                assert "xiaoge.webpanel.ruoyi_api_key.v1" in html
+                assert "localStorage.getItem(RUOYI_API_KEY_STORE)" in html
+                assert "localStorage.setItem(RUOYI_API_KEY_STORE, value)" in html
+                assert "localStorage.removeItem(RUOYI_API_KEY_STORE)" in html
                 assert "params.get('apikey')" not in html
+                assert "location.search" not in html
+                assert "location.hash" not in html
                 assert "/debug/ws/session?access_token=" in html
+                assert "simulateEndpointCommand(m);" in html
+                assert "type:'data.cmd_ack'" in html
+                assert "status:'accepted'" in html
+                assert "type:'data.cmd_result'" in html
+                assert "command.action==='gesture.perform'" in html
+                assert "gesture==='laugh' || gesture==='cry'" in html
+                assert "failed ? 'failed' : 'succeeded'" in html
+                assert "}, 1000);" in html
+                assert "ws===socket && protoSession===session" in html
+                assert "activeAttempt===attempt && !attempt.disposed" in html
+                assert "attempt.session=await createProtocolSession()" in html
+                assert "var socket=attempt.ws" in html
+                assert "socket.readyState===WebSocket.OPEN && !muted" in html
+                assert "location.reload" not in html
+                assert "setTimeout(conn" not in html
+                assert "setTimeout(function(){conn" not in html
+                assert "连接失败，点击重试" in html
+                assert "finalizedUserTurns[key]" in html
+                assert "if(finalizedUserTurns[key]) return" in html
+                assert "USER_TURN_ALIAS_LIMIT=384" in html
 
                 response = await client.post(
                     f"{base_url}/create_session", json=_create_session_payload()
@@ -420,9 +555,7 @@ def test_gateway_create_session_exchanges_ruoyi_apikey_for_xiaoge_token() -> Non
         agent_app.router.add_post("/create_session", create_session)
         agent = TestServer(agent_app)
         await agent.start_server()
-        cfg = GatewayConfig(
-            hmac_secret="s", api_key_required=True, api_keys_static="ruoyi-api-key"
-        )
+        cfg = GatewayConfig(hmac_secret="s", api_key_required=True, api_keys_static="ruoyi-api-key")
         table = af.AffinityTable(grace_seconds=10.0, secret=cfg.hmac_secret)
         proxy = Proxy(cfg, table)
         pool = FakePool(agent.port)
@@ -562,9 +695,7 @@ def test_gateway_ws_session_rejects_query_and_injects_bearer_upstream() -> None:
                 )
                 session = await response.json()
                 token = session["access_token"]
-                query_only = await client.ws_connect(
-                    f"{base_url}/ws/session?access_token={token}"
-                )
+                query_only = await client.ws_connect(f"{base_url}/ws/session?access_token={token}")
                 assert (await query_only.receive()).type == aiohttp.WSMsgType.CLOSE
                 assert query_only.close_code == 4401
 
@@ -590,9 +721,7 @@ def test_gateway_ws_session_rejects_query_and_injects_bearer_upstream() -> None:
                 )
                 assert (await ws.receive()).type == aiohttp.WSMsgType.CLOSE
                 assert ws.close_code == 4400
-                assert upstream_requests == [
-                    {"authorization": f"Bearer {token}", "query": ""}
-                ]
+                assert upstream_requests == [{"authorization": f"Bearer {token}", "query": ""}]
         finally:
             await proxy.aclose()
             await gateway.close()
@@ -702,7 +831,9 @@ def test_gateway_ws_session_duplicate_closes_4009_without_releasing_owner() -> N
         base_url = f"http://127.0.0.1:{gateway.port}"
         try:
             async with aiohttp.ClientSession() as client:
-                response = await client.post(f"{base_url}/create_session", json=_create_session_payload())
+                response = await client.post(
+                    f"{base_url}/create_session", json=_create_session_payload()
+                )
                 assert response.status == 200
                 session = await response.json()
                 headers = {"Authorization": f"Bearer {session['access_token']}"}
@@ -869,9 +1000,7 @@ def test_webpanel_merged_ws_multi_command_is_ask_split_reply_only() -> None:
         await server.start_server()
         panel.web_loop = asyncio.get_running_loop()
         try:
-            client, ws, created = await _open_session(
-                f"http://127.0.0.1:{server.port}"
-            )
+            client, ws, created = await _open_session(f"http://127.0.0.1:{server.port}")
             session_info.update(created)
             try:
                 await ws.send_str(
@@ -974,14 +1103,22 @@ def test_webpanel_merged_ws_receives_binary_and_data_cmd_frames() -> None:
                     "action": "navigation.move",
                     "params": {"direction": "forward", "distance_cm": 100},
                     "risk_level": "medium",
-                    "ack_timeout_ms": 800,
-                    "result_timeout_ms": 5000,
+                    "ack_timeout_ms": 3000,
+                    "result_timeout_ms": 3000,
                     "issued_at_ms": 1789000001000,
                 }
                 audit_start = len(panel.command_lifecycle.audit_events)
-                broadcast({"type": "g3_protocol", "frames": [frame], "dry_run": True})
+                assert broadcast({"type": "g3_protocol", "frames": [frame], "dry_run": False})
                 received = json.loads((await ws.receive()).data)
                 assert received == frame
+                assert not broadcast({"type": "g3_protocol", "frames": [frame], "dry_run": False})
+                assert not broadcast(
+                    {
+                        "type": "g3_protocol",
+                        "frames": [{**frame, "cmd_id": "cmd-x3-dry-run"}],
+                        "dry_run": True,
+                    }
+                )
 
                 ack = {
                     "type": "data.cmd_ack",
@@ -1020,6 +1157,7 @@ def test_webpanel_merged_ws_receives_binary_and_data_cmd_frames() -> None:
                 lifecycle_events = panel.command_lifecycle.audit_events[audit_start:]
                 assert [event["event"] for event in lifecycle_events] == [
                     "issued",
+                    "duplicate_issue",
                     "ack",
                     "result",
                     "result",
@@ -1050,6 +1188,157 @@ def test_webpanel_merged_ws_receives_binary_and_data_cmd_frames() -> None:
     asyncio.run(_main())
 
 
+def _lifecycle_command(*, cmd_id: str = "cmd-lifecycle", result_timeout_ms: int = 3000):
+    return {
+        "type": "data.cmd",
+        "trace_id": "trace-lifecycle",
+        "session_id": "sess-lifecycle",
+        "utterance_id": "utt-lifecycle",
+        "cmd_id": cmd_id,
+        "ack_timeout_ms": 3000,
+        "result_timeout_ms": result_timeout_ms,
+        "issued_at_ms": 1000,
+    }
+
+
+def _lifecycle_frame(command: dict, *, typ: str, status: str) -> dict:
+    return {
+        "type": typ,
+        "trace_id": command["trace_id"],
+        "session_id": command["session_id"],
+        "utterance_id": command["utterance_id"],
+        "cmd_id": command["cmd_id"],
+        "status": status,
+    }
+
+
+def test_command_lifecycle_registration_replaces_stale_intent_time() -> None:
+    tracker = CommandLifecycleTracker()
+    command = _lifecycle_command(cmd_id="cmd-stale-issued-at")
+    command["issued_at_ms"] = 1
+
+    assert tracker.issue(command, now_ms=10_000)
+    assert command["issued_at_ms"] == 10_000
+    accepted = tracker.accept_update(
+        _lifecycle_frame(command, typ="data.cmd_ack", status="accepted"), now_ms=12_999
+    )
+    succeeded = tracker.accept_update(
+        _lifecycle_frame(command, typ="data.cmd_result", status="succeeded"), now_ms=13_000
+    )
+
+    assert (accepted.lifecycle, accepted.outcome) == ("accepted", None)
+    assert (succeeded.lifecycle, succeeded.outcome) == ("accepted", "success")
+
+
+def test_command_lifecycle_duplicate_issue_does_not_refresh_deadline() -> None:
+    tracker = CommandLifecycleTracker()
+    command = _lifecycle_command(cmd_id="cmd-no-refresh", result_timeout_ms=500)
+    command["ack_timeout_ms"] = 500
+
+    assert tracker.issue(command, now_ms=1000)
+    assert not tracker.issue(command, now_ms=1400)
+    expired = tracker.expire(now_ms=1501)
+
+    assert [event["event"] for event in expired] == ["delivery_timeout"]
+
+
+def test_command_lifecycle_outcomes_are_exactly_once_at_three_second_boundary() -> None:
+    tracker = CommandLifecycleTracker()
+    command = _lifecycle_command()
+    assert tracker.issue(command, now_ms=1000)
+    accepted = _lifecycle_frame(command, typ="data.cmd_ack", status="accepted")
+    running = _lifecycle_frame(command, typ="data.cmd_result", status="running")
+    succeeded = _lifecycle_frame(command, typ="data.cmd_result", status="succeeded")
+
+    assert tracker.accept_update(accepted, now_ms=1100).outcome is None
+    assert tracker.accept_update(running, now_ms=1200).outcome is None
+    success = tracker.accept_update(succeeded, now_ms=4000)
+    assert (success.lifecycle, success.outcome) == ("accepted", "success")
+    duplicate = tracker.accept_update(succeeded, now_ms=4001)
+    assert (duplicate.lifecycle, duplicate.outcome) == ("duplicate", None)
+    contradiction = tracker.accept_update({**succeeded, "status": "failed"}, now_ms=4002)
+    assert (contradiction.lifecycle, contradiction.outcome) == ("late", None)
+    assert tracker.expire(now_ms=5000) == []
+
+
+def test_command_lifecycle_late_success_yields_one_failure_before_sweep() -> None:
+    tracker = CommandLifecycleTracker()
+    command = _lifecycle_command()
+    tracker.issue(command, now_ms=1000)
+    tracker.accept_update(
+        _lifecycle_frame(command, typ="data.cmd_ack", status="accepted"), now_ms=1100
+    )
+    succeeded = _lifecycle_frame(command, typ="data.cmd_result", status="succeeded")
+
+    late = tracker.accept_update(succeeded, now_ms=4001)
+    assert (late.lifecycle, late.outcome) == ("late", "failure")
+    repeated = tracker.accept_update(succeeded, now_ms=4002)
+    assert (repeated.lifecycle, repeated.outcome) == ("late", None)
+    assert tracker.expire(now_ms=5000) == []
+
+
+def test_command_lifecycle_terminal_failures_settle_once() -> None:
+    for status in ("failed", "canceled", "timeout"):
+        tracker = CommandLifecycleTracker()
+        command = _lifecycle_command(cmd_id=f"cmd-{status}")
+        tracker.issue(command, now_ms=1000)
+        failed = tracker.accept_update(
+            _lifecycle_frame(command, typ="data.cmd_result", status=status), now_ms=1200
+        )
+        assert (failed.lifecycle, failed.outcome) == ("accepted", "failure")
+        repeated = tracker.accept_update(
+            _lifecycle_frame(command, typ="data.cmd_result", status=status), now_ms=1201
+        )
+        assert (repeated.lifecycle, repeated.outcome) == ("duplicate", None)
+
+    for status in ("rejected", "duplicate"):
+        tracker = CommandLifecycleTracker()
+        command = _lifecycle_command(cmd_id=f"cmd-ack-{status}")
+        tracker.issue(command, now_ms=1000)
+        failed = tracker.accept_update(
+            _lifecycle_frame(command, typ="data.cmd_ack", status=status), now_ms=1100
+        )
+        assert (failed.lifecycle, failed.outcome) == ("accepted", "failure")
+
+
+def test_server_schedules_exact_command_outcome_speech() -> None:
+    async def _main() -> None:
+        spoken: list[str] = []
+        previous = panel.command_lifecycle
+        panel.command_lifecycle = CommandLifecycleTracker()
+        command = _lifecycle_command(cmd_id="cmd-server-speech")
+        command["issued_at_ms"] = int(time.time() * 1000)
+        command["ack_timeout_ms"] = 3000
+        command["result_timeout_ms"] = 3000
+        panel.command_lifecycle.issue(command)
+        runtime.agent_loop = asyncio.get_running_loop()
+        original = web_server.say_command_status
+        web_server.say_command_status = spoken.append
+        ws = types.SimpleNamespace(send_str=lambda _: None)
+        session_info = {"trace_id": command["trace_id"]}
+        try:
+            await web_server._process_command_lifecycle(
+                ws,
+                _lifecycle_frame(command, typ="data.cmd_result", status="succeeded"),
+                session_info,
+                command["session_id"],
+            )
+            await web_server._process_command_lifecycle(
+                ws,
+                _lifecycle_frame(command, typ="data.cmd_result", status="succeeded"),
+                session_info,
+                command["session_id"],
+            )
+            await asyncio.sleep(0)
+            assert spoken == [COMMAND_SUCCESS]
+        finally:
+            web_server.say_command_status = original
+            runtime.agent_loop = None
+            panel.command_lifecycle = previous
+
+    asyncio.run(_main())
+
+
 def test_command_lifecycle_audits_delivery_execution_timeout_and_late_frames() -> None:
     command = {
         "type": "data.cmd",
@@ -1062,7 +1351,7 @@ def test_command_lifecycle_audits_delivery_execution_timeout_and_late_frames() -
         "issued_at_ms": 1000,
     }
     delivery = CommandLifecycleTracker()
-    delivery.issue(command)
+    delivery.issue(command, now_ms=1000)
     assert delivery.expire(now_ms=1100)[0]["event"] == "delivery_timeout"
     late_ack = {
         "type": "data.cmd_ack",
@@ -1076,10 +1365,10 @@ def test_command_lifecycle_audits_delivery_execution_timeout_and_late_frames() -
 
     execution = CommandLifecycleTracker()
     execution_command = {**command, "cmd_id": "cmd-lifecycle-execution"}
-    execution.issue(execution_command)
+    execution.issue(execution_command, now_ms=1000)
     ack = {**late_ack, "cmd_id": execution_command["cmd_id"]}
     assert execution.accept(ack, now_ms=1050) == "accepted"
-    assert execution.expire(now_ms=1500)[0]["event"] == "execution_timeout"
+    assert execution.expire(now_ms=1501)[0]["event"] == "execution_timeout"
     late_result = {
         **ack,
         "type": "data.cmd_result",

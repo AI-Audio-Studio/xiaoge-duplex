@@ -11,7 +11,9 @@ import threading
 import time
 from pathlib import Path
 
-QA_LOG = Path(os.getenv("QA_LOG", "qwen_voice_qa.log")).resolve()
+QA_LOG = Path(
+    os.getenv("XIAOGE_DEPLOY_QA_LOG") or os.getenv("QA_LOG", "qwen_voice_qa.log")
+).resolve()
 
 _queue: queue.Queue[tuple[Path, str] | None] = queue.Queue(maxsize=1000)
 _thread: threading.Thread | None = None
@@ -90,7 +92,9 @@ def append_qa_log(asr: str, llm: str) -> None:
     timestamp = time.time()
     _ensure_writer()
     with contextlib.suppress(queue.Full):
-        _queue.put_nowait((daily_log_path(timestamp), format_qa_record(asr, llm, timestamp=timestamp)))
+        _queue.put_nowait(
+            (daily_log_path(timestamp), format_qa_record(asr, llm, timestamp=timestamp))
+        )
 
 
 class QAPairLog:

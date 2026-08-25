@@ -143,19 +143,21 @@ def build_tts() -> SwitchableTTS:
     return SwitchableTTS(make_tts_backend(backend))
 
 
-def build_llm() -> lk_openai.LLM:
-    base_url = os.getenv("QWEN_BASE_URL", "https://60.205.197.165:10092/llm/v1")
-    api_key = os.getenv("QWEN_API_KEY", "EMPTY")
-    model = os.getenv("QWEN_MODEL", "Qwen3-4B")
-    verify_ssl = env_bool("QWEN_VERIFY_SSL", False)
-
-    client = openai.AsyncClient(
+def _build_qwen_client(
+    *, base_url: str, api_key: str, verify_ssl: bool, timeout_s: float
+) -> openai.AsyncClient:
+    return openai.AsyncClient(
         api_key=api_key,
         base_url=base_url,
         max_retries=0,
         http_client=httpx.AsyncClient(
             verify=verify_ssl,
-            timeout=httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0),
+            timeout=httpx.Timeout(
+                connect=timeout_s,
+                read=timeout_s,
+                write=timeout_s,
+                pool=timeout_s,
+            ),
             follow_redirects=True,
             limits=httpx.Limits(
                 max_connections=50,
@@ -163,6 +165,20 @@ def build_llm() -> lk_openai.LLM:
                 keepalive_expiry=120,
             ),
         ),
+    )
+
+
+def build_llm() -> lk_openai.LLM:
+    base_url = os.getenv("QWEN_BASE_URL", "https://60.205.197.165:10092/llm/v1")
+    api_key = os.getenv("QWEN_API_KEY", "EMPTY")
+    model = os.getenv("QWEN_MODEL", "Qwen3-4B")
+    verify_ssl = env_bool("QWEN_VERIFY_SSL", False)
+
+    client = _build_qwen_client(
+        base_url=base_url,
+        api_key=api_key,
+        verify_ssl=verify_ssl,
+        timeout_s=30.0,
     )
     return lk_openai.LLM(
         model=model,
@@ -173,6 +189,41 @@ def build_llm() -> lk_openai.LLM:
             "top_k": 20,
             "max_tokens": 512,
             "presence_penalty": 1.5,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
+    )
+
+
+def build_semantic_llm() -> lk_openai.LLM:
+    """Build an isolated low-latency model client for data-only intent classification."""
+    raw_timeout = os.getenv("XIAOGE_INTENT_TIMEOUT_S", "1.2")
+    try:
+        timeout_s = max(0.1, float(raw_timeout))
+    except ValueError:
+        logger.warning("invalid XIAOGE_INTENT_TIMEOUT_S=%r, using 1.2", raw_timeout)
+        timeout_s = 1.2
+    base_url = os.getenv("XIAOGE_INTENT_BASE_URL") or os.getenv(
+        "QWEN_BASE_URL", "https://60.205.197.165:10092/llm/v1"
+    )
+    api_key = os.getenv("XIAOGE_INTENT_API_KEY") or os.getenv("QWEN_API_KEY", "EMPTY")
+    model = os.getenv("XIAOGE_INTENT_MODEL") or os.getenv("QWEN_MODEL", "Qwen3-4B")
+    verify_ssl = env_bool(
+        "XIAOGE_INTENT_VERIFY_SSL",
+        env_bool("QWEN_VERIFY_SSL", False),
+    )
+    client = _build_qwen_client(
+        base_url=base_url,
+        api_key=api_key,
+        verify_ssl=verify_ssl,
+        timeout_s=timeout_s,
+    )
+    return lk_openai.LLM(
+        model=model,
+        client=client,
+        temperature=0.0,
+        top_p=1.0,
+        extra_body={
+            "max_tokens": 256,
             "chat_template_kwargs": {"enable_thinking": False},
         },
     )

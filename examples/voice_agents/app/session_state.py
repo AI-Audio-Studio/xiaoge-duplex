@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("web-ui-agent")
 
 VOICE_WELCOME = "连接成功，欢迎使用小歌，请开始说话。"
+COMMAND_EXECUTING = "好的，正在执行"
+COMMAND_SUCCESS = "执行成功"
+COMMAND_FAILURE = "执行失败，请稍后再试！"
 
 
 @dataclass
@@ -49,6 +52,11 @@ class AppRuntime:
     # 知识库索引(KnowledgeIndex;入口处 best-effort _load,无索引文件时为 None/未就绪)
     knowledge_index: Any = None
     manual_text_handler: Any = None
+    # G3 协议会话状态:跨轮高风险确认 / 端侧能力。当前仍是单会话 runtime。
+    g3_pending_high_risk: dict[str, Any] | None = None
+    g3_caps: frozenset[str] = field(
+        default_factory=lambda: frozenset({"audio", "text", "cmd", "state"})
+    )
     # 压话标志:用户当前这句话是否压着 AI 播报开口(附和拒识的上下文闸门)。
     # user_state_changed 在每次开口时直接覆盖(不粘滞、不靠提交复位)。
     overlap_turn_state: dict[str, bool] = field(
@@ -71,3 +79,19 @@ def say_voice_welcome() -> None:
         append_turn_log("VOICE_WELCOME_SAY")
     except Exception:
         logger.exception("failed to say voice welcome")
+
+
+def say_command_status(text: str) -> None:
+    """在 agent 循环线程播报命令状态，不写入聊天上下文。"""
+    if text not in {COMMAND_EXECUTING, COMMAND_SUCCESS, COMMAND_FAILURE}:
+        logger.error("command status skipped: invalid text=%r", text)
+        return
+    session = runtime.session
+    if session is None:
+        logger.info("command status skipped: session not ready text=%s", text)
+        return
+    try:
+        session.say(text, add_to_chat_ctx=False, allow_interruptions=False)
+        append_turn_log(f"COMMAND_STATUS_SAY text={text!r}")
+    except Exception:
+        logger.exception("failed to say command status: %s", text)

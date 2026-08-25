@@ -132,7 +132,15 @@ class WebSocketAudioOutput(io.AudioOutput):
             self._flush_task = asyncio.create_task(self._headless_wait_for_playout())
 
     def clear_buffer(self) -> None:
-        self._drop_audio_until = time.monotonic() + self._clear_suppress_tail_s
+        self._clear_buffer(suppress_tail=True)
+
+    def clear_music_buffer(self) -> None:
+        self._clear_buffer(suppress_tail=False)
+
+    def _clear_buffer(self, *, suppress_tail: bool) -> None:
+        self._drop_audio_until = (
+            time.monotonic() + self._clear_suppress_tail_s if suppress_tail else 0.0
+        )
         if self.next_in_chain is not None:
             self.next_in_chain.clear_buffer()
         elif self._pushed_duration > 0:

@@ -295,6 +295,10 @@ class TurnMetrics:
             pass
 
     def _on_agent_state_ev(self, ev: Any) -> None:
+        # 注:web/headless 形态 agent_state_changed 从不派发 speaking(实测 27 会话仅
+        # listening),felt 不在此算。改由 _on_item(assistant) 用 created_at+tts_ttfb
+        # 作起播近似、_last_user_stop_at 用最近 user item 的 created_at 兜底。本回调
+        # 保留供房间形态真派发 speaking 时作更精确的覆盖。
         try:
             if getattr(ev, "new_state", None) == "speaking":
                 start = getattr(ev, "created_at", None)
@@ -329,6 +333,11 @@ class TurnMetrics:
                     except Exception:
                         pass
                 self._prev_user = rec
+                # user_state_changed 的 speaking 在 web/headless 形态不派发,此作兜底:
+                # user item 提交时刻 ≈ 用户停说时刻。已被 _on_user_state_ev 设过则不覆盖
+                # (那条更精确,带 started/stopped 语音窗)。
+                if self._last_user_stop_at is None:
+                    self._last_user_stop_at = getattr(ev, "created_at", None)
                 self._debug(
                     "user_turn",
                     {"has_window": rec.started_at is not None, "len": len(rec.text)},
@@ -339,6 +348,19 @@ class TurnMetrics:
                         d.feed_assistant_turn(rec)
                     except Exception:
                         pass
+                # felt = agent_speak - user_stop;agent_speak ≈ item 提交时刻 + tts_ttfb
+                # (conversation_item_added=文本就绪正送 TTS,tts_ttfb 已在 metrics 回填)。
+                # 旧路径靠 agent_state_changed→speaking,该事件在本形态从不派发。
+                tts_ttfb = m.get("tts_node_ttfb")
+                item_at = getattr(ev, "created_at", None)
+                if item_at is not None and self._last_user_stop_at is not None:
+                    speak_at = (
+                        item_at + tts_ttfb
+                        if isinstance(tts_ttfb, (int, float))
+                        else item_at
+                    )
+                    self._feed_felt((speak_at - self._last_user_stop_at) * 1000.0)
+                    self._last_user_stop_at = None
             # 每轮增量写一次:stop_agent.cmd 是强杀进程(shutdown 回调可能不跑),
             # 增量写保证强杀也留得下最新 KPI。写盘丢到线程,事件循环不阻塞。
             self._schedule_write()

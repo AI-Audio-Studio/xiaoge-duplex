@@ -48,6 +48,16 @@ def install_debug_log(run_dir: Path) -> tuple[Any, Any, Any]:
     root.addHandler(queue_handler)
     if root.level == logging.NOTSET or root.level > logging.DEBUG:
         root.setLevel(logging.DEBUG)
+    # root 一旦拉到 DEBUG,第三方库 logger(level=NOTSET → 跟随 root)的 DEBUG 会
+    # 经 propagate 到 root 的其它 handler(含 stderr)→ 落进 poolmgr.log 把我们的
+    # TURN_* / WALL_CLOCK_E2E 行淹没。这里把已知噪声 logger 钉到 WARNING:它们自身
+    # 仍能用,只是 DEBUG/INFO 不再外溢;我们自己的 logger(event-timeline / turn-metrics
+    # 等)无前缀,仍跟 root=DEBUG,正常进 debug.log。
+    for _name in (
+        "dashscope", "livekit", "httpx", "httpcore", "openai",
+        "urllib3", "asyncio", "websockets", "aiohttp",
+    ):
+        logging.getLogger(_name).setLevel(logging.WARNING)
     return listener, queue_handler, file_handler
 
 

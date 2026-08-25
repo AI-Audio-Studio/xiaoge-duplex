@@ -144,28 +144,40 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
   <!--BACKEND_TABS-->
 </div>
 <script>
-var ws=null, protoSession=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', rt=null, serverBusy=false;
+var ws=null, protoSession=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', serverBusy=false;
 var frontendSeq=0;
-var wsManualClose=false;
-var connPromise=null;
+var connPromise=null, activeAttempt=null, attemptSeq=0, connectionState='idle';
 var VOICE_WELCOME='连接成功，欢迎使用小歌，请开始说话。';
 var wsProto = location.protocol==='https:' ? 'wss:' : 'ws:';
-var wsAudio=null, micStream=null, audioCtx=null, playCtx=null, voiceActive=false;
-var nextPlayTime=0, AUDIO_SR=16000, scheduledSources=[];
-var liveBubble=null, liveTimer=null;       // 用户实时转写的单一 live 气泡
-var LIVE_DANGLING_MS=4000;                  // 无定稿的残留气泡兜底淡出(毫秒)
+var voiceActive=false, AUDIO_SR=16000;
+var liveBubble=null, activeUserBubbles=Object.create(null), finalizedUserTurns=Object.create(null);
+var finalizedUserTurnOrder=[], FINALIZED_USER_TURN_LIMIT=384, legacyLiveId=null;
+var userTurnAliases=Object.create(null), userTurnAliasOrder=[], USER_TURN_ALIAS_LIMIT=384;
 var localUserEchoes=[];                     // 手动输入本地回显，等待服务端 data.stt final 去重
 var LOCAL_ECHO_TTL_MS=12000;
+var RUOYI_API_KEY_STORE='xiaoge.webpanel.ruoyi_api_key.v1';
 var DEMO_QUERY_TOKEN_ENABLED=false;
 
 function getRuoyiApiKey(){
   var input=id('apiKeyInput');
   return input ? input.value.trim() : '';
 }
+function loadRuoyiApiKey(){
+  try{ return localStorage.getItem(RUOYI_API_KEY_STORE) || ''; }
+  catch(err){ return ''; }
+}
+function saveRuoyiApiKey(){
+  var value=getRuoyiApiKey();
+  try{
+    if(value) localStorage.setItem(RUOYI_API_KEY_STORE, value);
+    else localStorage.removeItem(RUOYI_API_KEY_STORE);
+  }catch(err){}
+  return value;
+}
 
 async function createProtocolSession(){
   var headers={'Content-Type':'application/json'};
-  var apiKey=getRuoyiApiKey();
+  var apiKey=saveRuoyiApiKey();
   if(!apiKey) throw new Error('请输入 API Key');
   headers['X-API-Key']=apiKey;
   var r=await fetch('/create_session',{method:'POST',
@@ -183,83 +195,123 @@ async function createProtocolSession(){
   return await r.json();
 }
 
-async function conn(){
+function newConnectionAttempt(){
+  if(activeAttempt) disposeAttempt(activeAttempt, true);
+  var attempt={id:++attemptSeq, disposed:false, intentionalClose:false, session:null, ws:null,
+    timer:null, stream:null, captureCtx:null, playCtx:null, source:null, worklet:null,
+    ready:false, scheduled:[], nextPlayTime:0};
+  activeAttempt=attempt;
+  connectionState='connecting';
+  return attempt;
+}
+function isCurrentAttempt(attempt){ return activeAttempt===attempt && !attempt.disposed; }
+function syncConnectionRefs(attempt){
+  if(!isCurrentAttempt(attempt)) return;
+  ws=attempt.ws; protoSession=attempt.session;
+}
+function closeAttemptAudio(attempt){
+  attempt.scheduled.forEach(function(source){ try{source.stop(0);}catch(err){} });
+  attempt.scheduled=[]; attempt.nextPlayTime=0;
+  if(attempt.worklet){
+    attempt.worklet.port.onmessage=null;
+    try{attempt.worklet.disconnect();}catch(err){}
+    attempt.worklet=null;
+  }
+  if(attempt.source){ try{attempt.source.disconnect();}catch(err){} attempt.source=null; }
+  if(attempt.stream){ attempt.stream.getTracks().forEach(function(track){track.stop();}); attempt.stream=null; }
+  if(attempt.captureCtx){ try{attempt.captureCtx.close();}catch(err){} attempt.captureCtx=null; }
+  if(attempt.playCtx){ try{attempt.playCtx.close();}catch(err){} attempt.playCtx=null; }
+}
+function disposeAttempt(attempt, intentional){
+  if(!attempt || attempt.disposed) return;
+  attempt.intentionalClose=!!intentional;
+  attempt.disposed=true;
+  if(attempt.timer){ clearTimeout(attempt.timer); attempt.timer=null; }
+  closeAttemptAudio(attempt);
+  if(attempt.ws){ try{attempt.ws.close();}catch(err){} }
+  if(activeAttempt===attempt){
+    activeAttempt=null; ws=null; protoSession=null; connPromise=null; voiceActive=false;
+  }
+}
+function showIdleState(){
+  connectionState='idle'; stConn=false; updateStatus(); setVoiceActive(false);
+}
+function failAttempt(attempt, message){
+  if(!isCurrentAttempt(attempt)) return;
+  disposeAttempt(attempt, false);
+  connectionState='failed'; stConn=false; updateStatus();
+  setVoiceError('连接失败，点击重试');
+  sysMsg(message || '连接失败，请点击通话按钮重试');
+}
+
+async function conn(attempt){
   if(serverBusy) throw new Error('server busy');
-  if(ws && ws.readyState===WebSocket.OPEN) return;
+  if(!attempt){
+    if(activeAttempt && !activeAttempt.disposed && activeAttempt.ws &&
+       activeAttempt.ws.readyState===WebSocket.OPEN && activeAttempt.ready) return activeAttempt;
+    attempt=newConnectionAttempt();
+  }
+  if(!isCurrentAttempt(attempt)) throw new Error('连接尝试已失效');
   if(connPromise) return connPromise;
-  wsManualClose=false;
-  connPromise = (async function(){
+  connPromise=(async function(){
     if(!DEMO_QUERY_TOKEN_ENABLED) throw new Error('WebPanel demo 通道未启用');
-    try{ protoSession=await createProtocolSession(); }
-    catch(err){
-      stConn=false; updateStatus();
-      sysMsg('create_session 失败：'+err.message);
-      throw err;
-    }
-    var debugWsUrl=wsProto+'//'+location.host+'/debug/ws/session?access_token='+encodeURIComponent(protoSession.access_token);
-    ws = new WebSocket(debugWsUrl);
-    ws.binaryType = 'arraybuffer';
-    ws.onmessage = function(e){
-      if(e.data instanceof ArrayBuffer){ playPcm(e.data); return; }
-      handle(JSON.parse(e.data));
-    };
+    attempt.session=await createProtocolSession();
+    if(!isCurrentAttempt(attempt)) throw new Error('连接尝试已失效');
+    var session=attempt.session;
+    var debugWsUrl=wsProto+'//'+location.host+'/debug/ws/session?access_token='+encodeURIComponent(session.access_token);
+    var socket=new WebSocket(debugWsUrl);
+    attempt.ws=socket; socket.binaryType='arraybuffer'; syncConnectionRefs(attempt);
     await new Promise(function(resolve, reject){
-      var opened=false, done=false;
-      var timer=setTimeout(function(){
-        if(done) return;
-        done=true;
-        try{ if(ws) ws.close(); }catch(x){}
-        reject(new Error('R5.2.2 WS open timeout'));
+      var settled=false;
+      function rejectOnce(err){ if(settled) return; settled=true; reject(err); }
+      attempt.timer=setTimeout(function(){
+        if(!isCurrentAttempt(attempt) || settled) return;
+        rejectOnce(new Error('R5.2.2 WS hello timeout'));
       }, 10000);
-      ws.onopen = function(){
-        if(done) return;
-        opened=true; done=true; clearTimeout(timer);
-        stConn=true; updateStatus();
-        ws.send(JSON.stringify({
-          type:'ctrl.hello',
-          trace_id:protoSession.trace_id,
-          session_id:protoSession.session_id,
-          proto:2,
-          role:'panel',
-          device_id:'web-panel-x3',
-          caps:protoSession.granted_caps || ['audio','text','cmd','state'],
+      socket.onopen=function(){
+        if(!isCurrentAttempt(attempt)) return;
+        socket.send(JSON.stringify({
+          type:'ctrl.hello', trace_id:session.trace_id, session_id:session.session_id,
+          proto:2, role:'panel', device_id:'web-panel-x3',
+          caps:session.granted_caps || ['audio','text','cmd','state'],
           prefs:{'welcome.enabled':true}
         }));
-        if(rt){clearTimeout(rt);rt=null;}
-        resolve();
       };
-      ws.onerror = function(){
-        if(done) return;
-        done=true; clearTimeout(timer);
-        reject(new Error('R5.2.2 WS connect failed'));
-      };
-      ws.onclose = function(e){
-        stConn=false; updateStatus();
-        ws=null;
-        protoSession=null;
-        if(!opened && !done){
-          done=true; clearTimeout(timer);
-          reject(new Error('R5.2.2 WS closed before open'));
-          return;
+      socket.onmessage=function(e){
+        if(!isCurrentAttempt(attempt)) return;
+        if(e.data instanceof ArrayBuffer){ playPcm(e.data, attempt); return; }
+        var message=JSON.parse(e.data);
+        if(message.type==='ctrl.ready' && !settled){
+          settled=true; attempt.ready=true;
+          if(attempt.timer){clearTimeout(attempt.timer);attempt.timer=null;}
+          stConn=true; updateStatus(); resolve();
         }
-        if(e.code===4001){location.reload();return;}
-        if(wsManualClose) return;
-        if(serverBusy) return;
-        sysMsg('连接断开，5 秒后重连…');
-        if(voiceActive) rt = setTimeout(conn, 5000);
+        handle(message);
+      };
+      socket.onerror=function(){
+        if(!isCurrentAttempt(attempt)) return;
+        if(!attempt.ready) rejectOnce(new Error('R5.2.2 WS connect failed'));
+      };
+      socket.onclose=function(){
+        if(!isCurrentAttempt(attempt) || attempt.intentionalClose) return;
+        if(!attempt.ready) rejectOnce(new Error('R5.2.2 WS closed before ready'));
+        else failAttempt(attempt, '连接已断开，请点击通话按钮重试');
       };
     });
+    if(!isCurrentAttempt(attempt)) throw new Error('连接尝试已失效');
+    return attempt;
   })();
   try{ return await connPromise; }
-  finally{ connPromise=null; }
+  catch(err){ if(isCurrentAttempt(attempt)) failAttempt(attempt, '连接失败：'+err.message); throw err; }
+  finally{ if(isCurrentAttempt(attempt) || activeAttempt===null) connPromise=null; }
 }
 
 function handle(m){
   if(m.type==='busy'){
     serverBusy=true;
     sysMsg(m.message || '服务器繁忙，请稍后再试！');
-    try{ if(ws) ws.close(); }catch(x){}
-    stopVoice();
+    try{ if(activeAttempt) failAttempt(activeAttempt, m.message || '服务器繁忙，请稍后再试！'); }
+    catch(err){}
     return;
   }
   if(m.type==='clear'){ clearPlayback(); return; }
@@ -275,21 +327,24 @@ function handle(m){
     return;
   }
   if(m.type==='data.stt'){
-    if(m.final){
-      if(consumeLocalUserEcho(m.text, m.ts_ms||Date.now())) return;
-      finalizeLive(m.text, (m.ts_ms||Date.now())/1000);
-    }
-    else updateLive(m.text);
+    applyUserTranscript(m.utterance_id, m.text, !!m.final, m.ts_ms||Date.now(), m.session_id);
     return;
   }
   if(m.type==='data.reply'){ addMsg('assistant', m.text, (m.ts_ms||Date.now())/1000); return; }
-  if(m.type==='data.cmd'){ addProtocolFrame(m, true); return; }
+  if(m.type==='data.cmd'){
+    addProtocolFrame(m, false);
+    simulateEndpointCommand(m);
+    return;
+  }
   if(m.type==='listening'){ setListening(m.on, m.hint); }
-  if(m.type==='user_speaking' && m.state==='start') startLive();
-  if(m.type==='user_partial') updateLive(m.text);
+  if(m.type==='user_speaking' && m.state==='start'){
+    legacyLiveId=m.utterance_id || legacyLiveId || ('legacy-'+Date.now());
+    startLive(legacyLiveId);
+  }
+  if(m.type==='user_partial') applyUserTranscript(m.utterance_id||legacyLiveId, m.text, false, Date.now(), 'legacy');
   if(m.type==='g3_protocol'){ addProtocol(m); }
   if(m.type==='message'){
-    if(m.role==='user' && liveBubble) finalizeLive(m.text, m.ts);  // live 气泡定稿(看似修正)
+    if(m.role==='user') applyUserTranscript(m.utterance_id||legacyLiveId, m.text, true, (m.ts||Date.now()/1000)*1000, 'legacy');
     else addMsg(m.role, m.text, m.ts);
   }
   if(m.type==='state'){
@@ -309,16 +364,89 @@ function handle(m){
   }
 }
 
-// ── 用户实时转写:单一 live 气泡(开口出现、partial 边长、final 定稿)──────────
-// 一次连续说话 = 一个气泡:startLive 只在"新一轮"被后端调用(见 live_transcript.py);
-// 连续说话的小停顿不会重开。无定稿的残留气泡由超时兜底丢弃。
-
-function sendCallStarted(){
-  if(!ws || ws.readyState!==WebSocket.OPEN || !protoSession) return;
-  ws.send(JSON.stringify({
+// ── 用户实时转写:按会话+utterance_id 幂等更新/定稿────────────────────
+function transcriptKey(utteranceId, sessionId){
+  var sid=sessionId || (protoSession && protoSession.session_id) || 'legacy';
+  var raw=sid+'|'+(utteranceId || legacyLiveId || 'legacy-active');
+  return userTurnAliases[raw] || raw;
+}
+function aliasUserTurn(utteranceId, sessionId, canonicalKey){
+  if(!utteranceId || !canonicalKey) return;
+  var sid=sessionId || (protoSession && protoSession.session_id) || 'legacy';
+  var aliasKey=sid+'|'+utteranceId;
+  if(!userTurnAliases[aliasKey]) userTurnAliasOrder.push(aliasKey);
+  userTurnAliases[aliasKey]=canonicalKey;
+  while(userTurnAliasOrder.length>USER_TURN_ALIAS_LIMIT){
+    delete userTurnAliases[userTurnAliasOrder.shift()];
+  }
+}
+function rememberFinalizedTurn(key){
+  if(finalizedUserTurns[key]) return;
+  finalizedUserTurns[key]=true; finalizedUserTurnOrder.push(key);
+  while(finalizedUserTurnOrder.length>FINALIZED_USER_TURN_LIMIT){
+    delete finalizedUserTurns[finalizedUserTurnOrder.shift()];
+  }
+}
+function createLiveBubble(key){
+  var bubble=document.createElement('div');
+  bubble.className='bubble user live appear';
+  bubble.innerHTML='<div class="live-txt"><span class="live-dots">聆听中<i>.</i><i>.</i><i>.</i></span></div>';
+  bubble.dataset.turnKey=key;
+  log().appendChild(bubble); log().scrollTop=log().scrollHeight;
+  activeUserBubbles[key]=bubble; liveBubble=bubble;
+  return bubble;
+}
+function startLive(utteranceId, sessionId){
+  var key=transcriptKey(utteranceId, sessionId);
+  if(finalizedUserTurns[key]) return null;
+  return activeUserBubbles[key] || createLiveBubble(key);
+}
+function updateLive(text, utteranceId, sessionId){
+  var key=transcriptKey(utteranceId, sessionId);
+  if(finalizedUserTurns[key]) return;
+  var bubble=activeUserBubbles[key] || createLiveBubble(key);
+  if(text) bubble.querySelector('.live-txt').textContent=text;
+  liveBubble=bubble; log().scrollTop=log().scrollHeight;
+}
+function finalizeLive(text, ts, utteranceId, sessionId){
+  var key=transcriptKey(utteranceId, sessionId);
+  if(finalizedUserTurns[key]) return;
+  var bubble=activeUserBubbles[key];
+  if(!bubble){ addMsg('user', text, ts); rememberFinalizedTurn(key); return; }
+  bubble.className='bubble user';
+  var shown=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
+  bubble.innerHTML='<div>'+esc(text||'')+'</div><div class="ts">'+shown+'</div>';
+  delete activeUserBubbles[key];
+  if(liveBubble===bubble) liveBubble=null;
+  rememberFinalizedTurn(key);
+  id('sbMsgs').textContent=(++msgN)+' 条消息';
+  log().scrollTop=log().scrollHeight;
+}
+function applyUserTranscript(utteranceId, text, final, tsMs, sessionId){
+  var idValue=utteranceId || legacyLiveId || ('legacy-'+String(tsMs||Date.now()));
+  var currentKey=transcriptKey(idValue, sessionId);
+  if(legacyLiveId && utteranceId && utteranceId!==legacyLiveId){
+    var legacyKey=transcriptKey(legacyLiveId, sessionId);
+    if(activeUserBubbles[legacyKey] || finalizedUserTurns[legacyKey]){
+      aliasUserTurn(utteranceId, sessionId, legacyKey);
+      currentKey=legacyKey;
+    }
+  }
+  if(final && consumeLocalUserEcho(text, tsMs||Date.now())){
+    var echoBubble=activeUserBubbles[currentKey];
+    if(echoBubble){echoBubble.remove();delete activeUserBubbles[currentKey];if(liveBubble===echoBubble)liveBubble=null;}
+    rememberFinalizedTurn(currentKey); legacyLiveId=null; return;
+  }
+  if(final){ finalizeLive(text, (tsMs||Date.now())/1000, idValue, sessionId); legacyLiveId=null; }
+  else updateLive(text, idValue, sessionId);
+}
+function sendCallStarted(attempt){
+  if(!isCurrentAttempt(attempt) || !attempt.ws ||
+     attempt.ws.readyState!==WebSocket.OPEN || !attempt.session) return;
+  attempt.ws.send(JSON.stringify({
     type:'ctrl.frontend_state',
-    trace_id:protoSession.trace_id,
-    session_id:protoSession.session_id,
+    trace_id:attempt.session.trace_id,
+    session_id:attempt.session.session_id,
     seq:++frontendSeq,
     ts_ms:Date.now(),
     ttl_ms:1000,
@@ -328,6 +456,56 @@ function sendCallStarted(){
     vad:'unknown',
     lock_mode:false
   }));
+}
+
+function isActiveProtocolConnection(socket, session){
+  return ws===socket && protoSession===session && socket.readyState===WebSocket.OPEN;
+}
+
+function commandCorrelation(command){
+  return {
+    trace_id:command.trace_id,
+    session_id:command.session_id,
+    utterance_id:command.utterance_id,
+    cmd_id:command.cmd_id
+  };
+}
+
+function simulateEndpointCommand(command){
+  var socket=ws, session=protoSession;
+  if(!socket || !session || !isActiveProtocolConnection(socket, session)) return;
+  var correlation=commandCorrelation(command);
+  var receivedAt=Date.now();
+  try{
+    socket.send(JSON.stringify(Object.assign({
+      type:'data.cmd_ack',
+      status:'accepted',
+      code:'webpanel_simulator_received',
+      received_at_ms:receivedAt
+    }, correlation)));
+  }catch(err){
+    sysMsg('模拟端侧 ACK 发送失败：'+err.message);
+    return;
+  }
+  setTimeout(function(){
+    if(!isActiveProtocolConnection(socket, session)) return;
+    var gesture=command.params && command.params.gesture;
+    var failed=command.action==='gesture.perform' && (gesture==='laugh' || gesture==='cry');
+    var finishedAt=Date.now();
+    try{
+      socket.send(JSON.stringify(Object.assign({
+        type:'data.cmd_result',
+        status:failed ? 'failed' : 'succeeded',
+        code:failed ? 'webpanel_simulator_failed' : 'webpanel_simulator_succeeded',
+        started_at_ms:receivedAt,
+        finished_at_ms:finishedAt,
+        duration_ms:Math.max(0, finishedAt-receivedAt),
+        retryable:false
+      }, correlation)));
+    }catch(err){
+      sysMsg('模拟端侧结果发送失败：'+err.message);
+    }
+  }, 1000);
 }
 
 async function sendManualText(){
@@ -356,106 +534,95 @@ async function sendManualText(){
 
 // Browser voice bridge: microphone PCM and TTS PCM share R5.2.2 /ws/session.
 async function toggleVoice(){
-  if(voiceActive){ stopVoice(); return; }
+  if(connectionState==='active' && activeAttempt){ stopVoice(); return; }
   await startVoice();
 }
 
 async function startVoice(){
+  var attempt=newConnectionAttempt();
+  serverBusy=false; setVoiceConnecting();
   try{
-    if(!ws || ws.readyState!==WebSocket.OPEN) await conn();
-    if(!ws || ws.readyState!==WebSocket.OPEN) throw new Error('R5.2.2 WS 未连接');
+    await conn(attempt);
+    if(!isCurrentAttempt(attempt)) return;
     sysMsg('正在连接浏览器麦克风...');
-    playCtx = new AudioContext({sampleRate:AUDIO_SR});
-    if(playCtx.state === 'suspended') await playCtx.resume();
-    nextPlayTime = 0;
-    setVoiceActive(true);
-    micStream = await navigator.mediaDevices.getUserMedia({audio:{
+    attempt.playCtx=new AudioContext({sampleRate:AUDIO_SR});
+    if(attempt.playCtx.state==='suspended') await attempt.playCtx.resume();
+    if(!isCurrentAttempt(attempt)) return;
+    var stream=await navigator.mediaDevices.getUserMedia({audio:{
       channelCount:1, echoCancellation:true, noiseSuppression:true, autoGainControl:true
     }});
-    audioCtx = new AudioContext({sampleRate:AUDIO_SR});
-    if(audioCtx.state === 'suspended') await audioCtx.resume();
-    var src = audioCtx.createMediaStreamSource(micStream);
-    var workletSrc = `class P extends AudioWorkletProcessor{process(i){var c=i[0]&&i[0][0];if(c){var b=new Int16Array(c.length);for(var j=0;j<c.length;j++)b[j]=Math.max(-32768,Math.min(32767,c[j]*32767));this.port.postMessage(b.buffer,[b.buffer])}return true}}registerProcessor('p',P);`;
-    var blobUrl = URL.createObjectURL(new Blob([workletSrc],{type:'application/javascript'}));
-    await audioCtx.audioWorklet.addModule(blobUrl);
-    URL.revokeObjectURL(blobUrl);
-    var node = new AudioWorkletNode(audioCtx,'p');
-    node.port.onmessage = function(e){ if(ws && ws.readyState===WebSocket.OPEN && !muted) ws.send(e.data); };
-    src.connect(node);
-    sendCallStarted();
-    sysMsg(VOICE_WELCOME);
+    if(!isCurrentAttempt(attempt)){ stream.getTracks().forEach(function(track){track.stop();}); return; }
+    attempt.stream=stream;
+    attempt.captureCtx=new AudioContext({sampleRate:AUDIO_SR});
+    if(attempt.captureCtx.state==='suspended') await attempt.captureCtx.resume();
+    if(!isCurrentAttempt(attempt)) return;
+    attempt.source=attempt.captureCtx.createMediaStreamSource(stream);
+    var workletSrc=`class P extends AudioWorkletProcessor{process(i){var c=i[0]&&i[0][0];if(c){var b=new Int16Array(c.length);for(var j=0;j<c.length;j++)b[j]=Math.max(-32768,Math.min(32767,c[j]*32767));this.port.postMessage(b.buffer,[b.buffer])}return true}}registerProcessor('p',P);`;
+    var blobUrl=URL.createObjectURL(new Blob([workletSrc],{type:'application/javascript'}));
+    try{ await attempt.captureCtx.audioWorklet.addModule(blobUrl); }
+    finally{ URL.revokeObjectURL(blobUrl); }
+    if(!isCurrentAttempt(attempt)) return;
+    attempt.worklet=new AudioWorkletNode(attempt.captureCtx,'p');
+    var socket=attempt.ws;
+    attempt.worklet.port.onmessage=function(e){
+      if(isCurrentAttempt(attempt) && socket.readyState===WebSocket.OPEN && !muted) socket.send(e.data);
+    };
+    attempt.source.connect(attempt.worklet);
+    connectionState='active'; setVoiceActive(true); sendCallStarted(attempt); sysMsg(VOICE_WELCOME);
   }catch(err){
-    setVoiceError('语音连接失败');
-    sysMsg('语音连接失败：'+err.message);
-    stopVoice();
+    if(isCurrentAttempt(attempt)) failAttempt(attempt, '语音连接失败：'+err.message);
   }
 }
 
-function playPcm(buf){
-  if(!playCtx) return;
+function playPcm(buf, attempt){
+  attempt=attempt || activeAttempt;
+  if(!isCurrentAttempt(attempt) || !attempt.playCtx) return;
+  var ctx=attempt.playCtx;
   var i16=new Int16Array(buf), f32=new Float32Array(i16.length);
   for(var i=0;i<i16.length;i++) f32[i]=i16[i]/32767;
-  var ab=playCtx.createBuffer(1,f32.length,AUDIO_SR);
+  var ab=ctx.createBuffer(1,f32.length,AUDIO_SR);
   ab.copyToChannel(f32,0);
-  var s=playCtx.createBufferSource(); s.buffer=ab; s.connect(playCtx.destination);
-  var now=playCtx.currentTime;
-  if(nextPlayTime < now) nextPlayTime = now + 0.05;
-  s.start(nextPlayTime);
-  nextPlayTime += ab.duration;
-  scheduledSources.push(s);
-  s.onended = function(){ var i=scheduledSources.indexOf(s); if(i>=0) scheduledSources.splice(i,1); };
+  var source=ctx.createBufferSource(); source.buffer=ab; source.connect(ctx.destination);
+  var now=ctx.currentTime;
+  if(attempt.nextPlayTime<now) attempt.nextPlayTime=now+0.05;
+  source.start(attempt.nextPlayTime); attempt.nextPlayTime+=ab.duration;
+  attempt.scheduled.push(source);
+  source.onended=function(){
+    var index=attempt.scheduled.indexOf(source); if(index>=0) attempt.scheduled.splice(index,1);
+  };
 }
-function clearPlayback(){ scheduledSources.forEach(function(s){ try{s.stop(0);}catch(x){} }); scheduledSources=[]; nextPlayTime=0; }
-function cleanupVoice(){
-  clearPlayback();
-  if(micStream){ micStream.getTracks().forEach(function(t){t.stop();}); micStream=null; }
-  if(audioCtx){ try{audioCtx.close();}catch(x){} audioCtx=null; }
-  if(playCtx){ try{playCtx.close();}catch(x){} playCtx=null; }
-  setVoiceActive(false);
+function clearPlayback(){
+  if(!activeAttempt) return;
+  activeAttempt.scheduled.forEach(function(source){try{source.stop(0);}catch(err){}});
+  activeAttempt.scheduled=[]; activeAttempt.nextPlayTime=0;
 }
 function stopVoice(){
-  if(ws){
-    wsManualClose=true;
-    var w=ws; ws=null; protoSession=null;
-    try{w.close();}catch(x){}
-  }
-  cleanupVoice();
+  var attempt=activeAttempt;
+  if(attempt) disposeAttempt(attempt, true);
+  showIdleState();
 }
-function setVoiceActive(a){
-  voiceActive=a;
-  var b=id('spkBtn');
-  if(!b) return;
-  b.className='rnd'+(a?' on':'');
-  b.setAttribute('aria-label', a?'断开语音通话':'连接语音通话');
-  b.title=a?'断开语音通话':'连接语音通话';
-  id('sbVoice').textContent='Voice: '+(a?'connected':'disconnected');
+function setVoiceConnecting(){
+  voiceActive=false;
+  var button=id('spkBtn');
+  if(button){button.className='rnd';button.title='正在连接…';button.setAttribute('aria-label','正在连接语音通话');}
+  id('sbVoice').textContent='Voice: connecting';
 }
-function setVoiceError(t){ var b=id('spkBtn'); if(b){ b.className='rnd err'; b.title=t; } id('sbVoice').textContent='Voice: '+t; }
+function setVoiceActive(active){
+  voiceActive=active;
+  var button=id('spkBtn');
+  if(!button) return;
+  button.className='rnd'+(active?' on':'');
+  button.setAttribute('aria-label', active?'断开语音通话':'连接语音通话');
+  button.title=active?'断开语音通话':'连接语音通话';
+  id('sbVoice').textContent='Voice: '+(active?'connected':'disconnected');
+}
+function setVoiceError(text){
+  voiceActive=false;
+  var button=id('spkBtn');
+  if(button){button.className='rnd err';button.title=text;button.setAttribute('aria-label',text);}
+  id('sbVoice').textContent='Voice: '+text;
+}
 
-function startLive(){
-  if(liveBubble){ armLive(); return; }   // Bug2 修复:已有正在涨的气泡→续用,不清空重建(防中途消失)
-  liveBubble=document.createElement('div');
-  liveBubble.className='bubble user live appear';
-  liveBubble.innerHTML='<div class="live-txt"><span class="live-dots">聆听中<i>.</i><i>.</i><i>.</i></span></div>';
-  log().appendChild(liveBubble); log().scrollTop=log().scrollHeight;
-  armLive();
-}
-function updateLive(text){
-  if(!liveBubble) startLive();
-  if(text){ liveBubble.querySelector('.live-txt').textContent=text; }
-  log().scrollTop=log().scrollHeight;
-  armLive();
-}
-function finalizeLive(text, ts){
-  if(!liveBubble){ addMsg('user', text, ts); return; }
-  if(liveTimer){ clearTimeout(liveTimer); liveTimer=null; }
-  liveBubble.className='bubble user';
-  var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
-  liveBubble.innerHTML='<div>'+esc(text||'')+'</div><div class="ts">'+t+'</div>';
-  liveBubble=null;
-  id('sbMsgs').textContent=(++msgN)+' 条消息';
-  log().scrollTop=log().scrollHeight;
-}
 function addLocalUserEcho(text, tsMs){
   addMsg('user', text, tsMs/1000);
   localUserEchoes.push({text:text, tsMs:tsMs});
@@ -475,17 +642,9 @@ function consumeLocalUserEcho(text, tsMs){
 function pruneLocalUserEchoes(nowMs){
   localUserEchoes=localUserEchoes.filter(function(e){ return nowMs-e.tsMs<LOCAL_ECHO_TTL_MS; });
 }
-function discardLive(){
-  if(liveTimer){ clearTimeout(liveTimer); liveTimer=null; }
-  if(liveBubble){ liveBubble.remove(); liveBubble=null; }
-}
-function armLive(){
-  if(liveTimer) clearTimeout(liveTimer);
-  liveTimer=setTimeout(discardLive, LIVE_DANGLING_MS);
-}
 
 // 状态优先级:服务断开 > 挂起中(关麦)> 正常 agent 状态
-var stConn=true, stMuted=false, stAgent='';
+var stConn=false, stMuted=false, stAgent='';
 function updateStatus(){
   var pill=id('statepill'), dot=id('dot'), bg=id('badge');
   if(!stConn){ pill.className='statepill off'; dot.className='dot off'; bg.textContent='服务断开'; return; }
@@ -563,7 +722,12 @@ function sysMsg(t){
   log().scrollTop=log().scrollHeight;
 }
 
-function clearLog(){ id('log').innerHTML=''; msgN=0; id('sbMsgs').textContent='0 条消息'; }
+function clearLog(){
+  id('log').innerHTML=''; msgN=0; id('sbMsgs').textContent='0 条消息';
+  activeUserBubbles=Object.create(null); finalizedUserTurns=Object.create(null);
+  finalizedUserTurnOrder=[]; userTurnAliases=Object.create(null); userTurnAliasOrder=[];
+  liveBubble=null; legacyLiveId=null;
+}
 
 async function toggleMic(){
   var r=await fetch('/api/mic',{method:'POST'});
@@ -616,6 +780,10 @@ function log(){ return id('log'); }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
 function initPage(){
+  var apiKeyInput=id('apiKeyInput');
+  apiKeyInput.value=loadRuoyiApiKey();
+  apiKeyInput.addEventListener('change', saveRuoyiApiKey);
+  apiKeyInput.addEventListener('blur', saveRuoyiApiKey);
   id('spkBtn').style.display='flex';
   id('spkBtn').title='连接语音通话';
   id('sbVoice').textContent='Voice: disconnected';

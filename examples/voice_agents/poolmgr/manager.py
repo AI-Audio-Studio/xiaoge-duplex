@@ -30,9 +30,7 @@ logger = logging.getLogger("poolmgr-manager")
 SPAWNING, READY, ASSIGNED, RECYCLING = "spawning", "ready", "assigned", "recycling"
 
 
-def default_agent_env(
-    proc_id: str, port: int, *, metrics_dir: Path | None = None
-) -> dict[str, str]:
+def default_agent_env(proc_id: str, port: int, *, run_dir: Path | None = None) -> dict[str, str]:
     """每进程 env 注入表(v4 §7.2)。部署环境可覆盖录音模式和审计级别。"""
     env = {
         "WEB_AUDIO": "1",
@@ -48,8 +46,12 @@ def default_agent_env(
         # 轮次日志都是 INFO,故拉到 INFO 即可保留诊断、砍掉帧噪声。要排障时临时设 DEBUG。
         "LIVEKIT_LOG_LEVEL": os.getenv("LIVEKIT_LOG_LEVEL", "INFO"),
     }
-    if metrics_dir is not None:
-        env["TURN_METRICS_LOG"] = str(metrics_dir / f"turn_metrics_{proc_id}.log")
+    if run_dir is not None:
+        env["TURN_METRICS_LOG"] = str(run_dir / f"turn_metrics_{proc_id}.log")
+        qa_log = str(run_dir / "qwen_voice_qa.log")
+        env["QA_LOG"] = qa_log
+        # Worker 专用优先级高于随后 load_dotenv(override=True) 读到的复制部署旧值。
+        env["XIAOGE_DEPLOY_QA_LOG"] = qa_log
     return env
 
 
@@ -290,7 +292,7 @@ def default_spawn(proc_id: str, port: int) -> subprocess.Popen[bytes]:
 
     agent_dir = Path(__file__).resolve().parents[1]
     env = dict(os.environ)
-    env.update(default_agent_env(proc_id, port, metrics_dir=agent_dir.parents[1] / ".run"))
+    env.update(default_agent_env(proc_id, port, run_dir=agent_dir.parents[1] / ".run"))
     return subprocess.Popen(  # noqa: S603
         [sys.executable, "web_ui_agent.py", "console"]
         + __import__("shlex").split(os.environ.get("XIAOGE_AGENT_CONSOLE_ARGS", "")),

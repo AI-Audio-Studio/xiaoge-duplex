@@ -27,7 +27,13 @@ from app.backends import (
     make_tts_backend,
 )
 from app.listening_host import listen_on_mic_toggle
-from app.session_state import runtime, say_voice_welcome
+from app.session_state import (
+    COMMAND_FAILURE,
+    COMMAND_SUCCESS,
+    runtime,
+    say_command_status,
+    say_voice_welcome,
+)
 from app.web_audio import WebSocketAudioInput
 from common.runtime import append_turn_log
 
@@ -276,9 +282,13 @@ async def _process_command_lifecycle(
     session_info: dict[str, object],
     session_id: str,
 ) -> None:
-    lifecycle = panel.command_lifecycle.accept(payload)
-    append_turn_log(f"R522_CMD_LIFECYCLE event={lifecycle} cmd_id={payload['cmd_id']}")
-    if lifecycle != "unknown":
+    update = panel.command_lifecycle.accept_update(payload)
+    append_turn_log(f"R522_CMD_LIFECYCLE event={update.lifecycle} cmd_id={payload['cmd_id']}")
+    if update.outcome == "success":
+        _schedule_command_status(COMMAND_SUCCESS)
+    elif update.outcome == "failure":
+        _schedule_command_status(COMMAND_FAILURE)
+    if update.lifecycle != "unknown":
         return
     await ws.send_str(
         json.dumps(
@@ -454,6 +464,8 @@ async def _command_timeout_context(_: aiohttp.web.Application) -> AsyncIterator[
                 append_turn_log(
                     f"R522_CMD_LIFECYCLE event={event['event']} cmd_id={event['cmd_id']}"
                 )
+                if event.get("outcome") == "failure":
+                    _schedule_command_status(COMMAND_FAILURE)
 
     task = asyncio.create_task(_sweep())
     try:
@@ -484,6 +496,12 @@ def _schedule_voice_welcome() -> None:
     aloop = runtime.agent_loop
     if aloop is not None and aloop.is_running():
         aloop.call_soon_threadsafe(say_voice_welcome)
+
+
+def _schedule_command_status(text: str) -> None:
+    aloop = runtime.agent_loop
+    if aloop is not None and aloop.is_running():
+        aloop.call_soon_threadsafe(say_command_status, text)
 
 
 def _is_frontend_call_started(payload: dict[str, object]) -> bool:

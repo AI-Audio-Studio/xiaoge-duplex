@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples" / "voice_agents"))
 
+from app.agent_tools import query_knowledge_text  # noqa: E402
 from app.knowledge_index import (  # noqa: E402
     MAX_CHUNK_CHARS,
     KnowledgeHit,
@@ -357,7 +358,67 @@ def test_load_from_persisted_index(offline_idx: KnowledgeIndex, source_dir: Path
     asyncio.run(run())
 
 
-# ──────────────────────────── KnowledgeHit ────────────────────────────
+# ──────────────────────────── agent tool helper ────────────────────────────
+
+
+class _LazyFakeIndex:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def is_ready(self) -> bool:
+        return False
+
+    async def query(self, query: str) -> list[KnowledgeHit]:
+        self.calls.append(query)
+        return [
+            KnowledgeHit(
+                text="小歌支持全双工语音对话，也支持音乐播放和基础机器人控制。",
+                score=0.88,
+                source="manual.md",
+                title="小歌功能",
+            )
+        ]
+
+
+class _EmptyFakeIndex:
+    async def query(self, query: str) -> list[KnowledgeHit]:
+        return []
+
+
+def test_query_knowledge_text_allows_lazy_index_load() -> None:
+    """helper 不应因 is_ready=False 提前返回,让 KnowledgeIndex.query 自行 lazy-load。"""
+    idx = _LazyFakeIndex()
+
+    async def run() -> None:
+        result = await query_knowledge_text(idx, "小歌有哪些功能")
+        assert idx.calls == ["小歌有哪些功能"]
+        assert result.ok is True
+        assert result.code == "knowledge_hits"
+        assert "知识库命中" in result.text
+        assert result.speak_hint == "小歌功能：小歌支持全双工语音对话，也支持音乐播放和基础机器人控制。"
+
+    asyncio.run(run())
+
+
+def test_query_knowledge_text_no_hits_has_direct_speech_hint() -> None:
+    async def run() -> None:
+        result = await query_knowledge_text(_EmptyFakeIndex(), "小歌不存在的知识")
+        assert result.ok is False
+        assert result.code == "knowledge_no_hits"
+        assert "不要编造" in result.text
+        assert result.speak_hint == "我暂时没在产品知识库里查到相关内容，可以换个问法再试试。"
+
+    asyncio.run(run())
+
+
+def test_query_knowledge_text_disabled_has_direct_speech_hint() -> None:
+    async def run() -> None:
+        result = await query_knowledge_text(None, "小歌有哪些功能")
+        assert result.ok is False
+        assert result.code == "knowledge_disabled"
+        assert result.speak_hint == "我现在还查不到产品知识库，所以这部分先不确定。"
+
+    asyncio.run(run())
 
 
 def test_knowledge_hit_dataclass() -> None:

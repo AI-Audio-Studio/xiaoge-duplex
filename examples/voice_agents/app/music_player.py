@@ -284,7 +284,8 @@ class MusicPlayer:
         self._disarm_yield_timer()
         self._resume_ev.set()  # 唤醒可能阻塞的循环
         task = self._task
-        if task is not None and not task.done():
+        had_active_task = task is not None and not task.done()
+        if had_active_task:
             task.cancel()
             try:
                 await task
@@ -293,11 +294,13 @@ class MusicPlayer:
         self._task = None
         self._current_path = None
         self._current_name = ""
-        # 清浏览器出向缓冲(若可用),让正在播的尾音立即停
+        if not had_active_task:
+            return
         output = self._runtime.ws_audio_output
         if output is not None:
             try:
-                output.clear_buffer()
+                clear_music_buffer = getattr(output, "clear_music_buffer", output.clear_buffer)
+                clear_music_buffer()
             except Exception:
                 pass
 
@@ -323,16 +326,20 @@ class MusicPlayer:
                 await self._push_frame(pcm_frame)
                 pushed += 1
                 if pushed == 1:
-                    _log(f"MUSIC_PUSH_FIRST name={path.stem!r} after={time.monotonic()-t0:.2f}s")
+                    _log(f"MUSIC_PUSH_FIRST name={path.stem!r} after={time.monotonic() - t0:.2f}s")
                 elif pushed % 250 == 0:  # 每 ~5s 一次,够看进度
-                    _log(f"MUSIC_PUSH name={path.stem!r} frames={pushed} elapsed={time.monotonic()-t0:.1f}s")
+                    _log(
+                        f"MUSIC_PUSH name={path.stem!r} frames={pushed} elapsed={time.monotonic() - t0:.1f}s"
+                    )
                 sleep_s = next_t - time.monotonic()
                 if sleep_s > 0:
                     await asyncio.sleep(sleep_s)
                 elif sleep_s < -frame_duration * 10:
                     # 落后超过 200ms,说明解码/推帧跟不上实时(罕见),重锚避免追帧 Burst
                     next_t = time.monotonic() + frame_duration
-            _log(f"MUSIC_END name={path.stem!r} frames={pushed} elapsed={time.monotonic()-t0:.1f}s")
+            _log(
+                f"MUSIC_END name={path.stem!r} frames={pushed} elapsed={time.monotonic() - t0:.1f}s"
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -416,11 +423,16 @@ class MusicPlayer:
         """通用 ffmpeg 解码:输出 16kHz mono s16le,stdout 流式读。"""
         cmd = [
             "ffmpeg",
-            "-loglevel", "error",
-            "-i", str(path),
-            "-ar", str(SAMPLE_RATE),
-            "-ac", "1",
-            "-f", "s16le",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-ar",
+            str(SAMPLE_RATE),
+            "-ac",
+            "1",
+            "-f",
+            "s16le",
             "pipe:1",
         ]
         proc: asyncio.subprocess.Process | None = None
@@ -453,7 +465,7 @@ class MusicPlayer:
                     pass
             _log(
                 f"MUSIC_FFMPEG_END rc={proc.returncode} "
-                f"stderr={stderr_tail.decode('utf-8','replace')[:200]!r}"
+                f"stderr={stderr_tail.decode('utf-8', 'replace')[:200]!r}"
             )
         except asyncio.CancelledError:
             if proc is not None and proc.returncode is None:

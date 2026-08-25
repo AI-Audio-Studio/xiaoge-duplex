@@ -8,7 +8,7 @@
 | 文档 | 说明 |
 | --- | --- |
 | [guide/RUN.md](guide/RUN.md) | 本地构建 / 启动 / 关闭 / 配置管理 |
-| [guide/ARCHITECTURE.md](guide/ARCHITECTURE.md) | 系统架构总览与一轮对话生命周期（配 [diagrams/](diagrams/)） |
+| [guide/ARCHITECTURE.md](guide/ARCHITECTURE.md) | 当前系统权威总览：云侧部署拓扑、会话与 Worker 生命周期、语音数据流、多域意图路由、指令闭环及代码阅读路线 |
 | [guide/CLIENT_INTEGRATION.md](guide/CLIENT_INTEGRATION.md) | 云侧对接指南（自研协议客户端：WS 端点 / 音频参数 / 消息协议 / 关闭码 / 认证现状） |
 
 ## 设计 & 评审 · [design/](design/)
@@ -19,7 +19,8 @@
 | 聆听模式（listening mode） | [design/listening-mode/LISTENING_MODE_DESIGN.md](design/listening-mode/LISTENING_MODE_DESIGN.md) · [LISTENING_MODE_DESIGN_REVIEW.md](design/listening-mode/LISTENING_MODE_DESIGN_REVIEW.md) |
 | 测试 | [design/TESTING_DESIGN.md](design/TESTING_DESIGN.md) |
 | 服务器并发改造 | **[design/concurrency/](design/concurrency/README.md) 子目录索引(先读)** —— 汇总 5 个文件(规格 v4 / 实施方案 / 实施前评审 / 摸底实测 / 评审存档)+ 关系图 + 维护规则;第一门已过,待负责人批准第二门,零代码 |
-| 指令控制 & apikey 鉴权 | [design/command-auth/COMMAND_AUTH_DESIGN.md](design/command-auth/COMMAND_AUTH_DESIGN.md)(简单版:apikey 请求头鉴权 + command 指令下发/回执协议) |
+| 全双工语音 + 控制 + 查询总架构 | [design/DUPLEX_CONTROL_QUERY_ARCHITECTURE.md](design/DUPLEX_CONTROL_QUERY_ARCHITECTURE.md) |
+| 指令控制 & apikey 鉴权 | [design/command-auth/COMMAND_AUTH_DESIGN.md](design/command-auth/COMMAND_AUTH_DESIGN.md)(简单版:apikey 请求头鉴权 + command 指令下发/回执协议) · [安全评估与方案选型](design/command-auth/COMMAND_AUTH_SECURITY_ASSESSMENT.md) · [技能设计(X3 清单)](design/command-auth/COMMAND_SKILLS_DESIGN.md)(指令目录/三级意图识别/知识库 RAG) · [运行时补充规格](design/command-auth/COMMAND_SKILLS_RUNTIME_SPEC.md)(路由仲裁/状态机/回复策略/FAQ RAG) |
 
 ## 报告 · [reports/](reports/)
 | 文档 | 说明 |
@@ -36,7 +37,7 @@
 | [project/CODE_OF_CONDUCT.md](project/CODE_OF_CONDUCT.md) | 行为准则 |
 
 ## 图示 · [diagrams/](diagrams/)
-`architecture.svg`（系统架构）、`sequence-turn.svg`（一轮对话时序）——被 [guide/ARCHITECTURE.md](guide/ARCHITECTURE.md) 引用。
+`architecture.svg`、`sequence-turn.svg` 是早期本地语音架构快照；当前云侧 Gateway、Pool、业务路由与指令闭环以 [guide/ARCHITECTURE.md](guide/ARCHITECTURE.md) 的内嵌 Mermaid 和现有代码为准。
 
 ---
 

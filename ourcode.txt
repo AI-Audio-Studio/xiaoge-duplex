@@ -3,6 +3,7 @@ examples/voice_agents/common/config_utils.py
 examples/voice_agents/common/text_rules.py
 examples/voice_agents/common/runtime.py
 examples/voice_agents/common/taps.py
+examples/voice_agents/common/semantic_router.py
 examples/voice_agents/env_bootstrap.py
 examples/voice_agents/web_ui_agent.py
 examples/voice_agents/app/__init__.py
@@ -33,6 +34,7 @@ examples/voice_agents/app/online_interrupt_host.py
 examples/voice_agents/webpanel/__init__.py
 examples/voice_agents/webpanel/state.py
 examples/voice_agents/webpanel/bridge.py
+examples/voice_agents/webpanel/command_lifecycle.py
 examples/voice_agents/webpanel/server.py
 examples/voice_agents/listening_mode.py
 examples/voice_agents/mute_gate.py

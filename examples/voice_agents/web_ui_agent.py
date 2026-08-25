@@ -31,7 +31,8 @@ import re
 import time
 import webbrowser
 
-from app.backends import build_llm, build_tts
+from app.agent_tools import query_knowledge_text
+from app.backends import build_llm, build_semantic_llm, build_tts
 from app.knowledge_index import KnowledgeIndex
 from app.listening_host import (
     listen_cancel_ttl,
@@ -42,7 +43,7 @@ from app.listening_host import (
     listen_tail_pending,
 )
 from app.online_interrupt_host import setup_online_interrupt
-from app.session_state import runtime
+from app.session_state import COMMAND_EXECUTING, COMMAND_FAILURE, runtime
 from app.setup_taps import (
     SessionWiring,
     register_session_handlers,
@@ -57,12 +58,14 @@ from app.setup_taps import (
     setup_web_audio,
     start_llm_warmup,
 )
-from common.g3_intent import G3IntentEngine, SessionState
+from common.g3_intent import G3IntentEngine, SessionState, ValidationResult
 from common.runtime import (
     append_turn_log as _append_turn_log,
     configure_utf8_stdio as _configure_utf8_stdio,
 )
+from common.semantic_router import SemanticRoute, SemanticRouter, SemanticRouterConfig
 from common.text_rules import (
+    LEADING_PUNCT_RE,
     is_backchannel as _is_backchannel,
     is_overlap_ack as _is_overlap_ack,
     normalize_spoken_digit_sequence as _normalize_spoken_digit_sequence,
@@ -101,12 +104,47 @@ _CONFIRM_CONTINUE_RE = re.compile(
     r"继续|继续吧|继续讲|接着讲|接着吧|往下讲|说吧|开始吧|来吧|可以讲)$"
 )
 _USER_TEXT_STRIP_RE = re.compile(r"[\s，,。.、！!？?～~；;：:…—·、\-]+")
-_MUSIC_TARGET_RE = re.compile(r"(歌|音乐|播放|放歌|放一下|声音|这首|曲子|歌曲)")
+_MUSIC_TARGET_RE = re.compile(r"(歌|音乐|播放|放歌|放一下|声音|这首|曲子|歌曲|唱)")
 _MUSIC_STOP_RE = re.compile(
-    r"(停止|停掉|停下|暂停|别放|不要放|不放|关掉|关闭|结束|取消|打住|别播|不要播|不播|别唱|不唱|切掉)"
+    r"(停止|停掉|停下|暂停|别放|不要放|不放|关掉|关闭|结束|取消|打住|别播|不要播|不播|别唱|不要唱|不唱|切掉)"
 )
+_MUSIC_BARE_STOP_RE = re.compile(r"^(停|停吧|停下|停下吧)$")
 _MUSIC_RESUME_RE = re.compile(r"(继续|恢复|接着|重新|再放|再播|接着放|接着播|继续放|继续播)")
-_MUSIC_BARE_RESUME_RE = re.compile(r"^(继续|继续吧|接着|接着吧|恢复|恢复吧|再放|再播|重新放|重新播)$")
+_MUSIC_BARE_RESUME_RE = re.compile(
+    r"^(继续|继续吧|接着|接着吧|恢复|恢复吧|再放|再播|重新放|重新播)$"
+)
+_MUSIC_NON_TARGET_RE = re.compile(r"(故事|录音|视频|电影|新闻|广播|播客|有声书|声音|语音|动画)")
+_MUSIC_PLAY_RE = re.compile(
+    r"^(?:请|麻烦|可以|能不能|能否|帮我|给我|我要|我想|想要|想听|要听)*"
+    r"(?:唱|放|播放|播|来|听|想听)(?:一首|一个|一下|一|个|点|首|个首)?"
+    r"(?:歌|歌曲|音乐|曲子)?(?P<title>.*)$"
+)
+_MUSIC_TITLE_SUFFIX_RE = re.compile(r"(?:这首)?(?:歌|歌曲|音乐|曲子)(?:吧|呀|啊|呢)?$")
+_MUSIC_SENTENCE_PARTICLE_RE = re.compile(r"[吧呀啊呢]+$")
+
+
+def _music_control_intent(original: str) -> tuple[str, str | None] | None:
+    compact = _USER_TEXT_STRIP_RE.sub("", original or "")
+    if not compact:
+        return None
+    mentions_music = bool(_MUSIC_TARGET_RE.search(compact))
+    if _MUSIC_BARE_RESUME_RE.fullmatch(compact):
+        return "resume", None
+    if _MUSIC_RESUME_RE.search(compact) and mentions_music:
+        return "resume", None
+    if _MUSIC_BARE_STOP_RE.fullmatch(compact):
+        return "stop", None
+    if _MUSIC_STOP_RE.search(compact) and (mentions_music or "播放" in compact or "播" in compact):
+        return "stop", None
+    if _MUSIC_NON_TARGET_RE.search(compact):
+        return None
+    match = _MUSIC_PLAY_RE.fullmatch(compact)
+    if match is None:
+        return None
+    title = _MUSIC_TITLE_SUFFIX_RE.sub("", match.group("title"))
+    title = _MUSIC_SENTENCE_PARTICLE_RE.sub("", title)
+    return "play", title or None
+
 
 # 判停模型文件已离线缓存(local_files_only=True 读取),强制离线模式避免每次启动
 # 去连 huggingface.co 触发 ~30s 超时重试导致的冷启动。要更新模型时临时设为 "0"。
@@ -124,8 +162,30 @@ def _defer_session_say(session, text: str, **kwargs) -> None:
     loop.call_soon(lambda: session.say(text, **kwargs))
 
 
+def _g3_clarify_frame(state: SessionState, utterance_id: str, now_ms: int) -> dict[str, object]:
+    return {
+        "type": "data.reply",
+        "trace_id": state.trace_id,
+        "session_id": state.session_id,
+        "utterance_id": utterance_id,
+        "intent_type": "control_cmd",
+        "text": "我不确定你是不是要现在执行，请直接说一个明确的操作。",
+        "ts_ms": now_ms,
+        "speak_policy": "ack",
+    }
+
+
+def _semantic_delegates(semantic: SemanticRoute) -> bool:
+    decision = semantic.decision
+    if semantic.status != "non_execute" or decision is None:
+        return False
+    return decision.domain in {"media_tool", "cloud_tool", "knowledge", "chat"} or (
+        decision.speech_act in {"chat", "state_query"} and decision.domain != "robot_control"
+    )
+
+
 class VoiceAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, semantic_router: SemanticRouter | None = None) -> None:
         super().__init__(
             instructions=(
                 """# 你是谁
@@ -189,6 +249,7 @@ class VoiceAgent(Agent):
         self._last_assistant_text = ""
         self._awaiting_continue_confirmation = False
         self._wiring: SessionWiring | None = None
+        self._semantic_router = semantic_router
 
     def attach_wiring(self, wiring: SessionWiring) -> None:
         self._wiring = wiring
@@ -246,28 +307,14 @@ class VoiceAgent(Agent):
             query: 用户问题的精炼关键词(如"麦克风阵列规格"/"如何升级模型"/"网络要求"/"会什么")。
         """
         idx = runtime.knowledge_index
-        logger.info("query_knowledge called: query=%r idx_ready=%s", query, idx is not None and idx.is_ready())
-        if idx is None:
-            return "知识库未启用。告诉用户你不清楚这个问题,不要编造。"
-        try:
-            hits = await idx.query(query)
-        except Exception as exc:
-            logger.exception("query_knowledge failed")
-            return f"检索出错了:{exc}"
-        logger.info("query_knowledge result: query=%r hits=%d", query, len(hits))
-        if not hits:
-            return "没查到相关内容。告诉用户知识库里没有这部分,不要编造。"
-        # 拼 LLM 可读的上下文:每条带标题、来源、相似度。LLM 据此组织回答话术(不要照念原文)。
-        lines: list[str] = [f"知识库命中 {len(hits)} 条(按相关度降序):"]
-        for i, h in enumerate(hits, 1):
-            lines.append(
-                f"\n[{i}] (score={h.score:.2f} source={h.source} title={h.title})\n{h.text}"
-            )
-        lines.append(
-            "\n请基于以上内容用一句到三句口语化回答用户。不要复述 score/source/标题等元信息,"
-            "不要说'根据知识库'之类的话。如果内容不足以回答,如实说不确定。"
+        logger.info(
+            "query_knowledge called: query=%r idx_ready=%s",
+            query,
+            idx is not None and idx.is_ready(),
         )
-        return "\n".join(lines)
+        result = await query_knowledge_text(idx, query)
+        logger.info("query_knowledge result: query=%r code=%s ok=%s", query, result.code, result.ok)
+        return result.text
 
     def _reset_live_transcript(self, reason: str) -> None:
         live = getattr(self._wiring, "live", None)
@@ -275,9 +322,36 @@ class VoiceAgent(Agent):
         if callable(reset_turn):
             reset_turn(reason)
 
-    def _finalize_g3_user_message(self, original: str, enabled: bool) -> None:
-        if enabled:
-            broadcast({"type": "message", "role": "user", "text": original, "ts": time.time()})
+    def _finalize_g3_user_message(
+        self,
+        original: str,
+        enabled: bool,
+        utterance_id: str | None = None,
+        reason: str = "consumed_voice_turn",
+    ) -> None:
+        if not enabled:
+            return
+        live = getattr(self._wiring, "live", None)
+        finish_turn = getattr(live, "finish_turn", None)
+        if callable(finish_turn):
+            utterance_id = finish_turn(reason, utterance_id)
+        display_text = LEADING_PUNCT_RE.sub("", original)
+        if display_text:
+            broadcast(
+                {
+                    "type": "message",
+                    "role": "user",
+                    "utterance_id": utterance_id,
+                    "text": display_text,
+                    "ts": time.time(),
+                }
+            )
+
+    def _finish_consumed_voice_turn(self, original: str, enabled: bool, reason: str) -> None:
+        if not enabled:
+            return
+        self._finalize_g3_user_message(original, True, reason=reason)
+        self._reset_live_transcript(reason)
 
     async def on_enter(self) -> None:
         # 开场白不在这里触发:on_enter 在 session.start() 期间执行,早于录音 tap 安装,
@@ -395,24 +469,25 @@ class VoiceAgent(Agent):
             listen_enter_aftermath("auto", notice=True)
             raise StopResponse()  # 触发轮不回复、不 capture(见设计 §5.2)
 
-    def _music_control_intent(self, original: str) -> str | None:
-        compact = _USER_TEXT_STRIP_RE.sub("", original or "")
-        if not compact:
-            return None
-        mentions_music = bool(_MUSIC_TARGET_RE.search(compact))
-        if _MUSIC_BARE_RESUME_RE.fullmatch(compact):
-            return "resume"
-        if _MUSIC_RESUME_RE.search(compact) and mentions_music:
-            return "resume"
-        if _MUSIC_STOP_RE.search(compact) and (mentions_music or "播放" in compact or "播" in compact):
-            return "stop"
-        return None
+    def _music_control_intent(self, original: str) -> tuple[str, str | None] | None:
+        return _music_control_intent(original)
 
-    async def _apply_turn_filters(self, original, spoke_over_agent: bool) -> None:
+    async def _apply_turn_filters(
+        self,
+        original,
+        spoke_over_agent: bool,
+        *,
+        finalize_user_message: bool = False,
+    ) -> None:
         """停止词 → 强打断+跳过回复;背调/压话附和 → 只跳过回复。"""
         player = runtime.music_player
         music_intent = self._music_control_intent(original)
-        if player is not None and music_intent == "resume" and not getattr(player, "is_playing", False):
+        music_action = music_intent[0] if music_intent is not None else None
+        if (
+            player is not None
+            and music_action == "resume"
+            and not getattr(player, "is_playing", False)
+        ):
             name = await player.resume_last_for_tool()
             if name is not None:
                 _append_turn_log(f"MUSIC_RESUME_BY_VOICE name={name!r} text={original!r}")
@@ -421,8 +496,22 @@ class VoiceAgent(Agent):
                     f"好的，继续播放《{name}》。",
                     add_to_chat_ctx=False,
                 )
+                if finalize_user_message:
+                    self._finish_consumed_voice_turn(original, True, "music_resume")
                 raise StopResponse()
-        if player is not None and music_intent == "stop":
+        if player is not None and music_action == "play":
+            title = music_intent[1] if music_intent is not None else None
+            name = await player.play_for_tool(title)
+            _append_turn_log(f"MUSIC_PLAY_BY_VOICE name={name!r} query={title!r} text={original!r}")
+            _defer_session_say(
+                self.session,
+                f"好的，播放《{name}》。" if name is not None else "没找到这首歌，换一首试试吧。",
+                add_to_chat_ctx=False,
+            )
+            if finalize_user_message:
+                self._finish_consumed_voice_turn(original, True, "music_play")
+            raise StopResponse()
+        if player is not None and music_action == "stop":
             stopped = await player.stop_for_tool()
             _append_turn_log(f"MUSIC_STOP_BY_VOICE stopped={stopped} text={original!r}")
             _defer_session_say(
@@ -431,6 +520,8 @@ class VoiceAgent(Agent):
                 add_to_chat_ctx=False,
                 allow_interruptions=False,
             )
+            if finalize_user_message:
+                self._finish_consumed_voice_turn(original, True, "music_stop")
             raise StopResponse()
         if _should_ignore_user_turn(original):
             logger.info("stop phrase -> force interrupt + skip reply: %r", original)
@@ -457,61 +548,160 @@ class VoiceAgent(Agent):
             _append_turn_log(f"BACKCHANNEL_OVERLAP text={original!r} -> skip_reply")
             raise StopResponse()
 
+    async def _g3_validation_and_frames(
+        self, original: str, state: SessionState, *, utterance_id: str, now_ms: int
+    ) -> tuple[ValidationResult, list[dict]]:
+        intent = _g3_intent_engine.route(original, state)
+        validation = _g3_intent_engine.validate(intent, state)
+        frames = _g3_intent_engine.build_outputs(
+            validation,
+            state,
+            utterance_id=utterance_id,
+            now_ms=now_ms,
+        )
+        if intent.route_reason != "chat_fallback":
+            return validation, frames
+        router = getattr(self, "_semantic_router", None)
+        if router is None or not router.enabled or not _g3_intent_engine.command_relevant(original):
+            return validation, []
+        semantic = await router.route(original)
+        _append_turn_log(
+            f"SEMANTIC_ROUTE mode={router.config.mode} status={semantic.status} "
+            f"reason={semantic.reason!r} decision={semantic.decision!r}"
+        )
+        if router.config.mode == "shadow":
+            return validation, []
+        semantic_frames = self._semantic_frames(original, state, semantic, utterance_id, now_ms)
+        return validation, semantic_frames
+
+    async def _g3_frames(
+        self, original: str, state: SessionState, *, utterance_id: str, now_ms: int
+    ) -> list[dict]:
+        _, frames = await self._g3_validation_and_frames(
+            original,
+            state,
+            utterance_id=utterance_id,
+            now_ms=now_ms,
+        )
+        return frames
+
+    def _semantic_frames(
+        self,
+        original: str,
+        state: SessionState,
+        semantic: SemanticRoute,
+        utterance_id: str,
+        now_ms: int,
+    ) -> list[dict]:
+        if _semantic_delegates(semantic):
+            return []
+        if not semantic.is_execution_candidate or semantic.decision is None:
+            return [_g3_clarify_frame(state, utterance_id, now_ms)]
+        decision = semantic.decision
+        validation = _g3_intent_engine.semantic_candidate(
+            raw_text=original,
+            action=str(decision.action or ""),
+            slots=dict(decision.slots),
+            confidence=decision.confidence,
+            state=state,
+        )
+        return _g3_intent_engine.build_outputs(
+            validation,
+            state,
+            utterance_id=utterance_id,
+            now_ms=now_ms,
+        )
+
+    def _build_g3_state(self, now_ms: int) -> SessionState:
+        return SessionState(
+            trace_id=f"trace-g3-{now_ms}",
+            session_id=os.getenv("XIAOGE_SESSION_ID", "sess-g3-local"),
+            caps=runtime.g3_caps,
+            command_dry_run=False,
+            robot_action_enabled=True,
+            pending_high_risk=runtime.g3_pending_high_risk,
+        )
+
+    def _remember_g3_pending_high_risk(
+        self, validation: ValidationResult, *, utterance_id: str, now_ms: int
+    ) -> None:
+        intent = validation.intent
+        entry = validation.entry
+        if validation.decision == "ask_confirm" and entry is not None:
+            runtime.g3_pending_high_risk = {
+                "action": entry.action,
+                "slots": dict(intent.slots),
+                "raw_text": intent.raw_text,
+                "confidence": intent.confidence,
+                "source_seed": intent.source_seed,
+                "utterance_id": utterance_id,
+                "created_at_ms": now_ms,
+            }
+            return
+        if validation.decision in {"accept", "cancel", "reject_policy", "reject_capability"}:
+            runtime.g3_pending_high_risk = None
+
+    async def _say_g3_knowledge_reply(self, original: str) -> str:
+        result = await query_knowledge_text(runtime.knowledge_index, original)
+        _append_turn_log(f"G3_KNOWLEDGE_QUERY code={result.code} ok={result.ok} text={original!r}")
+        return result.speak_hint or result.text
+
     async def _maybe_handle_g3_protocol_turn(
         self, original: str, *, finalize_user_message: bool = False
     ) -> None:
-        """Run R5.2.2 G3 intent/control/RAG routing before generic LLM chat.
-
-        This hook keeps real robot actions disabled. It only produces protocol-shaped
-        decisions, broadcasts them for the web client/logs, and speaks reply-only
-        outcomes. Accepted commands are dry-run decisions unless a later gate enables
-        real robot action outside this G3 scope.
-        """
-        state = SessionState(
-            trace_id=f"trace-g3-{int(time.time() * 1000)}",
-            session_id=os.getenv("XIAOGE_SESSION_ID", "sess-g3-local"),
-            command_dry_run=os.getenv("XG_COMMAND_DRY_RUN", "1").strip().lower()
-            not in ("0", "false", "off", "no"),
-            robot_action_enabled=os.getenv("XG_ROBOT_ACTION_ENABLED", "0").strip().lower()
-            in ("1", "true", "on", "yes"),
-        )
-        frames = _g3_intent_engine.handle_text(
+        """Run R5.2.2 G3 intent/control/RAG routing before generic LLM chat."""
+        now_ms = int(time.time() * 1000)
+        utterance_id = f"utt-g3-{now_ms}"
+        live = getattr(self._wiring, "live", None)
+        current_turn_id = getattr(live, "current_turn_id", None)
+        if finalize_user_message and callable(current_turn_id):
+            utterance_id = current_turn_id(utterance_id)
+        state = self._build_g3_state(now_ms)
+        validation, frames = await self._g3_validation_and_frames(
             original,
             state,
-            utterance_id=f"utt-g3-{int(time.time() * 1000)}",
+            utterance_id=utterance_id,
+            now_ms=now_ms,
         )
+        self._remember_g3_pending_high_risk(validation, utterance_id=utterance_id, now_ms=now_ms)
         if not frames:
             return
         first = frames[0]
         if first["type"] == "data.reply" and first["intent_type"] in {
+            "chat",
             "control_cmd",
             "info_query",
             "knowledge_qa",
             "system",
         }:
-            self._finalize_g3_user_message(original, finalize_user_message)
-            broadcast({"type": "g3_protocol", "frames": frames})
+            text = (
+                await self._say_g3_knowledge_reply(original)
+                if first["intent_type"] == "knowledge_qa"
+                else str(first["text"])
+            )
+            self._finalize_g3_user_message(
+                original,
+                finalize_user_message,
+                utterance_id,
+                "g3_protocol_reply",
+            )
             _append_turn_log(f"G3_PROTOCOL_REPLY frames={frames!r}")
-            self.session.say(str(first["text"]), add_to_chat_ctx=False)
+            self.session.say(text, add_to_chat_ctx=False)
             self._reset_live_transcript("g3_protocol_reply")
             raise StopResponse()
         if first["type"] == "data.cmd":
-            self._finalize_g3_user_message(original, finalize_user_message)
-            broadcast(
-                {
-                    "type": "g3_protocol",
-                    "dry_run": state.command_dry_run or not state.robot_action_enabled,
-                    "frames": frames,
-                }
+            self._finalize_g3_user_message(
+                original,
+                finalize_user_message,
+                utterance_id,
+                "g3_protocol_cmd",
             )
-            _append_turn_log(
-                "G3_PROTOCOL_CMD_DRY_RUN "
-                f"dry_run={state.command_dry_run} robot_action={state.robot_action_enabled} "
-                f"frames={frames!r}"
-            )
+            dispatched = broadcast({"type": "g3_protocol", "dry_run": False, "frames": frames})
+            _append_turn_log(f"G3_PROTOCOL_CMD dispatched={dispatched} frames={frames!r}")
             self.session.say(
-                "已识别到单条控制指令，当前保持 dry-run，不执行真实机器人动作。",
+                COMMAND_EXECUTING if dispatched else COMMAND_FAILURE,
                 add_to_chat_ctx=False,
+                allow_interruptions=False,
             )
             self._reset_live_transcript("g3_protocol_cmd")
             raise StopResponse()
@@ -538,7 +728,11 @@ class VoiceAgent(Agent):
             return
         original = self._maybe_add_continuation_instruction(turn_ctx, original)
         self._maybe_auto_enter_listening(original, spoke_over_agent)
-        await self._apply_turn_filters(original, spoke_over_agent)
+        await self._apply_turn_filters(
+            original,
+            spoke_over_agent,
+            finalize_user_message=True,
+        )
         await self._maybe_handle_g3_protocol_turn(original, finalize_user_message=True)
 
         normalized = _normalize_spoken_digit_sequence(original)
@@ -576,6 +770,16 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.log_context_fields = {}
 
     llm = build_llm()
+    semantic_config = SemanticRouterConfig.from_env()
+    semantic_router = None
+    if semantic_config.enabled and semantic_config.mode != "off":
+        semantic_llm = build_semantic_llm()
+        semantic_router = SemanticRouter(
+            semantic_llm,
+            _g3_intent_engine.action_catalog(),
+            semantic_config,
+        )
+        ctx.add_shutdown_callback(semantic_llm.aclose)
     turn_cfg = TurnConfig.from_env()  # 判停旋钮(默认=原值);可调便于后续扫参
     session = AgentSession(
         llm=llm,
@@ -597,7 +801,7 @@ async def entrypoint(ctx: JobContext) -> None:
     start_llm_warmup(llm)
     turn_metrics = setup_test_instrumentation(ctx, w)  # 设 w.timeline/record_settings/record_dir
 
-    agent = VoiceAgent()
+    agent = VoiceAgent(semantic_router)
     await session.start(agent=agent, room=ctx.room)
     runtime.session = session  # 供模块级聆听助手/欢迎语在 agent 循环里 say/收尾
     runtime.manual_text_handler = agent.handle_manual_text
