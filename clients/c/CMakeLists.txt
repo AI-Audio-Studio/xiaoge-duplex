@@ -21,8 +21,13 @@ endif()
 
 find_package(CURL REQUIRED)
 
+add_library(xiaoge_json STATIC third_party/cjson/cJSON.c)
+target_include_directories(xiaoge_json PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/cjson)
+target_compile_definitions(xiaoge_json PUBLIC CJSON_HIDE_SYMBOLS)
+
 add_library(xiaoge_client STATIC xiaoge_client.c)
 target_include_directories(xiaoge_client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${XIAOGE_LWS_INCLUDE_DIRS})
+target_link_libraries(xiaoge_client xiaoge_json)
 
 add_executable(xiaoge_demo_file demo_file.c)
 target_link_libraries(xiaoge_demo_file xiaoge_client CURL::libcurl)
@@ -38,10 +43,10 @@ target_compile_definitions(xiaoge_c_codec_test PRIVATE XIAOGE_ENABLE_TEST_HOOKS)
 
 if(XIAOGE_LWS_TARGET)
   target_link_libraries(xiaoge_client ${XIAOGE_LWS_TARGET} ${XIAOGE_LWS_DEP_LIBS})
-  target_link_libraries(xiaoge_c_codec_test ${XIAOGE_LWS_TARGET} ${XIAOGE_LWS_DEP_LIBS})
+  target_link_libraries(xiaoge_c_codec_test xiaoge_json ${XIAOGE_LWS_TARGET} ${XIAOGE_LWS_DEP_LIBS})
 else()
   target_link_libraries(xiaoge_client ${XIAOGE_LWS_LIBRARIES})
-  target_link_libraries(xiaoge_c_codec_test ${XIAOGE_LWS_LIBRARIES})
+  target_link_libraries(xiaoge_c_codec_test xiaoge_json ${XIAOGE_LWS_LIBRARIES})
   target_link_directories(xiaoge_client PUBLIC ${XIAOGE_LWS_LIBRARY_DIRS})
   target_link_directories(xiaoge_c_codec_test PRIVATE ${XIAOGE_LWS_LIBRARY_DIRS})
 endif()

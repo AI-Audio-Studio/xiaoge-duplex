@@ -1,9 +1,13 @@
 #include "xiaoge_client.h"
+#include "cJSON.h"
 
 #include <stdio.h>
 #include <string.h>
 
 int xiaoge_test_json_cloud_cmd_compatible(const char *cmd_json);
+int xiaoge_test_parse_session_url(const char *url);
+int xiaoge_test_build_ready_event(const char *json, xiaoge_ready_event *event, char *caps,
+                                  char *config, char *trace, char *session);
 int xiaoge_test_build_cmd_ack_json(const char *cmd_json, const char *status, const char *code,
                                    const char *message, char *out, size_t out_len);
 int xiaoge_test_build_cmd_result_json(const char *cmd_json, const char *status, const char *code,
@@ -80,6 +84,22 @@ static int must(int ok, const char *message) {
     return 0;
 }
 
+static int json_frame_has_string(const char *json, const char *key, const char *want) {
+    cJSON *root = cJSON_Parse(json);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    const char *value = cJSON_GetStringValue(item);
+    int ok = value && strcmp(value, want) == 0;
+    cJSON_Delete(root);
+    return ok;
+}
+
+static int json_frame_valid(const char *json) {
+    cJSON *root = cJSON_Parse(json);
+    int ok = root != NULL;
+    cJSON_Delete(root);
+    return ok;
+}
+
 int main(void) {
     char body[2048];
     xiaoge_config cfg = {
@@ -123,6 +143,30 @@ int main(void) {
         return 1;
     }
 
+    xiaoge_config bad_credential = cfg;
+    bad_credential.credential_json = "{bad";
+    if (must(xiaoge_build_create_session_request(&bad_credential, body, sizeof(body)) == -1,
+             "invalid credential JSON rejected")) {
+        return 1;
+    }
+
+    xiaoge_config bad_prefs = cfg;
+    bad_prefs.prefs_json = "[]";
+    if (must(xiaoge_build_create_session_request(&bad_prefs, body, sizeof(body)) == -1,
+             "non-object prefs JSON rejected")) {
+        return 1;
+    }
+
+    xiaoge_config escaped_cfg = cfg;
+    escaped_cfg.device_id = "robot\"quoted";
+    escaped_cfg.credential_json = "\"plain-secret\"";
+    escaped_cfg.client_version = "client\\test";
+    if (must(xiaoge_build_create_session_request(&escaped_cfg, body, sizeof(body)) > 0 && json_frame_valid(body),
+             "create_session escapes string fields and accepts string credential")) {
+        return 1;
+    }
+    if (must(json_frame_has_string(body, "device_id", "robot\"quoted"), "escaped device id round trips")) return 1;
+
     xiaoge_session bad_path = {
         "trace",
         "sess",
@@ -132,6 +176,26 @@ int main(void) {
         "cfg",
     };
     if (must(xiaoge_create_from_session(&cfg, &bad_path, 0, NULL) == NULL, "legacy ws path rejected")) return 1;
+    if (must(xiaoge_test_parse_session_url("ws://127.0.0.1/ws/session") == 0,
+             "canonical ws session path accepted")) {
+        return 1;
+    }
+    if (must(xiaoge_test_parse_session_url("ws://127.0.0.1/ws/audio") == -1,
+             "legacy ws audio path rejected by parser")) {
+        return 1;
+    }
+    if (must(xiaoge_test_parse_session_url("ws://127.0.0.1/foo/ws/session") == -1,
+             "prefixed ws session path rejected")) {
+        return 1;
+    }
+    if (must(xiaoge_test_parse_session_url("ws://127.0.0.1/ws/session?access_token=token") == -1,
+             "query token ws session path rejected")) {
+        return 1;
+    }
+    if (must(xiaoge_test_parse_session_url("ws://127.0.0.1/ws/session#fragment") == -1,
+             "fragment ws session path rejected")) {
+        return 1;
+    }
 
     if (must(xiaoge_send_pcm(NULL, "x", 1) == -1, "null pcm client rejected")) return 1;
     if (must(xiaoge_send_frontend_state(NULL, "bad", "awake", "speech", 1000) == -1,
@@ -158,6 +222,19 @@ int main(void) {
              "cloud default JSON spacing accepted")) {
         return 1;
     }
+    const char *nested_cmd_json =
+        "{"
+        "\"type\":\"data.cmd\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"utterance_id\":\"utt-cloud-json\",\"cmd_id\":\"cmd-cloud-json\","
+        "\"capability_id\":\"motion.move\",\"action\":\"navigation.move\","
+        "\"direction\":\"backward\",\"params\":{\"direction\":\"forward\",\"session_id\":\"nested\"},"
+        "\"risk_level\":\"medium\",\"ack_timeout_ms\":800,\"result_timeout_ms\":5000,"
+        "\"issued_at_ms\":1789000001000}"
+        ;
+    if (must(xiaoge_test_json_cloud_cmd_compatible(nested_cmd_json) == 1,
+             "nested params direction used instead of top-level direction")) {
+        return 1;
+    }
 
     char frame[1024];
     if (must(xiaoge_test_build_cmd_ack_json(cloud_json, XIAOGE_CMD_ACK_STATUS_ACCEPTED, "ok", "accepted", frame,
@@ -168,6 +245,13 @@ int main(void) {
     if (must(strstr(frame, "\"type\":\"data.cmd_ack\"") != NULL, "cmd_ack type serialized")) return 1;
     if (must(strstr(frame, "\"status\":\"accepted\"") != NULL, "cmd_ack status serialized")) return 1;
     if (must(strstr(frame, "\"received_at_ms\":") != NULL, "cmd_ack timestamp serialized")) return 1;
+    if (must(xiaoge_test_build_cmd_ack_json(cloud_json, XIAOGE_CMD_ACK_STATUS_ACCEPTED, "ok",
+                                            "accepted \"quoted\"\\line\nnext", frame, sizeof(frame)) == 0 &&
+             json_frame_valid(frame) &&
+             json_frame_has_string(frame, "message", "accepted \"quoted\"\\line\nnext"),
+             "cmd_ack escapes message strings")) {
+        return 1;
+    }
     if (must(xiaoge_test_build_cmd_ack_json(cloud_json, "unknown", "bad", "bad", frame,
                                             sizeof(frame)) == -1,
              "invalid cmd_ack status rejected")) {
@@ -204,6 +288,29 @@ int main(void) {
         return 1;
     }
 
+    const char *ready_json =
+        "{\"type\":\"ctrl.ready\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"sample_rate\":16000,\"granted_caps\":[\"audio\",\"text\"],\"config_version\":\"cfg\"}";
+    xiaoge_ready_event ready_event;
+    char ready_caps[128] = "audio,text", ready_config[128], ready_trace[128], ready_session[128];
+    if (must(xiaoge_test_build_ready_event(ready_json, &ready_event, ready_caps, ready_config, ready_trace,
+                                           ready_session) == 0,
+             "ready event builds")) {
+        return 1;
+    }
+    if (must(ready_event.sample_rate == XIAOGE_SAMPLE_RATE && strcmp(ready_event.config_version, "cfg") == 0,
+             "ready event enforces sample rate and config")) {
+        return 1;
+    }
+    const char *bad_ready_json =
+        "{\"type\":\"ctrl.ready\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"sample_rate\":8000,\"granted_caps\":[\"audio\",\"text\"],\"config_version\":\"cfg\"}";
+    if (must(xiaoge_test_build_ready_event(bad_ready_json, &ready_event, ready_caps, ready_config, ready_trace,
+                                           ready_session) == -1,
+             "wrong ready sample rate rejected")) {
+        return 1;
+    }
+
     const char *stt_json =
         "{\"type\":\"data.stt\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
         "\"utterance_id\":\"utt-0001\",\"text\":\"往前走一米\",\"final\":true,\"ts_ms\":1789000000100}";
@@ -215,6 +322,16 @@ int main(void) {
     }
     if (must(strcmp(stt_event.text, "往前走一米") == 0 && stt_event.final == 1,
              "stt event exposes text/final")) {
+        return 1;
+    }
+    const char *escaped_stt_json =
+        "{\"type\":\"data.stt\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"utterance_id\":\"utt-escape\",\"text\":\"他说：\\\"你好\\\"\\n下一行\","
+        "\"final\":true,\"ts_ms\":1789000000101}";
+    if (must(xiaoge_test_build_stt_event(escaped_stt_json, &stt_event, stt_text, stt_utt, stt_trace,
+                                         stt_session) == 0 &&
+             strcmp(stt_event.text, "他说：\"你好\"\n下一行") == 0,
+             "stt escaped JSON string parsed")) {
         return 1;
     }
 

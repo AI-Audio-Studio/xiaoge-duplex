@@ -40,6 +40,8 @@ public final class ReplyEvent {
 
     public static ReplyEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "data.reply");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "utterance_id", "intent_type", "text",
+                "ts_ms", "speak_policy");
         return new ReplyEvent(
                 EventJson.requiredString(payload, "text"),
                 true,

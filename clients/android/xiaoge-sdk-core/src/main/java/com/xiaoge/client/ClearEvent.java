@@ -25,6 +25,7 @@ public final class ClearEvent {
 
     public static ClearEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "ctrl.clear");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "utterance_id", "reason");
         return new ClearEvent(
                 EventJson.requiredString(payload, "trace_id"),
                 EventJson.requiredString(payload, "session_id"),

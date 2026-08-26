@@ -23,7 +23,9 @@ ctest --test-dir build --output-on-failure
 
 Install `libwebsockets` with TLS support, `libcurl`, and `cmake` first. On
 Linux, `libwebsockets-dev`, `libcurl4-openssl-dev`, and `cmake` are sufficient
-on most distributions.
+on most distributions. The SDK vendors cJSON internally under
+`third_party/cjson` for protocol JSON parsing/building, so embedding
+applications do not need to install a separate JSON library.
 
 For Android cross builds, `ctest` does not execute the Android ELF on the host.
 The `xiaoge_c_codec_test` target is registered through an adb wrapper:

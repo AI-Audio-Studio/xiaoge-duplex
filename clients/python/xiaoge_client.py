@@ -382,8 +382,12 @@ class ProtocolCodec:
         missing = required - payload.keys()
         if missing:
             raise XiaogeProtocolError(f"session.created missing fields: {sorted(missing)}")
+        extra = payload.keys() - required
+        if extra:
+            raise XiaogeProtocolError(f"session.created has extra fields: {sorted(extra)}")
         if payload["type"] != "session.created":
             raise XiaogeProtocolError("create_session response type must be session.created")
+        expires_in_ms = _required_int(payload, "expires_in_ms", minimum=1)
         ws_url = str(payload["ws_url"])
         parsed_ws_url = urlparse(ws_url)
         if (
@@ -394,13 +398,22 @@ class ProtocolCodec:
             raise XiaogeProtocolError(
                 "session.created ws_url must point exactly to /ws/session without query or fragment"
             )
-        granted_caps = list(payload["granted_caps"])
+        if not isinstance(payload["config_snapshot"], dict):
+            raise XiaogeProtocolError("config_snapshot must be an object")
+        if not isinstance(payload["config_snapshot"].get("config_version"), str) or not payload[
+            "config_snapshot"
+        ]["config_version"]:
+            raise XiaogeProtocolError("config_snapshot.config_version must be a non-empty string")
+        granted_caps_raw = payload["granted_caps"]
+        if not isinstance(granted_caps_raw, list) or not all(isinstance(cap, str) for cap in granted_caps_raw):
+            raise XiaogeProtocolError("granted_caps must be a string array")
+        granted_caps = list(granted_caps_raw)
         validate_caps(granted_caps)
         return SessionInfo(
             str(payload["trace_id"]),
             str(payload["session_id"]),
             str(payload["access_token"]),
-            int(payload["expires_in_ms"]),
+            expires_in_ms,
             ws_url,
             granted_caps,
             dict(payload["config_snapshot"]),
@@ -609,14 +622,28 @@ def _require_type(payload: JsonObject, kind: str) -> None:
         raise XiaogeProtocolError(f"type must be {kind}")
 
 
+def _require_only_keys(payload: JsonObject, allowed: set[str], kind: str) -> None:
+    extra = payload.keys() - allowed
+    if extra:
+        raise XiaogeProtocolError(f"{kind} has extra fields: {sorted(extra)}")
+
+
 def _ready_event_from_payload(payload: JsonObject) -> ReadyEvent:
     _require_type(payload, "ctrl.ready")
+    _require_only_keys(
+        payload,
+        {"type", "trace_id", "session_id", "sample_rate", "granted_caps", "config_version"},
+        "ctrl.ready",
+    )
     granted_caps_raw = payload.get("granted_caps")
     if not isinstance(granted_caps_raw, list) or not all(isinstance(cap, str) for cap in granted_caps_raw):
         raise XiaogeProtocolError("granted_caps must be a string array")
     validate_caps(list(granted_caps_raw))
+    sample_rate = _required_int(payload, "sample_rate")
+    if sample_rate != SAMPLE_RATE:
+        raise XiaogeProtocolError("sample_rate must be 16000")
     return ReadyEvent(
-        sample_rate=_required_int(payload, "sample_rate"),
+        sample_rate=sample_rate,
         granted_caps=tuple(granted_caps_raw),
         config_version=_required_string(payload, "config_version"),
         trace_id=_required_string(payload, "trace_id"),
@@ -627,6 +654,7 @@ def _ready_event_from_payload(payload: JsonObject) -> ReadyEvent:
 
 def _clear_event_from_payload(payload: JsonObject) -> ClearEvent:
     _require_type(payload, "ctrl.clear")
+    _require_only_keys(payload, {"type", "trace_id", "session_id", "utterance_id", "reason"}, "ctrl.clear")
     return ClearEvent(
         trace_id=_required_string(payload, "trace_id"),
         session_id=_required_string(payload, "session_id"),
@@ -638,6 +666,21 @@ def _clear_event_from_payload(payload: JsonObject) -> ClearEvent:
 
 def _state_event_from_payload(payload: JsonObject) -> StateEvent:
     _require_type(payload, "ctrl.state")
+    _require_only_keys(
+        payload,
+        {
+            "type",
+            "trace_id",
+            "session_id",
+            "link_state",
+            "interaction_mode",
+            "engine_gate",
+            "resource_state",
+            "ts_ms",
+            "pending_confirmation",
+        },
+        "ctrl.state",
+    )
     pending = payload.get("pending_confirmation")
     if pending is not None and not isinstance(pending, dict):
         raise XiaogeProtocolError("pending_confirmation must be an object")
@@ -656,6 +699,11 @@ def _state_event_from_payload(payload: JsonObject) -> StateEvent:
 
 def _stt_event_from_payload(payload: JsonObject) -> SttEvent:
     _require_type(payload, "data.stt")
+    _require_only_keys(
+        payload,
+        {"type", "trace_id", "session_id", "utterance_id", "text", "final", "ts_ms"},
+        "data.stt",
+    )
     return SttEvent(
         text=_required_string(payload, "text"),
         is_final=_required_bool(payload, "final"),
@@ -669,6 +717,11 @@ def _stt_event_from_payload(payload: JsonObject) -> SttEvent:
 
 def _reply_event_from_payload(payload: JsonObject) -> ReplyEvent:
     _require_type(payload, "data.reply")
+    _require_only_keys(
+        payload,
+        {"type", "trace_id", "session_id", "utterance_id", "intent_type", "text", "ts_ms", "speak_policy"},
+        "data.reply",
+    )
     return ReplyEvent(
         text=_required_string(payload, "text"),
         is_final=True,
@@ -684,6 +737,24 @@ def _reply_event_from_payload(payload: JsonObject) -> ReplyEvent:
 
 def _command_event_from_payload(payload: JsonObject) -> CommandEvent:
     _require_type(payload, "data.cmd")
+    _require_only_keys(
+        payload,
+        {
+            "type",
+            "trace_id",
+            "session_id",
+            "utterance_id",
+            "cmd_id",
+            "capability_id",
+            "action",
+            "params",
+            "risk_level",
+            "ack_timeout_ms",
+            "result_timeout_ms",
+            "issued_at_ms",
+        },
+        "data.cmd",
+    )
     params = payload.get("params")
     if not isinstance(params, dict):
         raise XiaogeProtocolError("params must be an object")
@@ -705,6 +776,11 @@ def _command_event_from_payload(payload: JsonObject) -> CommandEvent:
 
 def _error_event_from_payload(payload: JsonObject) -> ErrorEvent:
     _require_type(payload, "data.error")
+    _require_only_keys(
+        payload,
+        {"type", "trace_id", "session_id", "code", "message", "retryable", "ts_ms"},
+        "data.error",
+    )
     return ErrorEvent(
         code=_required_enum(payload, "code", VALID_ERROR_CODES),
         message=_required_string(payload, "message"),

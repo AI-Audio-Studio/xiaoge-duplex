@@ -159,6 +159,61 @@ public class ProtocolCodecTest {
         ProtocolCodec.cmdResult(validCmd("cmd-bad-result-status"), "done", "bad");
     }
 
+    @Test(expected = org.json.JSONException.class)
+    public void readyRejectsWrongSampleRate() throws Exception {
+        ReadyEvent.fromJson(validReady().put("sample_rate", 8000));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void readyRejectsExtraField() throws Exception {
+        ReadyEvent.fromJson(validReady().put("extra", "forbidden"));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void commandRejectsZeroAckTimeout() throws Exception {
+        CommandEvent.fromJson(validCmd("cmd-zero-ack").put("ack_timeout_ms", 0));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void commandRejectsZeroResultTimeout() throws Exception {
+        CommandEvent.fromJson(validCmd("cmd-zero-result").put("result_timeout_ms", 0));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void commandRejectsNegativeIssuedAt() throws Exception {
+        CommandEvent.fromJson(validCmd("cmd-negative-issued").put("issued_at_ms", -1));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void sttRejectsExtraField() throws Exception {
+        SttEvent.fromJson(new JSONObject()
+                .put("type", "data.stt")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("utterance_id", "utt")
+                .put("text", "hello")
+                .put("final", true)
+                .put("ts_ms", 1)
+                .put("extra", "forbidden"));
+    }
+
+    @Test(expected = org.json.JSONException.class)
+    public void parseSessionRejectsExtraField() throws Exception {
+        ProtocolCodec.parseSession(new JSONObject(sessionJsonWithWsUrl("ws://host/ws/session"))
+                .put("extra", "forbidden")
+                .toString());
+    }
+
+    private static JSONObject validReady() throws Exception {
+        return new JSONObject()
+                .put("type", "ctrl.ready")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("sample_rate", ProtocolCodec.SAMPLE_RATE)
+                .put("granted_caps", new org.json.JSONArray(Arrays.asList("audio", "text")))
+                .put("config_version", "cfg");
+    }
+
     private static JSONObject validCmd(String cmdId) throws Exception {
         return new JSONObject()
                 .put("type", "data.cmd")

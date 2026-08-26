@@ -60,6 +60,8 @@ public final class ProtocolCodec {
 
     public static SessionInfo parseSession(String json) throws JSONException {
         JSONObject o = new JSONObject(json);
+        EventJson.requireOnlyKeys(o, "type", "trace_id", "session_id", "access_token", "expires_in_ms", "ws_url",
+                "granted_caps", "config_snapshot");
         if (!o.getString("type").equals("session.created")) {
             throw new IllegalArgumentException("create_session response type must be session.created");
         }

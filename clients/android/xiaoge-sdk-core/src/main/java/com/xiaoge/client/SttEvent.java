@@ -29,6 +29,7 @@ public final class SttEvent {
 
     public static SttEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "data.stt");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "utterance_id", "text", "final", "ts_ms");
         return new SttEvent(
                 EventJson.requiredString(payload, "text"),
                 EventJson.requiredBoolean(payload, "final"),

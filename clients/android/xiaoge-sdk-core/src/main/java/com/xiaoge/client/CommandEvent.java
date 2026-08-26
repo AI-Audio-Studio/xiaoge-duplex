@@ -40,15 +40,18 @@ public final class CommandEvent {
 
     public static CommandEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "data.cmd");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "utterance_id", "cmd_id",
+                "capability_id", "action", "params", "risk_level", "ack_timeout_ms", "result_timeout_ms",
+                "issued_at_ms");
         return new CommandEvent(
                 EventJson.requiredString(payload, "cmd_id"),
                 EventJson.requiredString(payload, "capability_id"),
                 EventJson.requiredString(payload, "action"),
                 EventJson.requiredObject(payload, "params"),
                 EventJson.requiredEnum(payload, "risk_level", VALID_RISK_LEVELS),
-                EventJson.requiredInt(payload, "ack_timeout_ms"),
-                EventJson.requiredInt(payload, "result_timeout_ms"),
-                EventJson.requiredLong(payload, "issued_at_ms"),
+                EventJson.requiredIntAtLeast(payload, "ack_timeout_ms", 1),
+                EventJson.requiredIntAtLeast(payload, "result_timeout_ms", 1),
+                EventJson.requiredLongAtLeast(payload, "issued_at_ms", 0),
                 EventJson.requiredString(payload, "utterance_id"),
                 EventJson.requiredString(payload, "trace_id"),
                 EventJson.requiredString(payload, "session_id"),

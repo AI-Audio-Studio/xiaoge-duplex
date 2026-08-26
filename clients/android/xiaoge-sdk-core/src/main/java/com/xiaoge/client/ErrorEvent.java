@@ -31,6 +31,7 @@ public final class ErrorEvent {
 
     public static ErrorEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "data.error");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "code", "message", "retryable", "ts_ms");
         return new ErrorEvent(
                 EventJson.requiredEnum(payload, "code", VALID_CODES),
                 EventJson.requiredString(payload, "message"),

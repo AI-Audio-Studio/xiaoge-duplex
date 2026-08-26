@@ -10,6 +10,7 @@
  *                       [--api-key key]
  */
 #include "xiaoge_client.h"
+#include "cJSON.h"
 
 #ifndef _WIN32
 #error "demo_mic_win.c requires Windows waveIn/waveOut APIs"
@@ -162,25 +163,15 @@ static size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata
 }
 
 static int json_get_string(const char *json, const char *key, char *out, size_t out_len) {
-    char pat[96];
-    snprintf(pat, sizeof(pat), "\"%s\"", key);
-    const char *p = strstr(json, pat);
-    if (!p) return -1;
-    p += strlen(pat);
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (*p++ != ':') return -1;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (*p++ != '"') return -1;
-    char *w = out;
-    size_t left = out_len;
-    while (*p && *p != '"') {
-        if (left < 2) return -1;
-        if (*p == '\\' && p[1]) p++;
-        *w++ = *p++;
-        left--;
+    cJSON *root = cJSON_Parse(json);
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    const char *value = cJSON_GetStringValue(item);
+    if (!value || !out || out_len == 0 || strlen(value) >= out_len) {
+        cJSON_Delete(root);
+        return -1;
     }
-    if (*p != '"') return -1;
-    *w = 0;
+    memcpy(out, value, strlen(value) + 1);
+    cJSON_Delete(root);
     return 0;
 }
 

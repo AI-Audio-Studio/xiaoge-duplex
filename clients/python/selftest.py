@@ -376,12 +376,16 @@ def _session_payload(ws_url: str) -> dict[str, Any]:
     }
 
 
-def _assert_session_url_fails(ws_url: str, message: str) -> None:
+def _assert_session_payload_fails(payload: dict[str, Any], message: str) -> None:
     try:
-        ProtocolCodec.parse_session_response(_session_payload(ws_url))
+        ProtocolCodec.parse_session_response(payload)
     except XiaogeProtocolError:
         return
     raise AssertionError(message)
+
+
+def _assert_session_url_fails(ws_url: str, message: str) -> None:
+    _assert_session_payload_fails(_session_payload(ws_url), message)
 
 
 def _no_legacy_session_path() -> None:
@@ -394,14 +398,24 @@ def _no_legacy_session_path() -> None:
         "ws://127.0.0.1/ws/session#fragment",
         "fragment on /ws/session must fail",
     )
+    zero_expiry = _session_payload("ws://127.0.0.1/ws/session")
+    zero_expiry["expires_in_ms"] = 0
+    _assert_session_payload_fails(zero_expiry, "zero expires_in_ms must fail")
+    negative_expiry = _session_payload("ws://127.0.0.1/ws/session")
+    negative_expiry["expires_in_ms"] = -1
+    _assert_session_payload_fails(negative_expiry, "negative expires_in_ms must fail")
+    extra_field = _session_payload("ws://127.0.0.1/ws/session")
+    extra_field["token"] = "must-not-be-here"
+    _assert_session_payload_fails(extra_field, "extra session.created fields must fail")
 
 
 async def _event_validation() -> None:
     client = XiaogeClient("http://127.0.0.1/create_session", "robot", {"type": "mock"})
-    seen: dict[str, Any] = {"protocol_error": 0, "stt": 0}
+    seen: dict[str, Any] = {"protocol_error": 0, "ready": 0, "stt": 0}
     client.on_protocol_error = lambda event: seen.__setitem__(
         "protocol_error", seen["protocol_error"] + 1
     )
+    client.on_ready_event = lambda event: seen.__setitem__("ready", seen["ready"] + 1)
     client.on_stt = lambda event: seen.__setitem__("stt", seen["stt"] + 1)
     await client._handle_json(  # noqa: SLF001 - selftest covers inbound validation behavior.
         {
@@ -414,7 +428,29 @@ async def _event_validation() -> None:
             "ts_ms": 1,
         }
     )
-    assert seen == {"protocol_error": 1, "stt": 0}, seen
+    await client._handle_json(  # noqa: SLF001 - selftest covers strict additionalProperties.
+        {
+            "type": "data.stt",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "utterance_id": "utt-extra",
+            "text": "bad",
+            "final": True,
+            "ts_ms": 1,
+            "extra": "forbidden",
+        }
+    )
+    await client._handle_json(  # noqa: SLF001 - selftest covers ready sample-rate const.
+        {
+            "type": "ctrl.ready",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "sample_rate": 8000,
+            "granted_caps": ["audio", "text"],
+            "config_version": "cfg-invalid",
+        }
+    )
+    assert seen == {"protocol_error": 3, "ready": 0, "stt": 0}, seen
 
 
 async def main() -> int:

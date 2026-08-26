@@ -41,6 +41,8 @@ public final class StateEvent {
 
     public static StateEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "ctrl.state");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "link_state", "interaction_mode",
+                "engine_gate", "resource_state", "ts_ms", "pending_confirmation");
         JSONObject pending = null;
         if (payload.has("pending_confirmation") && !payload.isNull("pending_confirmation")) {
             pending = EventJson.copy(payload.getJSONObject("pending_confirmation"));

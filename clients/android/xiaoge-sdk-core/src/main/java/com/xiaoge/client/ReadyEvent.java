@@ -23,10 +23,13 @@ public final class ReadyEvent {
 
     public static ReadyEvent fromJson(JSONObject payload) throws JSONException {
         EventJson.requireType(payload, "ctrl.ready");
+        EventJson.requireOnlyKeys(payload, "type", "trace_id", "session_id", "sample_rate", "granted_caps", "config_version");
+        String[] grantedCaps = EventJson.requiredStringArray(payload, "granted_caps");
+        ProtocolCodec.validateCaps(java.util.Arrays.asList(grantedCaps));
         return new ReadyEvent(
-                EventJson.requiredInt(payload, "sample_rate"),
-                EventJson.optionalStringArray(payload, "granted_caps"),
-                EventJson.optionalString(payload, "config_version"),
+                EventJson.requiredIntEquals(payload, "sample_rate", ProtocolCodec.SAMPLE_RATE),
+                grantedCaps,
+                EventJson.requiredString(payload, "config_version"),
                 EventJson.requiredString(payload, "trace_id"),
                 EventJson.requiredString(payload, "session_id"),
                 EventJson.copy(payload));
