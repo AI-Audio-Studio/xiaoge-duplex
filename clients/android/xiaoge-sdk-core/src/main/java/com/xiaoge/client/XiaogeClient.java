@@ -5,6 +5,7 @@ import android.util.Log;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -149,6 +150,13 @@ public final class XiaogeClient {
         }
     }
 
+    /** Events are always delivered, so field-level deviations surface as warnings instead of errors. */
+    private static void logParseWarnings(String type, String[] warnings) {
+        if (warnings.length > 0) {
+            Log.w(TAG, type + " parse warnings: " + Arrays.toString(warnings));
+        }
+    }
+
     private final class SocketListener extends WebSocketListener {
         @Override
         public void onOpen(WebSocket webSocket, Response response) {
@@ -168,6 +176,7 @@ public final class XiaogeClient {
                 switch (type) {
                     case "ctrl.ready": {
                         ReadyEvent event = ReadyEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onReadyEvent(event);
@@ -178,6 +187,7 @@ public final class XiaogeClient {
                     case "ctrl.clear": {
                         Log.d(TAG, " ctrl.clear: " + text);
                         ClearEvent event = ClearEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onClear(event);
@@ -186,6 +196,7 @@ public final class XiaogeClient {
                     }
                     case "ctrl.state": {
                         StateEvent event = StateEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onState(event);
@@ -195,6 +206,7 @@ public final class XiaogeClient {
                     case "data.stt": {
                         Log.d(TAG, "data.stt: " + text);
                         SttEvent event = SttEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onStt(event);
@@ -204,6 +216,7 @@ public final class XiaogeClient {
                     case "data.reply": {
                         Log.d(TAG, "data.reply: " + text);
                         ReplyEvent event = ReplyEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onReply(event);
@@ -212,6 +225,7 @@ public final class XiaogeClient {
                     }
                     case "data.cmd": {
                         CommandEvent event = CommandEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onCommand(event);
@@ -220,6 +234,7 @@ public final class XiaogeClient {
                     }
                     case "data.error": {
                         ErrorEvent event = ErrorEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
                         dispatch(() -> {
                             listener.onJson(payload);
                             listener.onError(event);

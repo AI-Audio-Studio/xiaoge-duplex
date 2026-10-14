@@ -159,49 +159,64 @@ public class ProtocolCodecTest {
         ProtocolCodec.cmdResult(validCmd("cmd-bad-result-status"), "done", "bad");
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void readyRejectsWrongSampleRate() throws Exception {
-        ReadyEvent.fromJson(validReady().put("sample_rate", 8000));
+    @Test
+    public void readyPassesThroughNonStandardSampleRateWithWarning() throws Exception {
+        ReadyEvent event = ReadyEvent.fromJson(validReady().put("sample_rate", 8000));
+        assertEquals(8000, event.sampleRate);
+        assertTrue(contains(event.parseWarnings, "sample_rate is 8000, expected 16000"));
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void readyRejectsExtraField() throws Exception {
-        ReadyEvent.fromJson(validReady().put("extra", "forbidden"));
+    @Test
+    public void readyIgnoresExtraFieldButKeepsItInRaw() throws Exception {
+        ReadyEvent event = ReadyEvent.fromJson(validReady().put("extra", "forbidden"));
+        assertTrue(contains(event.parseWarnings, "unexpected field: extra"));
+        assertEquals("forbidden", event.raw.getString("extra"));
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void commandRejectsZeroAckTimeout() throws Exception {
-        CommandEvent.fromJson(validCmd("cmd-zero-ack").put("ack_timeout_ms", 0));
+    @Test
+    public void commandPassesThroughNonPositiveTimeouts() throws Exception {
+        CommandEvent zeroAck = CommandEvent.fromJson(validCmd("cmd-zero-ack").put("ack_timeout_ms", 0));
+        assertEquals(0, zeroAck.ackTimeoutMs);
+        CommandEvent zeroResult = CommandEvent.fromJson(validCmd("cmd-zero-result").put("result_timeout_ms", 0));
+        assertEquals(0, zeroResult.resultTimeoutMs);
+        CommandEvent negativeIssued = CommandEvent.fromJson(validCmd("cmd-negative-issued").put("issued_at_ms", -1));
+        assertEquals(-1, negativeIssued.issuedAtMs);
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void commandRejectsZeroResultTimeout() throws Exception {
-        CommandEvent.fromJson(validCmd("cmd-zero-result").put("result_timeout_ms", 0));
+    @Test
+    public void sttIgnoresExtraFieldButKeepsItInRaw() throws Exception {
+        SttEvent event = SttEvent.fromJson(validStt().put("extra", "forbidden"));
+        assertTrue(contains(event.parseWarnings, "unexpected field: extra"));
+        assertEquals("forbidden", event.raw.getString("extra"));
+        assertEquals("hello", event.text);
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void commandRejectsNegativeIssuedAt() throws Exception {
-        CommandEvent.fromJson(validCmd("cmd-negative-issued").put("issued_at_ms", -1));
+    @Test
+    public void parseSessionToleratesExtraField() throws Exception {
+        SessionInfo s = ProtocolCodec.parseSession(new JSONObject(sessionJsonWithWsUrl("ws://host/ws/session"))
+                .put("extra", "forbidden")
+                .toString());
+        assertEquals("sess", s.sessionId);
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void sttRejectsExtraField() throws Exception {
-        SttEvent.fromJson(new JSONObject()
+    private static JSONObject validStt() throws Exception {
+        return new JSONObject()
                 .put("type", "data.stt")
                 .put("trace_id", "trace")
                 .put("session_id", "sess")
                 .put("utterance_id", "utt")
                 .put("text", "hello")
                 .put("final", true)
-                .put("ts_ms", 1)
-                .put("extra", "forbidden"));
+                .put("ts_ms", 1L);
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void parseSessionRejectsExtraField() throws Exception {
-        ProtocolCodec.parseSession(new JSONObject(sessionJsonWithWsUrl("ws://host/ws/session"))
-                .put("extra", "forbidden")
-                .toString());
+    private static boolean contains(String[] values, String expected) {
+        for (String value : values) {
+            if (expected.equals(value)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static JSONObject validReady() throws Exception {

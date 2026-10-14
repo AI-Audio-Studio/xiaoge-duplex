@@ -156,12 +156,16 @@ asyncio.run(main())
 | `on_stt_text(text, is_final)` | 便捷 STT 文本回调。 |
 | `on_reply_text(text)` | 便捷回复文本回调。 |
 | `on_json(payload)` | 所有下行 JSON raw observer，适合日志/协议审计。 |
-| `on_protocol_error(event)` | SDK 本地入站 JSON/字段校验失败；不是服务端 `data.error`。 |
+| `on_protocol_error(event)` | SDK 本地入站错误，目前仅覆盖无法解析的畸形 JSON 文本帧；不是服务端 `data.error`。 |
 | `on_failure(error)` | SDK 本地 failure/异常通道。 |
 
 `on_clear`、`on_state`、`on_stt`、`on_reply`、`on_command`、`on_error` 均接收类型化事件对象。`on_json(payload)` 是唯一 raw observer，适合日志、协议审计或读取尚未建模的字段；业务处理不要同时在 `on_json` 和类型化命令回调里执行同一命令。
 
 事件字段均从原始 payload 拷贝而来，`event.raw` 保留原始协议内容供调试。`ReplyEvent.is_final` 是 SDK 为统一文本事件接口派生的值，R5.2.2 `data.reply` 协议 payload 没有 `final` 字段，SDK 不会把它写入 raw payload。
+
+### 下行事件宽松解析
+
+下行事件不会因服务端协议字段漂移而丢失：字段缺失时以类型默认值交付（字符串 `""`、数字 `0`、布尔 `False`、对象/数组为空），多余字段忽略（仍可在 `event.raw` 中访问），未知枚举值（如新增 `intent_type`/错误码）原样透传；Python 端不做数字/布尔字符串转型，类型不符时直接给默认值并告警。每个事件对象携带 `parse_warnings`（`tuple[str, ...]`，完全合规时为空）记录全部偏离项，SDK 会通过 `logging`（logger `xiaoge.client`）以 `WARNING` 级别输出，便于发现服务端协议漂移。业务侧如需严格判断，可检查 `not event.parse_warnings` 或 `event.text` 是否为空。
 
 ## 7. 音频格式
 
@@ -238,7 +242,7 @@ python tests/contract_replay.py --contract-dir <path-to-r5.2.2-02_contracts>
 期望输出：
 
 ```text
-records=56 failures=0
+records=59 failures=0
 ```
 
 ## 11. 文件 Demo

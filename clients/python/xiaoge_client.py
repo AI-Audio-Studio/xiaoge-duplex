@@ -134,6 +134,8 @@ class ReadyEvent:
     trace_id: str
     session_id: str
     raw: JsonObject
+    # Field-level deviations observed while parsing; empty when fully compliant.
+    parse_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +145,7 @@ class ClearEvent:
     raw: JsonObject
     reason: str | None = None
     utterance_id: str | None = None
+    parse_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +159,7 @@ class StateEvent:
     session_id: str
     raw: JsonObject
     pending_confirmation: JsonObject | None = None
+    parse_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +171,7 @@ class SttEvent:
     session_id: str
     ts_ms: int
     raw: JsonObject
+    parse_warnings: tuple[str, ...] = ()
 
     @property
     def final(self) -> bool:
@@ -184,6 +189,7 @@ class ReplyEvent:
     ts_ms: int
     raw: JsonObject
     speak_policy: str | None = None
+    parse_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,6 +206,7 @@ class CommandEvent:
     trace_id: str
     session_id: str
     raw: JsonObject
+    parse_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +218,7 @@ class ErrorEvent:
     trace_id: str
     session_id: str
     raw: JsonObject
+    parse_warnings: tuple[str, ...] = ()
 
 
 def now_ms() -> int:
@@ -382,9 +390,6 @@ class ProtocolCodec:
         missing = required - payload.keys()
         if missing:
             raise XiaogeProtocolError(f"session.created missing fields: {sorted(missing)}")
-        extra = payload.keys() - required
-        if extra:
-            raise XiaogeProtocolError(f"session.created has extra fields: {sorted(extra)}")
         if payload["type"] != "session.created":
             raise XiaogeProtocolError("create_session response type must be session.created")
         expires_in_ms = _required_int(payload, "expires_in_ms", minimum=1)
@@ -569,29 +574,6 @@ def _raw_copy(payload: JsonObject) -> JsonObject:
     return copy.deepcopy(payload)
 
 
-def _required_string(payload: JsonObject, key: str) -> str:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value:
-        raise XiaogeProtocolError(f"{key} must be a non-empty string")
-    return value
-
-
-def _optional_string(payload: JsonObject, key: str) -> str | None:
-    value = payload.get(key)
-    if value is None:
-        return None
-    if not isinstance(value, str) or not value:
-        raise XiaogeProtocolError(f"{key} must be a non-empty string")
-    return value
-
-
-def _required_bool(payload: JsonObject, key: str) -> bool:
-    value = payload.get(key)
-    if not isinstance(value, bool):
-        raise XiaogeProtocolError(f"{key} must be a boolean")
-    return value
-
-
 def _required_int(payload: JsonObject, key: str, *, minimum: int = 0) -> int:
     value = payload.get(key)
     if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
@@ -599,22 +581,106 @@ def _required_int(payload: JsonObject, key: str, *, minimum: int = 0) -> int:
     return value
 
 
-def _required_enum(payload: JsonObject, key: str, valid: frozenset[str]) -> str:
-    value = _required_string(payload, key)
-    if value not in valid:
-        expected = "/".join(sorted(valid))
-        raise XiaogeProtocolError(f"{key} must be {expected}")
+def _lenient_string(payload: JsonObject, key: str, warnings: list[str]) -> str:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return ""
+    if not isinstance(value, str):
+        warnings.append(f"field is not a string: {key}")
+        return str(value)
     return value
 
 
-def _optional_enum(payload: JsonObject, key: str, valid: frozenset[str]) -> str | None:
-    value = _optional_string(payload, key)
+def _lenient_optional_string(payload: JsonObject, key: str, warnings: list[str]) -> str | None:
+    value = payload.get(key)
     if value is None:
         return None
-    if value not in valid:
-        expected = "/".join(sorted(valid))
-        raise XiaogeProtocolError(f"{key} must be {expected}")
+    if not isinstance(value, str):
+        warnings.append(f"field is not a string: {key}")
+        return str(value)
     return value
+
+
+def _lenient_bool(payload: JsonObject, key: str, warnings: list[str]) -> bool:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return False
+    if not isinstance(value, bool):
+        warnings.append(f"field is not a boolean: {key}")
+        return False
+    return value
+
+
+def _lenient_int(payload: JsonObject, key: str, warnings: list[str], *, default: int = 0) -> int:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        warnings.append(f"field is not an integer: {key}")
+        return default
+    return value
+
+
+def _lenient_enum(payload: JsonObject, key: str, valid: frozenset[str], warnings: list[str]) -> str:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if not isinstance(value, str):
+        warnings.append(f"field is not a string: {key}")
+    if text not in valid:
+        warnings.append(f"unknown {key}: {text}")
+    return text
+
+
+def _lenient_optional_enum(
+    payload: JsonObject, key: str, valid: frozenset[str], warnings: list[str]
+) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else str(value)
+    if not isinstance(value, str):
+        warnings.append(f"field is not a string: {key}")
+    if text not in valid:
+        warnings.append(f"unknown {key}: {text}")
+    return text
+
+
+def _lenient_object(payload: JsonObject, key: str, warnings: list[str]) -> JsonObject:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return {}
+    if not isinstance(value, dict):
+        warnings.append(f"field is not an object: {key}")
+        return {}
+    return _raw_copy(value)
+
+
+def _lenient_optional_object(payload: JsonObject, key: str, warnings: list[str]) -> JsonObject | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        warnings.append(f"field is not an object: {key}")
+        return None
+    return _raw_copy(value)
+
+
+def _lenient_string_tuple(payload: JsonObject, key: str, warnings: list[str]) -> tuple[str, ...]:
+    value = payload.get(key)
+    if value is None:
+        warnings.append(f"missing field: {key}")
+        return ()
+    if not isinstance(value, list):
+        warnings.append(f"field is not an array: {key}")
+        return ()
+    return tuple(str(item) for item in value)
 
 
 def _require_type(payload: JsonObject, kind: str) -> None:
@@ -622,51 +688,53 @@ def _require_type(payload: JsonObject, kind: str) -> None:
         raise XiaogeProtocolError(f"type must be {kind}")
 
 
-def _require_only_keys(payload: JsonObject, allowed: set[str], kind: str) -> None:
+def _warn_extra_fields(payload: JsonObject, allowed: set[str], kind: str, warnings: list[str]) -> None:
     extra = payload.keys() - allowed
     if extra:
-        raise XiaogeProtocolError(f"{kind} has extra fields: {sorted(extra)}")
+        warnings.append(f"{kind} has extra fields: {sorted(extra)}")
 
 
 def _ready_event_from_payload(payload: JsonObject) -> ReadyEvent:
     _require_type(payload, "ctrl.ready")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {"type", "trace_id", "session_id", "sample_rate", "granted_caps", "config_version"},
         "ctrl.ready",
+        warnings,
     )
-    granted_caps_raw = payload.get("granted_caps")
-    if not isinstance(granted_caps_raw, list) or not all(isinstance(cap, str) for cap in granted_caps_raw):
-        raise XiaogeProtocolError("granted_caps must be a string array")
-    validate_caps(list(granted_caps_raw))
-    sample_rate = _required_int(payload, "sample_rate")
+    sample_rate = _lenient_int(payload, "sample_rate", warnings, default=SAMPLE_RATE)
     if sample_rate != SAMPLE_RATE:
-        raise XiaogeProtocolError("sample_rate must be 16000")
+        warnings.append(f"sample_rate is {sample_rate}, expected {SAMPLE_RATE}")
     return ReadyEvent(
         sample_rate=sample_rate,
-        granted_caps=tuple(granted_caps_raw),
-        config_version=_required_string(payload, "config_version"),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
+        granted_caps=_lenient_string_tuple(payload, "granted_caps", warnings),
+        config_version=_lenient_string(payload, "config_version", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _clear_event_from_payload(payload: JsonObject) -> ClearEvent:
     _require_type(payload, "ctrl.clear")
-    _require_only_keys(payload, {"type", "trace_id", "session_id", "utterance_id", "reason"}, "ctrl.clear")
+    warnings: list[str] = []
+    _warn_extra_fields(payload, {"type", "trace_id", "session_id", "utterance_id", "reason"}, "ctrl.clear", warnings)
     return ClearEvent(
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
-        reason=_optional_enum(payload, "reason", VALID_CLEAR_REASONS),
-        utterance_id=_optional_string(payload, "utterance_id"),
+        reason=_lenient_optional_enum(payload, "reason", VALID_CLEAR_REASONS, warnings),
+        utterance_id=_lenient_optional_string(payload, "utterance_id", warnings),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _state_event_from_payload(payload: JsonObject) -> StateEvent:
     _require_type(payload, "ctrl.state")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {
             "type",
@@ -680,64 +748,70 @@ def _state_event_from_payload(payload: JsonObject) -> StateEvent:
             "pending_confirmation",
         },
         "ctrl.state",
+        warnings,
     )
-    pending = payload.get("pending_confirmation")
-    if pending is not None and not isinstance(pending, dict):
-        raise XiaogeProtocolError("pending_confirmation must be an object")
     return StateEvent(
-        link_state=_required_enum(payload, "link_state", VALID_LINK_STATES),
-        interaction_mode=_required_enum(payload, "interaction_mode", VALID_INTERACTION_MODES),
-        engine_gate=_required_enum(payload, "engine_gate", VALID_ENGINE_GATES),
-        resource_state=_required_enum(payload, "resource_state", VALID_RESOURCE_STATES),
-        ts_ms=_required_int(payload, "ts_ms"),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
+        link_state=_lenient_enum(payload, "link_state", VALID_LINK_STATES, warnings),
+        interaction_mode=_lenient_enum(payload, "interaction_mode", VALID_INTERACTION_MODES, warnings),
+        engine_gate=_lenient_enum(payload, "engine_gate", VALID_ENGINE_GATES, warnings),
+        resource_state=_lenient_enum(payload, "resource_state", VALID_RESOURCE_STATES, warnings),
+        ts_ms=_lenient_int(payload, "ts_ms", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
-        pending_confirmation=_raw_copy(pending) if pending is not None else None,
+        pending_confirmation=_lenient_optional_object(payload, "pending_confirmation", warnings),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _stt_event_from_payload(payload: JsonObject) -> SttEvent:
     _require_type(payload, "data.stt")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {"type", "trace_id", "session_id", "utterance_id", "text", "final", "ts_ms"},
         "data.stt",
+        warnings,
     )
     return SttEvent(
-        text=_required_string(payload, "text"),
-        is_final=_required_bool(payload, "final"),
-        utterance_id=_required_string(payload, "utterance_id"),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
-        ts_ms=_required_int(payload, "ts_ms"),
+        text=_lenient_string(payload, "text", warnings),
+        is_final=_lenient_bool(payload, "final", warnings),
+        utterance_id=_lenient_string(payload, "utterance_id", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
+        ts_ms=_lenient_int(payload, "ts_ms", warnings),
         raw=_raw_copy(payload),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _reply_event_from_payload(payload: JsonObject) -> ReplyEvent:
     _require_type(payload, "data.reply")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {"type", "trace_id", "session_id", "utterance_id", "intent_type", "text", "ts_ms", "speak_policy"},
         "data.reply",
+        warnings,
     )
     return ReplyEvent(
-        text=_required_string(payload, "text"),
+        text=_lenient_string(payload, "text", warnings),
         is_final=True,
-        utterance_id=_required_string(payload, "utterance_id"),
-        intent_type=_required_enum(payload, "intent_type", VALID_INTENT_TYPES),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
-        ts_ms=_required_int(payload, "ts_ms"),
+        utterance_id=_lenient_string(payload, "utterance_id", warnings),
+        intent_type=_lenient_enum(payload, "intent_type", VALID_INTENT_TYPES, warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
+        ts_ms=_lenient_int(payload, "ts_ms", warnings),
         raw=_raw_copy(payload),
-        speak_policy=_optional_enum(payload, "speak_policy", VALID_SPEAK_POLICIES),
+        speak_policy=_lenient_optional_enum(payload, "speak_policy", VALID_SPEAK_POLICIES, warnings),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _command_event_from_payload(payload: JsonObject) -> CommandEvent:
     _require_type(payload, "data.cmd")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {
             "type",
@@ -754,41 +828,43 @@ def _command_event_from_payload(payload: JsonObject) -> CommandEvent:
             "issued_at_ms",
         },
         "data.cmd",
+        warnings,
     )
-    params = payload.get("params")
-    if not isinstance(params, dict):
-        raise XiaogeProtocolError("params must be an object")
     return CommandEvent(
-        cmd_id=_required_string(payload, "cmd_id"),
-        capability_id=_required_string(payload, "capability_id"),
-        action=_required_string(payload, "action"),
-        params=_raw_copy(params),
-        risk_level=_required_enum(payload, "risk_level", VALID_RISK_LEVELS),
-        ack_timeout_ms=_required_int(payload, "ack_timeout_ms", minimum=1),
-        result_timeout_ms=_required_int(payload, "result_timeout_ms", minimum=1),
-        issued_at_ms=_required_int(payload, "issued_at_ms"),
-        utterance_id=_required_string(payload, "utterance_id"),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
+        cmd_id=_lenient_string(payload, "cmd_id", warnings),
+        capability_id=_lenient_string(payload, "capability_id", warnings),
+        action=_lenient_string(payload, "action", warnings),
+        params=_lenient_object(payload, "params", warnings),
+        risk_level=_lenient_enum(payload, "risk_level", VALID_RISK_LEVELS, warnings),
+        ack_timeout_ms=_lenient_int(payload, "ack_timeout_ms", warnings),
+        result_timeout_ms=_lenient_int(payload, "result_timeout_ms", warnings),
+        issued_at_ms=_lenient_int(payload, "issued_at_ms", warnings),
+        utterance_id=_lenient_string(payload, "utterance_id", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
+        parse_warnings=tuple(warnings),
     )
 
 
 def _error_event_from_payload(payload: JsonObject) -> ErrorEvent:
     _require_type(payload, "data.error")
-    _require_only_keys(
+    warnings: list[str] = []
+    _warn_extra_fields(
         payload,
         {"type", "trace_id", "session_id", "code", "message", "retryable", "ts_ms"},
         "data.error",
+        warnings,
     )
     return ErrorEvent(
-        code=_required_enum(payload, "code", VALID_ERROR_CODES),
-        message=_required_string(payload, "message"),
-        retryable=_required_bool(payload, "retryable"),
-        ts_ms=_required_int(payload, "ts_ms"),
-        trace_id=_required_string(payload, "trace_id"),
-        session_id=_required_string(payload, "session_id"),
+        code=_lenient_enum(payload, "code", VALID_ERROR_CODES, warnings),
+        message=_lenient_string(payload, "message", warnings),
+        retryable=_lenient_bool(payload, "retryable", warnings),
+        ts_ms=_lenient_int(payload, "ts_ms", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
+        parse_warnings=tuple(warnings),
     )
 
 
@@ -1224,6 +1300,9 @@ class XiaogeClient:
             self._emit_protocol_error(str(exc), kind, payload, exc)
             return None
         self._call(self.on_json, payload)
+        parse_warnings: tuple[str, ...] = getattr(event, "parse_warnings", ())
+        if parse_warnings:
+            logger.warning("%s parse warnings: %s", kind, parse_warnings)
         return event
 
     def _emit_protocol_error(

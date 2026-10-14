@@ -159,10 +159,14 @@ session.stop();
 | `onCommand(CommandEvent event)` | 服务端下发命令事件，常用 `event.cmdId`、`event.action`、`event.params`。 |
 | `onError(ErrorEvent event)` | 服务端 `data.error` 事件，常用 `event.code`、`event.retryable`。 |
 | `onJson(JSONObject payload)` | 所有下行 JSON raw observer，适合日志/协议审计。 |
-| `onProtocolError(ProtocolErrorEvent event)` | SDK 本地入站 JSON/字段校验失败；不是服务端 `data.error`。 |
+| `onProtocolError(ProtocolErrorEvent event)` | SDK 本地入站错误，目前仅覆盖无法解析的畸形 JSON 文本帧；不是服务端 `data.error`。 |
 | `onFailure(Throwable error)` | SDK 本地异常或网络失败。 |
 
 回调运行在 SDK 内部线程；Android UI 更新必须使用 `Activity.runOnUiThread(...)`、`Handler` 或其他主线程调度方式。`onClear`、`onServerState`、`onStt`、`onReply`、`onCommand`、`onError` 均接收类型化事件对象。`onJson(JSONObject payload)` 是唯一 raw observer，适合日志、协议审计或读取尚未建模的字段；业务处理不要同时在 `onJson` 和类型化命令回调里执行同一命令。事件对象字段在用户回调前复制完成，`event.raw` 保留原始协议内容供调试。`ReplyEvent.isFinal` 是 SDK 为统一文本事件接口派生的值，R5.2.2 `data.reply` 协议 payload 没有 `final` 字段，SDK 不会把它写入 raw payload。
+
+### 下行事件宽松解析
+
+下行事件不会因服务端协议字段漂移而丢失：字段缺失时以类型默认值交付（字符串 `""`、数字 `0`、布尔 `false`、对象/数组为空），多余字段忽略（仍可在 `event.raw` 中访问），未知枚举值（如新增 `intent_type`/错误码）原样透传，数字/布尔字符串自动转型。每个事件对象携带 `parseWarnings`（`String[]`，完全合规时为空数组）记录全部偏离项，SDK 会同时在 Logcat 以 `WARN` 输出（tag `XiaogeClient`），便于发现服务端协议漂移。业务侧如需严格判断，可检查 `event.parseWarnings.length == 0` 或 `event.text` 是否为空。
 
 ### 发送 `cmd_ack` / `cmd_result`
 
@@ -230,6 +234,28 @@ s.sendCmdAck(
 合法 `cmd_ack` status 为 `accepted`、`rejected`、`duplicate`；合法 `cmd_result` status 为 `running`、`succeeded`、`failed`、`canceled`、`timeout`。SDK 仍兼容合法原始字符串，但非法 status 会在本地抛出 `IllegalArgumentException`，不会发送到服务端。
 
 SDK 不会默认回放 `cmd_ack` / `cmd_result`，业务侧不要在 `onJson(JSONObject)` 和 `onCommand(CommandEvent)` 中重复执行同一命令。
+
+### 播放链路预热（首字时延优化）
+
+输出通路（音频 HAL / A2DP 流）在无数据约 0.65~3.3s 后会休眠/挂起，下一轮回复的首包需要付出数百毫秒的重开成本。SDK 默认内置播放管线预热机制（参考已真机验证的方案，冷起播中位 736ms 降到约 130~170ms），无需 App 做任何配置：
+
+- 预热布防后，播放循环每 100ms 向常驻 `AudioTrack` 直写一小帧静音（不进入播放队列），直到真实首帧到达即停——管线保温且不会在真实音频前堆积静音。
+- 三个布防点：
+  1. **本地说完估计**（SDK 采集模式自动生效）：按麦克风帧 RMS 估计"用户刚说完"，领先服务端断句 1~3s 提前布防；
+  2. **`data.stt` final**：服务端断句兜底（说完估计漏检、说话过轻时覆盖），也是 `AudioInputMode.EXTERNAL` 外部音频输入模式下的唯一布防点；
+  3. **引擎启动**（`ctrl.ready` 建连后）：覆盖问候语轮和重连后的首轮。
+- 误布防的代价仅为最长 8s 的低占空比静音流，对音量和语义无影响。
+
+时延埋点（`Log.d`，logcat tag `XiaogeAudio`，可长期采集）：
+
+```text
+latency_node=mic_speech_end ...           本地说完估计触发
+latency_node=stream_prewarm_armed ...     预热布防
+latency_node=tts_first_write ...          回复首包写入 AudioTrack
+latency_node=playback_first_presented ..., firstWriteToFirstPresentedMs=...   首帧进入输出通路
+```
+
+其中 `firstWriteToFirstPresentedMs` 即"手机侧起播成本"，可用于验收预热效果。如需 A/B 对照或调整参数（布防时长、说完估计 RMS 阈值等），参见 `AudioEngine` 与 `SpeechEndEstimator` 中的常量；2s 间隔背景心跳默认关闭，可将 `AudioEngine.KEEPALIVE_ENABLED` 置 `true` 开启。
 
 ## 7. 自行管理音频：XiaogeClient
 

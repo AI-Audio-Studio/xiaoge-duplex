@@ -66,16 +66,108 @@ public class EventCodecTest {
         assertFalse(result.getBoolean("retryable"));
     }
 
-    @Test(expected = org.json.JSONException.class)
-    public void invalidSttFinalDoesNotBuildEvent() throws Exception {
-        SttEvent.fromJson(new JSONObject()
+    @Test
+    public void sttCoercesStringFinalValue() throws Exception {
+        SttEvent event = SttEvent.fromJson(validStt()
+                .put("final", "true"));
+        assertTrue(event.isFinal);
+        assertTrue(contains(event.parseWarnings, "field is coerced from string: final"));
+    }
+
+    @Test
+    public void compliantPayloadHasNoParseWarnings() throws Exception {
+        ReplyEvent event = ReplyEvent.fromJson(validReply());
+        assertEquals(0, event.parseWarnings.length);
+        SttEvent stt = SttEvent.fromJson(validStt());
+        assertEquals(0, stt.parseWarnings.length);
+    }
+
+    @Test
+    public void missingFieldsFallBackToDefaults() throws Exception {
+        SttEvent event = SttEvent.fromJson(new JSONObject()
+                .put("type", "data.stt")
+                .put("trace_id", "trace"));
+        assertEquals("", event.text);
+        assertFalse(event.isFinal);
+        assertEquals("", event.utteranceId);
+        assertEquals(0L, event.tsMs);
+        assertTrue(contains(event.parseWarnings, "missing field: text"));
+        assertTrue(contains(event.parseWarnings, "missing field: final"));
+        assertTrue(contains(event.parseWarnings, "missing field: session_id"));
+    }
+
+    @Test
+    public void unknownIntentTypePassesThrough() throws Exception {
+        ReplyEvent event = ReplyEvent.fromJson(validReply().put("intent_type", "control_cmd_multi"));
+        assertEquals("control_cmd_multi", event.intentType);
+        assertTrue(contains(event.parseWarnings, "unknown intent_type: control_cmd_multi"));
+    }
+
+    @Test
+    public void stringTsMsIsCoerced() throws Exception {
+        SttEvent event = SttEvent.fromJson(validStt().put("ts_ms", "1789000000200"));
+        assertEquals(1789000000200L, event.tsMs);
+        assertTrue(contains(event.parseWarnings, "field is coerced from string: ts_ms"));
+    }
+
+    @Test
+    public void missingParamsFallsBackToEmptyObject() throws Exception {
+        JSONObject payload = validCommand();
+        payload.remove("params");
+        CommandEvent event = CommandEvent.fromJson(payload);
+        assertEquals(0, event.params.length());
+        assertTrue(contains(event.parseWarnings, "missing field: params"));
+    }
+
+    @Test
+    public void missingGrantedCapsFallsBackToEmptyArray() throws Exception {
+        JSONObject payload = validReady();
+        payload.remove("granted_caps");
+        ReadyEvent event = ReadyEvent.fromJson(payload);
+        assertEquals(0, event.grantedCaps.length);
+        assertTrue(contains(event.parseWarnings, "missing field: granted_caps"));
+    }
+
+    private static JSONObject validStt() throws Exception {
+        return new JSONObject()
                 .put("type", "data.stt")
                 .put("trace_id", "trace")
                 .put("session_id", "sess")
                 .put("utterance_id", "utt")
-                .put("text", "bad")
-                .put("final", "true")
-                .put("ts_ms", 1));
+                .put("text", "往前走一米")
+                .put("final", true)
+                .put("ts_ms", 1789000000200L);
+    }
+
+    private static JSONObject validReply() throws Exception {
+        return new JSONObject()
+                .put("type", "data.reply")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("utterance_id", "utt")
+                .put("intent_type", "control_cmd")
+                .put("speak_policy", "ack_then_result")
+                .put("text", "好的，正在执行。")
+                .put("ts_ms", 1789000000300L);
+    }
+
+    private static JSONObject validReady() throws Exception {
+        return new JSONObject()
+                .put("type", "ctrl.ready")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("sample_rate", ProtocolCodec.SAMPLE_RATE)
+                .put("granted_caps", new org.json.JSONArray(java.util.Arrays.asList("audio", "text")))
+                .put("config_version", "cfg");
+    }
+
+    private static boolean contains(String[] values, String expected) {
+        for (String value : values) {
+            if (expected.equals(value)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static JSONObject validCommand() throws Exception {

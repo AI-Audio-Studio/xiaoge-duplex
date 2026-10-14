@@ -20,6 +20,9 @@ from xiaoge_client import (
     FakeExecutor,
     JSON_TEXT_FRAME_MAX_BYTES,
     ProtocolCodec,
+    ReadyEvent,
+    ReplyEvent,
+    SttEvent,
     XiaogeClient,
     XiaogeProtocolError,
     json_utf8_size,
@@ -406,18 +409,34 @@ def _no_legacy_session_path() -> None:
     _assert_session_payload_fails(negative_expiry, "negative expires_in_ms must fail")
     extra_field = _session_payload("ws://127.0.0.1/ws/session")
     extra_field["token"] = "must-not-be-here"
-    _assert_session_payload_fails(extra_field, "extra session.created fields must fail")
+    assert ProtocolCodec.parse_session_response(extra_field).session_id == SESSION_ID
 
 
 async def _event_validation() -> None:
     client = XiaogeClient("http://127.0.0.1/create_session", "robot", {"type": "mock"})
-    seen: dict[str, Any] = {"protocol_error": 0, "ready": 0, "stt": 0}
+    seen: dict[str, int] = {"protocol_error": 0, "ready": 0, "stt": 0}
+    stt_events: list[SttEvent] = []
+    ready_events: list[ReadyEvent] = []
+    reply_events: list[ReplyEvent] = []
+
+    def on_stt(event: SttEvent) -> None:
+        seen["stt"] += 1
+        stt_events.append(event)
+
+    def on_ready(event: ReadyEvent) -> None:
+        seen["ready"] += 1
+        ready_events.append(event)
+
+    def on_reply(event: ReplyEvent) -> None:
+        reply_events.append(event)
+
     client.on_protocol_error = lambda event: seen.__setitem__(
         "protocol_error", seen["protocol_error"] + 1
     )
-    client.on_ready_event = lambda event: seen.__setitem__("ready", seen["ready"] + 1)
-    client.on_stt = lambda event: seen.__setitem__("stt", seen["stt"] + 1)
-    await client._handle_json(  # noqa: SLF001 - selftest covers inbound validation behavior.
+    client.on_ready_event = on_ready
+    client.on_stt = on_stt
+    client.on_reply = on_reply
+    await client._handle_json(  # noqa: SLF001 - selftest covers inbound leniency.
         {
             "type": "data.stt",
             "trace_id": TRACE_ID,
@@ -428,7 +447,7 @@ async def _event_validation() -> None:
             "ts_ms": 1,
         }
     )
-    await client._handle_json(  # noqa: SLF001 - selftest covers strict additionalProperties.
+    await client._handle_json(  # noqa: SLF001 - selftest covers extra-field tolerance.
         {
             "type": "data.stt",
             "trace_id": TRACE_ID,
@@ -440,7 +459,7 @@ async def _event_validation() -> None:
             "extra": "forbidden",
         }
     )
-    await client._handle_json(  # noqa: SLF001 - selftest covers ready sample-rate const.
+    await client._handle_json(  # noqa: SLF001 - selftest covers sample-rate passthrough.
         {
             "type": "ctrl.ready",
             "trace_id": TRACE_ID,
@@ -450,7 +469,27 @@ async def _event_validation() -> None:
             "config_version": "cfg-invalid",
         }
     )
-    assert seen == {"protocol_error": 3, "ready": 0, "stt": 0}, seen
+    await client._handle_json(  # noqa: SLF001 - selftest covers missing-field defaults.
+        {
+            "type": "data.reply",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "utterance_id": "utt-lenient",
+            "intent_type": "control_cmd_multi",
+            "ts_ms": 1,
+        }
+    )
+    assert seen == {"protocol_error": 0, "ready": 1, "stt": 2}, seen
+    assert stt_events[0].is_final is False
+    assert "field is not a boolean: final" in stt_events[0].parse_warnings
+    assert "data.stt has extra fields: ['extra']" in stt_events[1].parse_warnings
+    assert "extra" in stt_events[1].raw
+    assert ready_events[0].sample_rate == 8000
+    assert "sample_rate is 8000, expected 16000" in ready_events[0].parse_warnings
+    assert reply_events[0].text == ""
+    assert reply_events[0].intent_type == "control_cmd_multi"
+    assert "missing field: text" in reply_events[0].parse_warnings
+    assert "unknown intent_type: control_cmd_multi" in reply_events[0].parse_warnings
 
 
 async def main() -> int:

@@ -10,7 +10,11 @@ HTTPS create_session -> WSS /ws/session + Authorization: Bearer -> ctrl.hello
 Real robot actions are not connected. Downlink JSON messages are exposed through
 typed event callbacks such as `onStt`, `onReply`, and `onCommand`. Use
 `onJson(JSONObject)` as the single raw observer for logging, debugging, or
-protocol audits.
+protocol audits. Downlink parsing is lenient: events are always delivered even
+when the server payload has missing or extra fields; deviations (missing fields,
+unexpected fields, unknown enum values, coerced types) are collected on each
+event as `parseWarnings` and logged as `WARN`, so server-side protocol drift
+never silently drops a message.
 
 ## Build
 

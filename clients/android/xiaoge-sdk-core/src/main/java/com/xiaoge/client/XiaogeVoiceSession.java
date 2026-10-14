@@ -359,6 +359,16 @@ public final class XiaogeVoiceSession {
 
         @Override
         public void onStt(SttEvent event) {
+            if (event.isFinal) {
+                // Fallback pre-warm arm: the local mic speech-end estimate inside the
+                // engine usually armed earlier; this covers quiet speech it missed and
+                // is the only arm in external audio input mode. Safe to call directly:
+                // a volatile write plus one log line.
+                AudioEngine e = engine;
+                if (e != null) {
+                    e.requestStreamPrewarm();
+                }
+            }
             executeOnControl(() -> {
                 if (!stopped && generation == transportGeneration && isLive()) {
                     setState(SessionState.LISTENING);
