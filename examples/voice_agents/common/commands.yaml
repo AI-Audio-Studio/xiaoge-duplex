@@ -1,0 +1,72 @@
+# 支持的机器人命令清单(唯一事实来源)。
+# common/g3_intent.py 启动时读取:
+#   - action/params(枚举/范围/必填) → 确定性注册表(路由 + 校验 + data.cmd 帧)
+#   - examples/params → SemanticRouter 分类提示词(自动生成, 见 semantic_router._build_system_prompt)
+# matcher/extractor 填 g3_intent.py 内的解析函数名(volume/photo/battery),
+# 负责中文口语 → 参数的确定性抽取; 名字写错启动即报错。
+# 音乐本地播放(control_music/media.music)已于 2026-09-15 下线: 不再向端侧下发
+# data.cmd 音乐帧, 音乐统一走云端 play_music 工具(服务器曲库)。
+#
+# 与设备操作无关的说法不在本表内: 意图分类返回
+#   {"action":"unknown","params":{},"confidence":0,"reason":"与设备操作无关"}
+# (等价于 SemanticRouter 的 non_execute/low_confidence 分支) → 不产协议帧,
+# 落到聊天 LLM 兜底。
+commands:
+  - action: adjust_volume
+    capability_id: audio.volume
+    intent_type: control_cmd
+    delivery: data.cmd
+    risk_level: low
+    matcher: volume
+    description: 音量调节; 调大/调小/静音, 或调到具体档位(音量调到60、最大、很小、调回正常)
+    # 追问文案带数值出口(2026-09-17): 用户被"要调大还是调小"追问后只会再答
+    # "调到正常/调回正常", 不给数值出口就是死循环。
+    missing_reply: 要调大还是调小呀？也可以直接说调到多少，比如调到50。
+    params:
+      - name: command
+        type: enum
+        required: true
+        enum: [up, down, mute, set]
+      # set 专属目标音量(0-100)。2026-09-17 用户扩协议: max/min 枚举收敛进
+      # set(最大=100/最小=0)。服务端下发的 set 帧恒带 value; 设备端若收到
+      # 缺 value 的 set 帧, 按协议默认值 50 兜底。
+      - name: value
+        type: int
+        required: false
+        minimum: 0
+        maximum: 100
+    examples: ["音量调大一点", "声音调小一点", "音量调到最大", "静音", "音量调到60", "音量调到很小", "声音调回正常", "音量恢复正常"]
+
+  - action: take_photo
+    capability_id: camera.photo
+    intent_type: control_cmd
+    delivery: data.cmd
+    risk_level: low
+    matcher: photo
+    description: 拍照控制
+    params:
+      - name: mode
+        type: enum
+        required: true
+        enum: ['on']  # 必须引号: 裸 on 会被 YAML 1.1 解析成布尔 True
+    examples: ["拍照", "拍张照", "帮我拍一张"]
+
+  - action: check_battery
+    capability_id: power.battery
+    intent_type: control_cmd
+    delivery: data.cmd
+    risk_level: low
+    matcher: battery
+    description: 电量查询类型和设备ID; 结果由设备经 data.cmd_result 返回并口头播报
+    params:
+      - name: type
+        type: enum
+        required: true
+        enum: [vol, cur, cap]
+      - name: gauge_id
+        type: int
+        required: false
+        minimum: 1
+        maximum: 2
+        unit: 号电表
+    examples: ["查电量", "还有多少电", "电池电压多少", "2号电池电量"]

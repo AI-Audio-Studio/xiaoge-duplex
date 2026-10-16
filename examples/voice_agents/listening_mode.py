@@ -56,6 +56,7 @@ class ListeningController:
     auto_enabled: bool = True
     auto_turns: int = 3
     auto_min_chars: int = 20
+    auto_interrupt_min_chars: int = 2  # 打断轮计入连击的最短字数(连续打断进入)
     temp_ttl_s: float = 120.0
     min_organize_chars: int = 15
     organize_enabled: bool = False  # 退出后"问是否整理 + 整理动作"总开关;先关,定时删除(TTL)不受影响
@@ -85,6 +86,7 @@ class ListeningController:
             auto_enabled=env_bool("XIAOGE_LISTEN_AUTO_ENABLE", True, blank_is_default=True),
             auto_turns=env_int("XIAOGE_LISTEN_AUTO_TURNS", 3),
             auto_min_chars=env_int("XIAOGE_LISTEN_AUTO_MINCHARS", 20),
+            auto_interrupt_min_chars=env_int("XIAOGE_LISTEN_AUTO_INT_MINCHARS", 2),
             temp_ttl_s=env_float("XIAOGE_LISTEN_TEMP_TTL", 120.0),
             min_organize_chars=env_int("XIAOGE_LISTEN_MIN_ORGANIZE_CHARS", 15),
             organize_enabled=env_bool("XIAOGE_LISTEN_ORGANIZE", False, blank_is_default=True),
@@ -126,18 +128,18 @@ class ListeningController:
         if not self.enabled or not self.auto_enabled or self.active:
             return AutoDecision.NONE
         n = len((text or "").strip())
-        if n < self.auto_min_chars:
-            return AutoDecision.NONE  # 短噪声(ack/停顿/backchannel):既不计也不重置连击
-        if interrupted_agent:
-            self._auto_count += 1  # 长输入且打断了小歌=自说自话信号
+        if interrupted_agent and n >= self.auto_interrupt_min_chars:
+            # 打断小歌的轮不必满 auto_min_chars:连续打断=用户要话语权
+            self._auto_count += 1
             if self._auto_count >= self.auto_turns:
                 self._auto_count = 0
                 self._enter()  # 自动进入
                 return AutoDecision.ENTER
-        else:
-            self._auto_count = 0  # 长输入但没打断小歌=在正常对话→重置
+            return AutoDecision.NONE
+        if n < self.auto_min_chars:
+            return AutoDecision.NONE  # 短噪声(ack/停顿/backchannel):既不计也不重置连击
+        self._auto_count = 0  # 长输入但没打断小歌=在正常对话→重置
         return AutoDecision.NONE
-
     @property
     def auto_count(self) -> int:
         return self._auto_count

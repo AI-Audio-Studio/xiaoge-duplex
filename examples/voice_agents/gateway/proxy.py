@@ -68,10 +68,12 @@ class Proxy:
 
     async def _open_upstream(self, session: af.Session) -> aiohttp.ClientWebSocketResponse:
         sess = await self._client()
-        # X-XG-Session 让 agent(webpanel #3)把这条连接识别为真实会话:真结束时才退出进程。
+        headers = {"X-XG-Session": session.session_id}
+        if session.api_key:
+            headers["X-XG-API-Key"] = session.api_key
         return await sess.ws_connect(
             f"http://127.0.0.1:{session.port}/ws/audio",
-            headers={"X-XG-Session": session.session_id},
+            headers=headers,
             heartbeat=30,
         )
 
@@ -84,6 +86,8 @@ class Proxy:
         sess = await self._client()
         fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
         fwd["X-XG-Session"] = session.session_id
+        if session.api_key:
+            fwd["X-XG-API-Key"] = session.api_key
         fwd["Authorization"] = f"Bearer {access_token}"
         return await sess.ws_connect(
             f"http://127.0.0.1:{session.port}/ws/session",
@@ -228,7 +232,7 @@ class Proxy:
         *,
         access_token: str,
     ) -> None:
-        """R5.2.2 合并 WSS:JSON control/data + PCM binary 原样双向透传。"""
+        """R5.2.2 merged WSS; attach the gateway-authenticated project key only."""
         try:
             up = await self._open_session_upstream(session, request, access_token)
         except Exception:
@@ -293,14 +297,30 @@ class Proxy:
 
     # ── HTTP 反代(POST /api/*)─────────────────────────────────────────────────
     async def proxy_http(
-        self, request: aiohttp.web.Request, session: af.Session
+        self,
+        request: aiohttp.web.Request,
+        session: af.Session,
+        *,
+        trusted_api_key: str | None = None,
     ) -> aiohttp.web.Response:
-        """反代到上游 agent(路径原样)。逐跳头剔除。"""
+        """反代到上游 agent(路径原样)。逐跳头剔除。
+
+        ``trusted_api_key`` is supplied only by an already-authenticated gateway
+        route (currently ``/create_session``).  It is sent on a private,
+        gateway-injected header; any client-supplied copy is discarded first.
+        """
         sess = await self._client()
         url = f"http://127.0.0.1:{session.port}{request.rel_url}"
-        fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
-        # Never trust a client-supplied affinity marker; overwrite it after authentication.
+        fwd = {
+            k: v
+            for k, v in request.headers.items()
+            if k.lower() not in _HOP_HEADERS and k.lower() != "x-xg-api-key"
+        }
+        # Never trust a client-supplied affinity marker or project binding;
+        # overwrite them after authentication.
         fwd["X-XG-Session"] = session.session_id
+        if trusted_api_key:
+            fwd["X-XG-API-Key"] = trusted_api_key
         body = await request.read()
         async with sess.request(request.method, url, data=body, headers=fwd) as up:
             data = await up.read()

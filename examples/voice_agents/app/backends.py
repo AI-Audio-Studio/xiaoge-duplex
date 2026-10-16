@@ -66,13 +66,22 @@ def _make_tts_http() -> tts.TTS:
     return HttpStreamingTTS(base_url=url)
 
 
-def _make_tts_cosyvoice() -> tts.TTS:
+def _make_tts_cosyvoice(voice: str | None = None) -> tts.TTS:
     model = os.getenv("COSYVOICE_MODEL", "cosyvoice-v3-flash")
-    # 默认女声(贴小歌"暖心知己"人设)。可用 COSYVOICE_VOICE 覆盖切换试听。
-    # 其他候选女声(同为 cosyvoice-v3 系列):
+    # 音色优先级:显式参数 > data/agent_config.json(面板保存过才生效) >
+    # env COSYVOICE_VOICE > 默认。没保存过文件时必须放 env 过——旧版直接
+    # load_agent_config(),缺文件回默认值(非空)把 env 永远挡死。
+    # 候选目录(config_store.VOICES): longxiaochun_v3 小春暖心女(默认) /
     #   longanwen_v3 龙安温 优雅知性女 · longanrou_v3 龙安柔 温柔闺蜜女
     #   longanli_v3  龙安莉 利落从容女
-    voice = os.getenv("COSYVOICE_VOICE", "longxiaochun_v3")
+    if voice is None:
+        from app.config_store import load_saved_agent_config
+
+        saved = load_saved_agent_config()
+        if saved is not None:
+            voice = saved.tts_voice
+    if not voice:
+        voice = os.getenv("COSYVOICE_VOICE", "longxiaochun_v3")
     logger.info("TTS backend: CosyVoiceStreamingTTS  model=%s voice=%s", model, voice)
     return CosyVoiceStreamingTTS(model=model, voice=voice)
 
@@ -108,9 +117,12 @@ def make_stt_backend(backend: str) -> agents_stt.STT:
     return STT_BACKENDS[backend].make()
 
 
-def make_tts_backend(backend: str) -> tts.TTS:
+def make_tts_backend(backend: str, voice: str | None = None) -> tts.TTS:
     """Construct a (non-switchable) TTS backend. Single source of truth shared by
-    build_tts() and the /api/tts switch handler."""
+    build_tts() and the /api/tts switch handler. voice 仅对 cosyvoice 生效(面板
+    音色热配:显式指定则用之,否则 _make_tts_cosyvoice 自行读 agent_config.json)。"""
+    if backend == "cosyvoice":
+        return _make_tts_cosyvoice(voice)
     return TTS_BACKENDS[backend].make()
 
 
@@ -224,6 +236,7 @@ def build_semantic_llm() -> lk_openai.LLM:
         top_p=1.0,
         extra_body={
             "max_tokens": 256,
+            "response_format": {"type": "json_object"},
             "chat_template_kwargs": {"enable_thinking": False},
         },
     )

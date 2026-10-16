@@ -30,7 +30,13 @@ logger = logging.getLogger("poolmgr-manager")
 SPAWNING, READY, ASSIGNED, RECYCLING = "spawning", "ready", "assigned", "recycling"
 
 
-def default_agent_env(proc_id: str, port: int, *, run_dir: Path | None = None) -> dict[str, str]:
+def default_agent_env(
+    proc_id: str,
+    port: int,
+    *,
+    run_dir: Path | None = None,
+    api_key: str | None = None,
+) -> dict[str, str]:
     """每进程 env 注入表(v4 §7.2)。部署环境可覆盖录音模式和审计级别。"""
     env = {
         "WEB_AUDIO": "1",
@@ -46,6 +52,8 @@ def default_agent_env(proc_id: str, port: int, *, run_dir: Path | None = None) -
         # 轮次日志都是 INFO,故拉到 INFO 即可保留诊断、砍掉帧噪声。要排障时临时设 DEBUG。
         "LIVEKIT_LOG_LEVEL": os.getenv("LIVEKIT_LOG_LEVEL", "INFO"),
     }
+    if api_key:
+        env["XIAOGE_SESSION_API_KEY"] = api_key
     if run_dir is not None:
         env["TURN_METRICS_LOG"] = str(run_dir / f"turn_metrics_{proc_id}.log")
         qa_log = str(run_dir / "qwen_voice_qa.log")
@@ -172,8 +180,8 @@ class PoolManager:
             self._enqueue_recordings(enqueue_session)  # B-3:确认死后再转码
 
     # ── 网关调用面 ──────────────────────────────────────────────────────────
-    def alloc(self) -> dict[str, Any] | None:
-        """取一个 READY 进程标记 ASSIGNED,返回 {proc_id, port, session_id};无就绪=None(繁忙)。"""
+    def alloc(self, api_key: str | None = None) -> dict[str, Any] | None:
+        """取 READY 进程并绑定请求 key 到返回会话(不写日志)。"""
         with self._lock:
             for p in self._procs.values():
                 if p.state == READY:

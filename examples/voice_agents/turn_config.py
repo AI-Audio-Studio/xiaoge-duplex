@@ -62,5 +62,9 @@ class TurnConfig:
                 "min_delay": self.endpoint_min_delay_s,
                 "max_delay": self.endpoint_max_delay_s,
             },
-            "preemptive_generation": {"preemptive_tts": self.preemptive_tts},
+            "preemptive_generation": (
+                {"enabled": False, "preemptive_tts": False}
+                if env_bool("XIAOGE_MODE_V2", False) and env_bool("XIAOGE_SEMANTIC_GATE", False)
+                else {"preemptive_tts": self.preemptive_tts}
+            ),
         }

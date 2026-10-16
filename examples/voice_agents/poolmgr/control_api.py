@@ -23,7 +23,14 @@ def build_control_app(manager: Any) -> aiohttp.web.Application:
     """把 PoolManager(或鸭子类型等价物)包装成 aiohttp 控制 app。"""
 
     async def _alloc(request: aiohttp.web.Request) -> aiohttp.web.Response:
-        result = manager.alloc()
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        api_key = data.get("api_key") if isinstance(data, dict) else None
+        if not isinstance(api_key, str):
+            api_key = None
+        result = manager.alloc(api_key=api_key)
         if result is None:
             return aiohttp.web.json_response({"error": "pool busy"}, status=503)
         return aiohttp.web.json_response(result)

@@ -29,6 +29,7 @@ from mute_gate import MuteGate
 from webpanel.bridge import broadcast
 from webpanel.state import WEB_AUDIO
 
+from app import interaction_host
 from app.backends import build_stt
 from app.listening_host import (
     listen_enter_aftermath,
@@ -37,6 +38,10 @@ from app.listening_host import (
     listen_tail_pending,
 )
 from app.session_state import runtime
+from app.standby_host import (
+    exit_reset_idle_timer,
+    mark_agent_output_finished,
+)
 from app.web_audio import WebSocketAudioInput, WebSocketAudioOutput
 from livekit.agents import JobContext
 from livekit.agents.llm import ChatContext, ChatMessage
@@ -107,7 +112,19 @@ def setup_stt(ctx: JobContext) -> tuple[Any, Any, bool]:
 
 def _log_user_item(w: SessionWiring, item: ChatMessage, event) -> None:
     """TURN_USER 指标日志 + 用户气泡广播。"""
-    w.qa_log.add_user(item.text_content or "")
+    item_key = str(getattr(item, "id", "") or "")
+    item_text = item.text_content or ""
+    now = time.monotonic()
+    previous_key = getattr(w, "_last_user_item_key", "")
+    previous_text = getattr(w, "_last_user_item_text", "")
+    previous_at = getattr(w, "_last_user_item_at", 0.0)
+    if (item_key and item_key == previous_key) or (item_text == previous_text and item_text and now - previous_at < 1.0):
+        _log(f"DUPLICATE_USER_ITEM_SUPPRESSED text={item_text!r} id={item_key!r}")
+        return
+    w._last_user_item_key = item_key
+    w._last_user_item_text = item_text
+    w._last_user_item_at = now
+    w.qa_log.add_user(item_text)
     started = item.metrics.get("started_speaking_at", time.time())
     w.turn_trace["started_at"] = started
     # user_state_changed 的 speaking 在 web/headless 形态不派发,_handle_user_state
@@ -147,9 +164,13 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage, event) -> None:
 
     conversation_item_added(assistant)是本形态下确定触发的锚点(timeline 证实
     agent_state_changed → speaking 在 web/headless 形态从不派发,旧"等 speaking"
-    路径恒空)。该事件=文本生成完、正要送 TTS 的时刻,距音频实际起播差一个
-    tts_node_ttfb(item.metrics 已回填),用 created_at + tts_ttfb 作起播近似足够
-    稳。started_speaking_at 框架常未回填仍为 `-`,故不依赖它。
+    路径恒空)。注意:框架在 playout 等待之后才 commit 该消息(agent_activity.py
+    ~2774 等完播放才 chat_ctx.add_message→item_added),故 event.created_at≈播放
+    结束,speak_at≈播放结束+ttfb,felt/wall_clock_e2e 实为"到播放结束"口径。
+    e2e_latency(框架口径=用户停说→agent 起播)因自定义 WebSocketAudioOutput
+    从不发 playback_started(generation.py first_frame_fut 永不 resolve)恒空,
+    下方注入块用 ws_audio_output.burst_start_ts(真实推流首帧)自算回填,拿不到
+    首帧锚点时退回 speak_at 近似;框架已算出的值(房间形态)不覆盖。
     """
     w.qa_log.add_assistant(item.text_content or "")
     tts_ttfb = item.metrics.get("tts_node_ttfb")
@@ -158,6 +179,18 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage, event) -> None:
     user_stopped = w.turn_trace.get("user_stopped_at")
     felt = speak_at - user_stopped if user_stopped is not None else None
     wall_clock_e2e = speak_at - user_started if user_started is not None else None
+    # e2e_latency 回填(框架口径:用户停说→agent 起播):livekit 只在 audio_output
+    # 发 playback_started 后才回填(generation.py first_frame_fut 机制),自定义
+    # WebSocketAudioOutput 只报 on_playback_finished 从不发 started → web 形态恒空。
+    # 锚点取 ws_audio_output.burst_start_ts(本轮 TTS 真实推流首帧 epoch);音乐
+    # 压帧等拿不到首帧(或早于用户停说)时退回 speak_at 近似;框架值不覆盖。
+    if item.metrics.get("e2e_latency") is None and user_stopped is not None:
+        ws_out = getattr(runtime, "ws_audio_output", None)
+        burst_ts = getattr(ws_out, "burst_start_ts", None) if ws_out is not None else None
+        agent_speak_at = (
+            burst_ts if burst_ts is not None and burst_ts >= user_stopped else speak_at
+        )
+        item.metrics["e2e_latency"] = agent_speak_at - user_stopped
     line = (
         "TURN_ASSISTANT "
         f"text={item.text_content!r} "
@@ -174,8 +207,11 @@ def _log_assistant_item(w: SessionWiring, item: ChatMessage, event) -> None:
     _log(
         f"WALL_CLOCK_E2E e2e={_ms(wall_clock_e2e)} felt={_ms(felt)} "
         f"tts_ttfb={_ms(tts_ttfb)} "
-        f"(user_start->agent_speak / user_stop->agent_speak)"
+        f"(user_start->playout_end+ttfb / user_stop->playout_end+ttfb)"
     )
+    # 播报结束锚点(该事件在 playout 等待之后才 commit ≈ 播完):释放输出守卫并重臂 idle。
+    mark_agent_output_finished()
+    exit_reset_idle_timer()
 
 
 def _handle_agent_state(w: SessionWiring, event) -> None:
@@ -235,21 +271,34 @@ def _handle_user_state(w: SessionWiring, event) -> None:
         asyncio.create_task(asyncio.to_thread(w.tts_engine.prewarm_connection))
         if hasattr(w.stt_engine, "prewarm_connection"):
             asyncio.create_task(w.stt_engine.prewarm_connection())
+        # 用户开口 = 有输入,自动退出 idle 重臂;V2 按模式重臂对应定时器
+        # (对话=idle/聆听=listen,interaction_host.v2_user_speech_activity)。
+        if interaction_host.mode_v2_enabled():
+            interaction_host.v2_user_speech_activity()
+        else:
+            exit_reset_idle_timer()
 
 
 def _handle_stt_event(w: SessionWiring, event) -> None:
     """interim/final 转写:live 气泡驱动 + 停止词早打断 + 压话附和早清。"""
     session = w.session
-    # 聆听期 + 退出尾巴待处理期都不弹气泡(挡滞后到达、含唤醒词及之前内容的尾巴)
+    # V2 语音活动锚点(2026-10-12 现网问题#2):interim/final 持续到达说明
+    # 用户还在说话,按当前模式重臂"无语音输入"定时器——超长单轮(实测 30.3s
+    # 连续说话)不再被开口时臂的 30s idle 表中途误判待命。V1 无此语义(no-op)。
+    if event.transcript:
+        interaction_host.v2_user_speech_activity()
+    # 聆听期 + 退出尾巴待处理期不弹气泡(挡滞后到达、含唤醒词及之前内容的尾巴)。
+    # 待命期照常弹(2026-09-16):待命只是通知态,端侧若继续发音频,轮次照常处理。
     ctrl = runtime.listen_ctrl
     listening = ctrl is not None and (ctrl.active or listen_tail_pending())
+    suppress_display = listening
     if not event.is_final:
         # 显示同源:流式主STT 的 interim 驱动 live 气泡(全量置换)。
-        if w.live_from_main and w.live is not None and not listening:
+        if w.live_from_main and w.live is not None and not suppress_display:
             w.live.feed_full(event.transcript)
         return
     # 中途 FINAL:并入 live 气泡累计,防超长轮内 interim 清零导致气泡缩水(消失再重来)。
-    if w.live_from_main and w.live is not None and not listening:
+    if w.live_from_main and w.live is not None and not suppress_display:
         w.live.feed_commit(event.transcript)
     _log(f"STT_FINAL text={event.transcript!r}")
     if should_ignore_user_turn(event.transcript):
@@ -458,6 +507,11 @@ def setup_kws(ctx: JobContext, w: SessionWiring) -> None:
     session = w.session
 
     def _on_kws_hit(keyword: str) -> None:
+        # V2(2026-10-12):KWS 命中唤醒词 = 语音唤醒 → 休眠自愈切对话。
+        # 2026-10-13 起 sleeping 下发 engine_gate=open(按键死锁修复 B),音频
+        # 始终照流,这里从"自愈兜底"变为常规唤醒路径之一(固件若恢复 kws_only
+        # 则退回兜底角色)。
+        interaction_host.v2_wake_on_input("kws_hit")
         # 进入聆听(尚未 active)需立即停小歌→强打断;聆听期/退出保护窗内不打断
         if not listen_interrupt_blocked():
             session.interrupt(force=True)
@@ -477,9 +531,21 @@ def setup_kws(ctx: JobContext, w: SessionWiring) -> None:
             w.timeline.emit("interrupt.kws", {"keyword": keyword}, source="kws")
 
     # 聆听模式控制器(纯状态机,默认关);命令词追加到 KWS 词表(from_env 会整体覆盖,故用 replace)
-    runtime.listen_ctrl = ListeningController.from_environment()
+    # V2(2026-10-12,XIAOGE_MODE_V2=1):不建 ListeningController(listen_ctrl=None)
+    # ——其吞轮语义(聆听期轮次进临时转写、不进历史不过 LLM)与 V2"每轮都过
+    # LLM"冲突;V2 聆听态由 app/interaction_host 承载,旧聆听钩子(listen_interrupt_
+    # blocked 等)因 listen_ctrl is None 天然失效。命令词表相应不并入(无 keywords 可并)。
+    if interaction_host.mode_v2_enabled():
+        runtime.listen_ctrl = None
+        _log("MODE_V2_ENABLED listen_ctrl=off (V2 三态交互模式)")
+    else:
+        runtime.listen_ctrl = ListeningController.from_environment()
     kws_config = KwsConfig.from_env()
-    if runtime.listen_ctrl.enabled and runtime.listen_ctrl.keywords:
+    if (
+        runtime.listen_ctrl is not None
+        and runtime.listen_ctrl.enabled
+        and runtime.listen_ctrl.keywords
+    ):
         kws_config = replace(
             kws_config, keywords=tuple(kws_config.keywords) + runtime.listen_ctrl.keywords
         )

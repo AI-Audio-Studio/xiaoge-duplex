@@ -108,6 +108,12 @@ def listen_enter_aftermath(via: str, *, notice: bool) -> None:
         )
     listen_broadcast(True)
     append_turn_log(f"LISTEN_ENTER via {via}")
+    # 退出机制(2026-09-15):聆听期临时转写不进轮次,idle 无从重臂 → 撤 idle、
+    # 臂聆听持续定时器(EXIT_LISTEN_S 后仍聆听着 = 自动退出)。
+    from app import standby_host  # 晚导入:standby_host 顶层反向依赖本模块
+
+    standby_host.exit_cancel_idle_timer()
+    standby_host.exit_arm_listen_timer()
 
 
 def listen_exit_aftermath(via: str, *, ask: bool) -> None:
@@ -120,6 +126,12 @@ def listen_exit_aftermath(via: str, *, ask: bool) -> None:
     append_turn_log(f"LISTEN_EXIT via {via}")
     if ask and runtime.listen_ctrl.organize_enabled and runtime.listen_ctrl.temp_has_substance():
         listen_ask_organize()
+    # 退出机制(2026-09-15):回正常对话,撤聆听持续定时器、重臂 idle
+    # (standby 进入路径也走这里,随后 enter_standby 会再撤 idle —— 幂等无害)。
+    from app import standby_host  # 晚导入同上
+
+    standby_host.exit_cancel_listen_timer()
+    standby_host.exit_arm_idle_timer()
 
 
 def listen_on_mic_toggle(now_muted: bool) -> None:

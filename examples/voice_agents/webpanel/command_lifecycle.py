@@ -32,6 +32,8 @@ class CommandRecord:
     result_status: str | None = None
     timeout_phase: str | None = None
     outcome: CommandOutcome | None = None
+    # 下发时的协议 action(如 check_battery); 供结果到达时区分控制/查询类命令。
+    action: str = ""
 
 
 class CommandLifecycleTracker:
@@ -64,6 +66,7 @@ class CommandLifecycleTracker:
             utterance_id=str(frame.get("utterance_id") or ""),
             ack_deadline_ms=registered_at_ms + ack_timeout_ms,
             result_deadline_ms=registered_at_ms + result_timeout_ms,
+            action=str(frame.get("action") or ""),
         )
         with self._lock:
             if cmd_id in self._records:
@@ -77,6 +80,12 @@ class CommandLifecycleTracker:
     def accept(self, frame: dict[str, object], *, now_ms: int | None = None) -> Lifecycle:
         """Return the protocol classification for backward-compatible callers."""
         return self.accept_update(frame, now_ms=now_ms).lifecycle
+
+    def action_of(self, cmd_id: str) -> str:
+        """Return the issued action for a cmd_id ('' when unknown/settled-expired)."""
+        with self._lock:
+            record = self._records.get(cmd_id)
+            return record.action if record is not None else ""
 
     def accept_update(
         self, frame: dict[str, object], *, now_ms: int | None = None

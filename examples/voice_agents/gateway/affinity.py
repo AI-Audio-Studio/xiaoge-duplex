@@ -60,6 +60,9 @@ class Session:
     grace_deadline: float = 0.0
     # 浏览器会话(有 cookie)享宽限窗;协议客户端(无 cookie,规则3)即断即杀,不入宽限窗(D-07)。
     browser: bool = True
+    # API key is bound at authenticated allocation time and never read from later
+    # client frames or reconnect headers. It is kept in gateway memory only.
+    api_key: str = ""
     # 活跃 /ws/audio 连接的 conn_id 集合(双标签页检测 R3 = 非空即拒;C-1:唯有登记过 conn_id
     # 的连接才能 disconnect,被拒连接拿不到 conn_id → 无法误递减错杀真会话)。
     audio_conns: set[str] = field(default_factory=set)
@@ -79,15 +82,22 @@ class AffinityTable:
         self._lock = threading.RLock()
 
     def register(
-        self, session_id: str, proc_id: str, port: int, *, browser: bool = True
+        self,
+        session_id: str,
+        proc_id: str,
+        port: int,
+        *,
+        browser: bool = True,
+        api_key: str = "",
     ) -> Session:
-        """池 alloc 后登记新会话(IDLE)。browser=False 为协议客户端(规则3):断开即杀不入宽限窗。"""
+        """池 alloc 后登记新会话(IDLE),同时绑定已认证 API key。"""
         s = Session(
             session_id=session_id,
             proc_id=proc_id,
             port=port,
             state=IDLE,
             browser=browser,
+            api_key=api_key,
             state_idle_since=0.0,  # 0.0 = 从未连接/从未断开,不触发 sweep;on_state_disconnect 首次调用后才开始计时
         )
         with self._lock:

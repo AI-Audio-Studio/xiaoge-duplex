@@ -26,11 +26,17 @@ class PoolClient:
             self._session = aiohttp.ClientSession(timeout=self._timeout)
         return self._session
 
-    async def alloc(self) -> dict[str, Any] | None:
-        """POST /alloc → {proc_id, port, session_id};503 繁忙 / 任何错误 → None。"""
+    async def alloc(self, api_key: str | None = None) -> dict[str, Any] | None:
+        """POST /alloc → {proc_id, port, session_id};503 繁忙 / 任何错误 → None.
+
+        The key is passed only in the authenticated gateway→pool request body,
+        never in a URL or log.  The pool manager uses it when spawning a worker
+        (``XIAOGE_SESSION_API_KEY``); omitting it preserves legacy allocations.
+        """
         try:
             sess = await self._sess()
-            async with sess.post(f"{self._base}/alloc") as r:
+            payload = {"api_key": api_key} if api_key else None
+            async with sess.post(f"{self._base}/alloc", json=payload) as r:
                 return await r.json() if r.status == 200 else None
         except Exception as exc:
             logger.warning("pool alloc failed: %s", exc)

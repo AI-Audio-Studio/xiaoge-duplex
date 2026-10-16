@@ -1,10 +1,13 @@
 """本地音乐播放器:ffmpeg 解码 mp3 + wave 解码 wav,16kHz mono int16le 帧推 /ws/audio。
 
 设计要点:
-- 出向通道:复用 WebSocketAudioOutput.capture_frame(),不新建 WebSocket
-- 让 TTS:agent_state == "speaking" 时暂停(asyncio.Event),TTS 结束后恢复
-- 停止:task.cancel() + ws_audio_output.clear_buffer()
+- 出向通道:音乐帧走 WebSocketAudioOutput.capture_music_frame()(独立通道,
+  不占 TTS 的播放段计数),不新建 WebSocket
+- 让 TTS:web_audio 在 TTS 出声首帧触发 yield_for_tts()(暂停推帧),
+  播报 playout 结束回调 resume();15s 兜底防回调不至
+- 停止:task.cancel() + ws_audio_output.clear_music_buffer()
 - 音乐发现:目录扫描缓存(默认 60s 刷新)+ difflib 模糊匹配(阈值 0.5)
+- 切歌:上一首/下一首 = 曲库文件名排序序环绕循环;锚点=在播曲→最近播过
 - 解码:mp3 走 ffmpeg subprocess 流式读 stdout;wav 走 wave 标准库
 """
 
@@ -39,8 +42,12 @@ SUPPORTED_EXTS = (".mp3", ".wav")
 DEFAULT_MATCH_THRESHOLD = 0.5
 DEFAULT_REFRESH_S = 60.0
 # 起播让 TTS 的兜底超时:LLM 拿到提示语后若 N 秒内 agent_state 没切回非 speaking,
-# 强制 resume 起播(避免 LLM 不念提示语时音乐卡死)。
-MUSIC_YIELD_TIMEOUT_S = float(os.getenv("XIAOGE_MUSIC_YIELD_TIMEOUT", "3.0"))
+# 强制 resume 起播(避免 LLM 不念提示语时音乐卡死)。默认 10 秒只兜异常路径,避免在正常窗口内提前起播。
+MUSIC_YIELD_TIMEOUT_S = float(os.getenv("XIAOGE_MUSIC_YIELD_TIMEOUT", "10.0"))
+# 暂停让 TTS 的兜底超时:播报 playout 结束回调若因故不至(极端:整段 TTS 被
+# stale 抑制/回调丢失),音乐不能永远停着,N 秒后强制恢复推帧。比 10s 起播兜底
+# 长得多,因为它兜的是"异常路径",平时不该触发。
+MUSIC_TTS_PAUSE_FALLBACK_S = float(os.getenv("XIAOGE_MUSIC_TTS_PAUSE_FALLBACK_S", "15.0"))
 # 注意:这些模板是给 LLM 看的工具返回值,不是给用户直接念的话。LLM 会基于它生成
 # 自然回应。所以模板要直陈"在播什么",避免"再来一首/换一个"之类会被误解成"换歌"的措辞。
 PROMPT_TEMPLATES = (
@@ -68,7 +75,8 @@ class MusicLibrary:
         for p in self.music_dir.rglob("*"):
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTS:
                 files.append(p)
-        return files
+        # 排序保证切歌(next/prev)的"列表序"稳定(rglob 顺序不保证)
+        return sorted(files)
 
     def _ensure_fresh(self) -> list[Path]:
         now = time.time()
@@ -113,8 +121,21 @@ class MusicLibrary:
         self._scan_ts = 0.0
 
 
+def _switch_target(names: list[str], anchor: str, direction: str) -> str | None:
+    """切歌目标曲名:anchor 在列表内按方向环绕移动(最后一首的下一首=第一首);
+    anchor 空/不在列表(没播过/文件已删)→ None,由调用方随机起播。"""
+    if not names or not anchor:
+        return None
+    try:
+        idx = names.index(anchor)
+    except ValueError:
+        return None
+    step = -1 if direction == "prev" else 1
+    return names[(idx + step) % len(names)]
+
+
 class MusicPlayer:
-    """音乐播放器:play/stop/pause/resume,推帧到 ws_audio_output。
+    """音乐播放器:play/stop/pause/resume/switch,推帧到 ws_audio_output。
 
     线程语义:实例方法在 agent 循环线程调用;内部 _play_loop 是该循环上的 task。
     """
@@ -138,6 +159,7 @@ class MusicPlayer:
         self._last_name: str = ""
         self._stopping = False
         self._yield_timer: asyncio.Task[None] | None = None
+        self._pause_fallback_task: asyncio.Task[None] | None = None
         self._waiting_start_ack = False
 
     @property
@@ -179,13 +201,15 @@ class MusicPlayer:
         _log(f"MUSIC_PLAY name={self._current_name!r} path={path} (yield-to-tts)")
         return prompt
 
-    async def play_for_tool(self, music_id: str | None) -> str | None:
+    async def play_for_tool(self, music_id: str | None, *, guard=None) -> str | None:
         """LLM 工具调用入口:起播并让 TTS 提示先完成,返回曲名(供工具结果拼装)。"""
         path = self._library.resolve(music_id)
         if path is None:
             _log(f"MUSIC_PLAY_NOTFOUND query={music_id!r}")
             return None
-        await self._stop_internal()
+        await self._stop_internal(guard=guard)
+        if guard is not None:
+            guard()
         self._current_path = path
         self._current_name = path.stem
         self._last_path = path
@@ -198,11 +222,13 @@ class MusicPlayer:
         _log(f"MUSIC_PLAY name={self._current_name!r} path={path} (yield-to-tts, tool)")
         return self._current_name
 
-    async def resume_last_for_tool(self) -> str | None:
+    async def resume_last_for_tool(self, *, guard=None) -> str | None:
         path = self._last_path
         if path is None:
             return None
-        await self._stop_internal()
+        await self._stop_internal(guard=guard)
+        if guard is not None:
+            guard()
         self._current_path = path
         self._current_name = path.stem
         self._last_name = path.stem
@@ -223,20 +249,54 @@ class MusicPlayer:
         _log(f"MUSIC_STOP name={name!r}")
         return "好的,音乐停了。"
 
-    async def stop_for_tool(self) -> bool:
+    async def stop_for_tool(self, *, guard=None) -> bool:
         """LLM 工具调用入口:停止播放,返回是否确实在播。"""
         was = self.is_playing
         name = self._current_name
-        await self._stop_internal()
+        await self._stop_internal(guard=guard)
+        if guard is not None:
+            guard()
         if was:
             _log(f"MUSIC_STOP name={name!r} (tool)")
         return was
 
+    async def switch_for_tool(self, direction: str, *, guard=None) -> str | None:
+        """切换到上一首/下一首(曲库列表序,环绕循环),返回新曲名;曲库空 → None。
+
+        锚点 = 在播曲(自然播完未清也在此列)→ 最近播过的一首;无锚点(从没播过
+        /锚点已不在曲库)→ 随机起播。委托 play_for_tool 起播(含让位 TTS/兜底 timer)。
+        """
+        names = self._library.list_names()
+        if not names:
+            return None
+        anchor = self._current_name or self._last_name
+        target = _switch_target(names, anchor, direction)
+        if target is None:
+            target = random.choice(names)
+        _log(f"MUSIC_SWITCH dir={direction!r} anchor={anchor!r} target={target!r}")
+        return await self.play_for_tool(target, guard=guard)
+
     def pause(self) -> None:
-        """TTS 起来时调用:暂停推帧(已推的浏览器播完,新帧阻塞)。"""
+        """暂停推帧(已推的浏览器播完,新帧阻塞)。不挂兜底 timer。"""
         if self.is_playing:
             self._resume_ev.clear()
             _log("MUSIC_PAUSE")
+
+    def yield_for_tts(self) -> None:
+        """TTS 出声时调用(web_audio 在 TTS 真实出声首帧触发):
+        - 在播(_resume_ev 本就 set)→ 暂停推帧,播报完由 playout 结束回调 resume;
+        - 起播等 ack(_resume_ev 本就 clear)→ 不动 ev,但把 3s 起播兜底换成
+          暂停兜底,防长提示语还没念完 3s timer 就把音乐压上来。
+        两条路都挂 15s 暂停兜底:playout 回调若因故不至,音乐不能永远停着。
+        """
+        if not self.is_playing:
+            return
+        # TTS 实测在念:起播兜底让位给 playout 恢复
+        self._disarm_yield_timer()
+        if self._resume_ev.is_set():
+            self._resume_ev.clear()
+            _log("MUSIC_PAUSE")
+        self._arm_pause_fallback()
 
     def resume(self) -> None:
         """TTS 结束后调用:恢复推帧。"""
@@ -244,13 +304,14 @@ class MusicPlayer:
             self._resume_ev.set()
             _log("MUSIC_RESUME")
         self._waiting_start_ack = False
+        self._disarm_pause_fallback()
         # 无论如何都 disarm 兜底 timer:要么正常 resume 了,要么本来就没 clear
         self._disarm_yield_timer()
 
     def _arm_yield_timer(self) -> None:
         """起一个兜底 timer:若 N 秒后 _resume_ev 还 clear,自动 set()。
         场景:LLM 拿到提示语但没念(直接 end_turn),agent_state 没切 speaking
-        → 永远等不到 resume(),音乐卡死。兜底 N 秒后强制起播。
+        → 永远等不到 resume(),音乐卡死。默认 10 秒只兜异常路径,避免在正常的工具结果生成+提示语首帧窗口内提前起播。
         """
         self._disarm_yield_timer()
         try:
@@ -274,14 +335,45 @@ class MusicPlayer:
             t.cancel()
         self._yield_timer = None
 
+    def _arm_pause_fallback(self) -> None:
+        """挂暂停兜底:yield_for_tts 后 N 秒 _resume_ev 仍 clear → 强制恢复。
+
+        正常路径由 web_audio 的 playout 结束回调 resume(),到不了这;它兜的是
+        回调不至的异常路径(整段 TTS 被 stale 抑制时 playout waiter 不会起)。
+        """
+        self._disarm_pause_fallback()
+        try:
+            self._pause_fallback_task = self._loop.create_task(self._pause_fallback_body())
+        except RuntimeError:
+            pass  # loop 未运行,play() 不该被调到
+
+    async def _pause_fallback_body(self) -> None:
+        try:
+            await asyncio.sleep(MUSIC_TTS_PAUSE_FALLBACK_S)
+            if not self._resume_ev.is_set():
+                self._resume_ev.set()
+                self._waiting_start_ack = False
+                _log(f"MUSIC_TTS_PAUSE_FALLBACK auto-resume after {MUSIC_TTS_PAUSE_FALLBACK_S}s")
+        except asyncio.CancelledError:
+            pass
+
+    def _disarm_pause_fallback(self) -> None:
+        t = self._pause_fallback_task
+        if t is not None and not t.done():
+            t.cancel()
+        self._pause_fallback_task = None
+
     async def aclose(self) -> None:
         """关闭:停掉当前任务,释放资源。"""
         await self._stop_internal()
 
-    async def _stop_internal(self) -> None:
+    async def _stop_internal(self, *, guard=None) -> None:
+        if guard is not None:
+            guard()
         self._stopping = True
         self._waiting_start_ack = False
         self._disarm_yield_timer()
+        self._disarm_pause_fallback()
         self._resume_ev.set()  # 唤醒可能阻塞的循环
         task = self._task
         had_active_task = task is not None and not task.done()
@@ -296,6 +388,8 @@ class MusicPlayer:
         self._current_name = ""
         if not had_active_task:
             return
+        if guard is not None:
+            guard()
         output = self._runtime.ws_audio_output
         if output is not None:
             try:
@@ -358,7 +452,12 @@ class MusicPlayer:
             samples_per_channel=SAMPLES_PER_FRAME,
         )
         try:
-            await output.capture_frame(frame)
+            # 音乐走独立通道:不占 TTS 的播放段计数/突发锚点,也不触发让位
+            capture = getattr(output, "capture_music_frame", None)
+            if capture is not None:
+                await capture(frame)
+            else:
+                await output.capture_frame(frame)
         except Exception as exc:
             logger.debug("music frame push skipped: %s", exc)
 

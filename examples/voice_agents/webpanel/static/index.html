@@ -63,6 +63,7 @@ main{flex:1;display:flex;min-height:0}
 #micBtn .ico-off{display:none}#micBtn.off .ico-on{display:none}#micBtn.off .ico-off{display:inline-flex}
 #spkBtn{display:none;background:#fff;color:#6B7280;border:1px solid #D6D7DB}
 #spkBtn.on{background:#E86A43;color:#fff;border-color:#E86A43}
+#spkBtn.standby{background:#9CA3AF;color:#fff;border-color:#9CA3AF}
 #spkBtn.err{background:#FEF2F2;color:#B91C1C;border-color:#FECACA}
 .cfg-empty{flex:1;display:flex;align-items:center;justify-content:center;border:1px dashed #E2E3E7;border-radius:10px;color:#B6B8BE;font-size:12px;margin-top:12px}
 /* 聆听遮罩:像盖一层纱,完整覆盖会话显示区(底部 dock 通话键浮于其上仍可点)。
@@ -80,6 +81,54 @@ main{flex:1;display:flex;min-height:0}
 .api-key-input{width:100%;height:38px;border:1px solid #D6D7DB;border-radius:8px;padding:0 10px;
   color:#1F2329;font-size:12px;background:#fff;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
 .api-key-input:focus{outline:2px solid #F4C7B6;outline-offset:1px;border-color:#E86A43}
+.fb-text{width:100%;min-height:84px;resize:vertical;border:1px solid #D6D7DB;border-radius:8px;
+  padding:8px 10px;color:#1F2329;font-size:12px;background:#fff;font-family:inherit;line-height:1.5}
+.fb-text::placeholder{color:#B6B8BE}
+.fb-text:focus{outline:2px solid #F4C7B6;outline-offset:1px;border-color:#E86A43}
+.fb-send{height:34px;border:none;border-radius:8px;background:#E86A43;color:#fff;font-size:12px;
+  cursor:pointer;font-family:inherit}
+.fb-send:hover{background:#D75A33}
+.fb-send:disabled{background:#F3D8CC;cursor:default}
+.fb-hint{font-size:11px;color:#B6B8BE;min-height:14px;word-break:break-all}
+.fb-hint.ok{color:#15803D}.fb-hint.err{color:#DC2626}
+/* 完整提示词弹框(2026-09-17):内容长(默认 1783 字)不进右栏,fixed 全屏遮罩承载
+   (区别于 #listenMask 的会话区内 absolute)。白卡 720px/92vw、max-h 86vh,
+   textarea 占满余高内部滚动;配色贴面板(#E86A43/#D6D7DB/8px 圆角/11-12px)。 */
+#promptMask{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;
+  background:rgba(31,32,36,.35);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+#promptModal{width:720px;max-width:92vw;max-height:86vh;display:flex;flex-direction:column;gap:10px;
+  background:#fff;border:0.5px solid #D6D7DB;border-radius:14px;box-shadow:0 8px 26px rgba(31,32,36,.12);
+  padding:16px 20px}
+.pm-head{display:flex;align-items:center;justify-content:space-between}
+.pm-title{font-size:14px;font-weight:600;color:#1F2024}
+.pm-close{border:none;background:none;font-size:14px;color:#B6B8BE;cursor:pointer;padding:4px 8px;border-radius:6px}
+.pm-close:hover{color:#1F2024;background:#F5F5F6}
+.pm-status{font-size:11px;color:#B6B8BE}
+.pm-status.custom{color:#E86A43}
+.pm-text{flex:1;min-height:320px;resize:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;line-height:1.6}
+.pm-foot{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.pm-foot .fb-hint{flex:1;min-height:14px}
+.pm-actions{display:flex;gap:8px;flex-shrink:0}
+.pm-ghost{height:34px;padding:0 14px;border:1px solid #D6D7DB;border-radius:8px;background:#fff;
+  color:#1F2024;font-size:12px;cursor:pointer;font-family:inherit}
+.pm-ghost:hover{border-color:#E86A43;color:#E86A43}
+.pm-ghost:disabled{border-color:#D6D7DB;color:#B6B8BE;cursor:default}
+.pm-save{padding:0 18px}
+/* 会话性格预设弹框(2026-09-22,仅 -97):骨架复用完整提示词弹框(遮罩/白卡/头/脚),
+   中部换成滚动卡片流——卡片由 JS 按 GET personas 生成(键固定三档),不在 HTML
+   写死三份。 */
+#personaMask{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;
+  background:rgba(31,32,36,.35);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px)}
+#personaModal{width:720px;max-width:92vw;max-height:86vh;display:flex;flex-direction:column;gap:10px;
+  background:#fff;border:0.5px solid #D6D7DB;border-radius:14px;box-shadow:0 8px 26px rgba(31,32,36,.12);
+  padding:16px 20px}
+#peCards{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:10px}
+.pe-card{border:0.5px solid #ECECEF;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.pe-row{display:flex;gap:8px;align-items:center}
+.pe-key{font-size:12px;font-weight:600;color:#1F2024;flex-shrink:0}
+.pe-label{flex:1;min-width:0;height:34px}
+.pe-voice{width:150px;flex-shrink:0}
+.pe-traits{min-height:88px;resize:vertical}
 .cfg-label{font-size:11px;color:#9CA3AF;margin-bottom:7px}
 .tabs{display:flex;flex-wrap:wrap;gap:6px}
 .asr-tab{font-size:12px;padding:6px 11px;border-radius:8px;border:none;background:#F3F4F6;
@@ -134,6 +183,37 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
       <input class="api-key-input" id="apiKeyInput" type="password" autocomplete="off"
         spellcheck="false" placeholder="输入 API Key">
     </div>
+    <div class="cfg-title">当前会话设置</div>
+    <div class="cfg-field">
+      <label for="sessionPersona">性格</label>
+      <select class="api-key-input" id="sessionPersona"></select>
+    </div>
+    <div class="cfg-field">
+      <label for="sessionVoice">音色</label>
+      <select class="api-key-input" id="sessionVoice"></select>
+    </div>
+    <div class="cfg-field">
+      <label for="agDuplex">全双工</label>
+      <select class="api-key-input" id="agDuplex" onchange="saveDuplexToggle()">
+        <option value="on">开启 · 正常语音对话（本次会话）</option>
+        <option value="off">关闭 · 仅识别出字（本次会话）</option>
+      </select>
+    </div>
+    <button class="fb-send" id="sessionConfigBtn" onclick="applySessionConfig()">保存到当前 API Key</button>
+    <div class="fb-hint" id="sessionConfigHint">保存到当前 API Key 对应的项目配置；当前会话也会立即生效。</div>
+    <div class="cfg-title">小歌项目配置</div>
+    <div class="cfg-field">
+      <div class="fb-hint">音色、性格、全双工的默认状态和完整提示词由后台按项目统一管理；上方全双工开关仅对当前会话生效，新会话恢复项目默认。</div>
+    </div>
+    <div class="cfg-title">问题与反馈</div>
+    <div class="cfg-field">
+      <textarea class="fb-text" id="fbText" maxlength="2000"
+        placeholder="使用中遇到的问题或建议（必填）"></textarea>
+      <input class="api-key-input" id="fbContact" type="text" maxlength="100" autocomplete="off"
+        placeholder="联系方式（选填）">
+      <button class="fb-send" id="fbBtn" onclick="submitFeedback()">提交反馈</button>
+      <div class="fb-hint" id="fbHint"></div>
+    </div>
     <button id="clearBtn" onclick="clearLog()"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"/><path d="M9 7V4h6v3"/></svg>清空记录</button>
   </div>
 </main>
@@ -143,20 +223,23 @@ footer{text-align:center;padding:9px 16px;border-top:0.5px solid #ECECEF;font-si
   <span id="sbWs"></span><span id="sbMic"></span><span id="sbAsr"></span><span id="sbTts"></span><span id="sbVoice"></span><span id="sbMsgs"></span>
   <!--BACKEND_TABS-->
 </div>
+<!-- 只读项目配置说明；后台管理页负责编辑，不在此处提供写入口。 -->
 <script>
 var ws=null, protoSession=null, muted=false, msgN=0, curAsr='funasr', curTts='cosyvoice', serverBusy=false;
-var frontendSeq=0;
 var connPromise=null, activeAttempt=null, attemptSeq=0, connectionState='idle';
 var VOICE_WELCOME='连接成功，欢迎使用小歌，请开始说话。';
 var wsProto = location.protocol==='https:' ? 'wss:' : 'ws:';
 var voiceActive=false, AUDIO_SR=16000;
+var standbyOn=false;   // 待命态(收到 standby on 帧):停发音频,点通话按钮唤醒
 var liveBubble=null, activeUserBubbles=Object.create(null), finalizedUserTurns=Object.create(null);
 var finalizedUserTurnOrder=[], FINALIZED_USER_TURN_LIMIT=384, legacyLiveId=null;
 var userTurnAliases=Object.create(null), userTurnAliasOrder=[], USER_TURN_ALIAS_LIMIT=384;
 var localUserEchoes=[];                     // 手动输入本地回显，等待服务端 data.stt final 去重
 var LOCAL_ECHO_TTL_MS=12000;
+var sessionDuplexOn=true;                   // 全双工开关仅当前会话有效;新 ctrl.hello 恢复项目默认(attach 推 ctrl.duplex_state 对齐)
+var sessionPersona='';                      // 会话性格 key;三档即全部选项(无空串项),新会话默认第一档;ack ctrl.persona_state 对齐
 var RUOYI_API_KEY_STORE='xiaoge.webpanel.ruoyi_api_key.v1';
-var DEMO_QUERY_TOKEN_ENABLED=false;
+var DEMO_QUERY_TOKEN_ENABLED=true;
 
 function getRuoyiApiKey(){
   var input=id('apiKeyInput');
@@ -198,7 +281,7 @@ async function createProtocolSession(){
 function newConnectionAttempt(){
   if(activeAttempt) disposeAttempt(activeAttempt, true);
   var attempt={id:++attemptSeq, disposed:false, intentionalClose:false, session:null, ws:null,
-    timer:null, stream:null, captureCtx:null, playCtx:null, source:null, worklet:null,
+    timer:null, pingTimer:null, stream:null, captureCtx:null, playCtx:null, source:null, worklet:null,
     ready:false, scheduled:[], nextPlayTime:0};
   activeAttempt=attempt;
   connectionState='connecting';
@@ -227,6 +310,7 @@ function disposeAttempt(attempt, intentional){
   attempt.intentionalClose=!!intentional;
   attempt.disposed=true;
   if(attempt.timer){ clearTimeout(attempt.timer); attempt.timer=null; }
+  if(attempt.pingTimer){ clearInterval(attempt.pingTimer); attempt.pingTimer=null; }
   closeAttemptAudio(attempt);
   if(attempt.ws){ try{attempt.ws.close();}catch(err){} }
   if(activeAttempt===attempt){
@@ -234,6 +318,7 @@ function disposeAttempt(attempt, intentional){
   }
 }
 function showIdleState(){
+  standbyOn=false;
   connectionState='idle'; stConn=false; updateStatus(); setVoiceActive(false);
 }
 function failAttempt(attempt, message){
@@ -254,11 +339,11 @@ async function conn(attempt){
   if(!isCurrentAttempt(attempt)) throw new Error('连接尝试已失效');
   if(connPromise) return connPromise;
   connPromise=(async function(){
-    if(!DEMO_QUERY_TOKEN_ENABLED) throw new Error('WebPanel demo 通道未启用');
     attempt.session=await createProtocolSession();
     if(!isCurrentAttempt(attempt)) throw new Error('连接尝试已失效');
     var session=attempt.session;
-    var debugWsUrl=wsProto+'//'+location.host+'/debug/ws/session?access_token='+encodeURIComponent(session.access_token);
+    var sessionPath='/debug/ws/session?access_token='+encodeURIComponent(session.access_token);
+    var debugWsUrl=wsProto+'//'+location.host+sessionPath;
     var socket=new WebSocket(debugWsUrl);
     attempt.ws=socket; socket.binaryType='arraybuffer'; syncConnectionRefs(attempt);
     await new Promise(function(resolve, reject){
@@ -270,17 +355,49 @@ async function conn(attempt){
       }, 10000);
       socket.onopen=function(){
         if(!isCurrentAttempt(attempt)) return;
+        sessionDuplexOn=true;
+        sessionPersona='';
+        var dup=id('agDuplex');
+        if(dup) dup.value='on';
+        var per=id('agPersona');
+        if(per && per.options.length) per.value=per.options[0].value;   // 新会话=默认档(第一项,配置加载前为空则留给 fillAgentConfig)
         socket.send(JSON.stringify({
           type:'ctrl.hello', trace_id:session.trace_id, session_id:session.session_id,
           proto:2, role:'panel', device_id:'web-panel-x3',
           caps:session.granted_caps || ['audio','text','cmd','state'],
           prefs:{'welcome.enabled':true}
         }));
+        // 保活(2026-10-12):每 25s 发 ctrl.ping,服务端回 ctrl.pong(handle 里静默
+        // 吞掉)。25s < 常见 LB/网关 60s 空闲断连,长连接不被中间层掐。
+        attempt.pingTimer=setInterval(function(){
+          if(!isCurrentAttempt(attempt) || socket.readyState!==WebSocket.OPEN) return;
+          try{ socket.send(JSON.stringify({type:'ctrl.ping', ts_ms:Date.now()})); }catch(err){}
+        }, 25000);
       };
       socket.onmessage=function(e){
         if(!isCurrentAttempt(attempt)) return;
         if(e.data instanceof ArrayBuffer){ playPcm(e.data, attempt); return; }
         var message=JSON.parse(e.data);
+        if(message.type==='ctrl.duplex_state'){
+          sessionDuplexOn=!!message.enabled;
+          var dup=id('agDuplex');
+          if(dup) dup.value=sessionDuplexOn?'on':'off';
+          return;
+        }
+        if(message.type==='ctrl.persona_state'){
+          sessionPersona=message.persona||'';
+          var per=id('agPersona');
+          if(per) per.value=sessionPersona;
+          return;
+        }
+        if(message.type==='ctrl.session_config_state'){
+          var sp=id('sessionPersona'), sv=id('sessionVoice');
+          if(sp && message.persona) sp.value=message.persona;
+          if(sv && message.voice) sv.value=message.voice;
+          var sh=id('sessionConfigHint');
+          if(sh){ sh.className='fb-hint ok'; sh.textContent='已应用到当前 API Key 配置，本次会话立即生效'; }
+          return;
+        }
         if(message.type==='ctrl.ready' && !settled){
           settled=true; attempt.ready=true;
           if(attempt.timer){clearTimeout(attempt.timer);attempt.timer=null;}
@@ -322,21 +439,48 @@ function handle(m){
     sysMsg('ctrl.ready：已连接 R5.2.2 合并 WS');
     return;
   }
+  if(m.type==='ctrl.pong'){ return; }  // 保活应答(2026-10-12):仅维持长连接,无 UI
   if(m.type==='ctrl.state'){
-    setAgent(m.interaction_mode==='listening' ? 'listening' : 'idle');
+    // V2 三态(2026-10-12):sleeping 休眠(停发音频)/ listening 聆听 / dialogue 或
+    // 旧值 = 对话。V1 兼容:旧服务端恒发 dialogue → else 分支,行为与旧版一致。
+    if(m.interaction_mode==='sleeping'){
+      if(!standbyOn){
+        standbyOn=true;
+        setAgent('standby');
+        setVoiceActive(voiceActive);
+        sysMsg('小歌休眠中：已停止发送音频，点通话按钮唤醒');
+      }
+    } else if(m.interaction_mode==='listening'){
+      setAgent('listening');
+    } else {
+      if(standbyOn){
+        standbyOn=false;
+        sysMsg('小歌已唤醒');
+      }
+      setAgent('idle');
+    }
     return;
   }
   if(m.type==='data.stt'){
     applyUserTranscript(m.utterance_id, m.text, !!m.final, m.ts_ms||Date.now(), m.session_id);
     return;
   }
-  if(m.type==='data.reply'){ addMsg('assistant', m.text, (m.ts_ms||Date.now())/1000); return; }
+  if(m.type==='data.reply'){
+    upsertAssistantMsg(m.utterance_id, m.text, (m.ts_ms||Date.now())/1000, false);
+    return;
+  }
   if(m.type==='data.cmd'){
     addProtocolFrame(m, false);
     simulateEndpointCommand(m);
     return;
   }
   if(m.type==='listening'){ setListening(m.on, m.hint); }
+  if(m.type==='standby'){
+    standbyOn=!!m.on;
+    setAgent(m.on?'standby':'idle');
+    setVoiceActive(voiceActive);
+    sysMsg(m.on?'小歌已待命：已停止发送音频，点通话按钮唤醒':'小歌已唤醒');
+  }
   if(m.type==='user_speaking' && m.state==='start'){
     legacyLiveId=m.utterance_id || legacyLiveId || ('legacy-'+Date.now());
     startLive(legacyLiveId);
@@ -345,6 +489,7 @@ function handle(m){
   if(m.type==='g3_protocol'){ addProtocol(m); }
   if(m.type==='message'){
     if(m.role==='user') applyUserTranscript(m.utterance_id||legacyLiveId, m.text, true, (m.ts||Date.now()/1000)*1000, 'legacy');
+    else if(m.role==='assistant') upsertAssistantMsg(m.utterance_id, m.text, m.ts, false);
     else addMsg(m.role, m.text, m.ts);
   }
   if(m.type==='state'){
@@ -440,24 +585,6 @@ function applyUserTranscript(utteranceId, text, final, tsMs, sessionId){
   if(final){ finalizeLive(text, (tsMs||Date.now())/1000, idValue, sessionId); legacyLiveId=null; }
   else updateLive(text, idValue, sessionId);
 }
-function sendCallStarted(attempt){
-  if(!isCurrentAttempt(attempt) || !attempt.ws ||
-     attempt.ws.readyState!==WebSocket.OPEN || !attempt.session) return;
-  attempt.ws.send(JSON.stringify({
-    type:'ctrl.frontend_state',
-    trace_id:attempt.session.trace_id,
-    session_id:attempt.session.session_id,
-    seq:++frontendSeq,
-    ts_ms:Date.now(),
-    ttl_ms:1000,
-    trust_level:'authoritative',
-    wake_event:'button',
-    wake_state:'awake',
-    vad:'unknown',
-    lock_mode:false
-  }));
-}
-
 function isActiveProtocolConnection(socket, session){
   return ws===socket && protoSession===session && socket.readyState===WebSocket.OPEN;
 }
@@ -491,6 +618,15 @@ function simulateEndpointCommand(command){
     if(!isActiveProtocolConnection(socket, session)) return;
     var gesture=command.params && command.params.gesture;
     var failed=command.action==='gesture.perform' && (gesture==='laugh' || gesture==='cry');
+    var resultPayload={};
+    // Web 端端侧模拟器: 电量查询默认返回 67%, 触发服务端 check_battery 结果口播链路。
+    if(command.action==='check_battery'){
+      resultPayload.result={
+        type:'cap',
+        value:67,
+        gauge_id:(command.params && command.params.gauge_id) || 1
+      };
+    }
     var finishedAt=Date.now();
     try{
       socket.send(JSON.stringify(Object.assign({
@@ -501,7 +637,7 @@ function simulateEndpointCommand(command){
         finished_at_ms:finishedAt,
         duration_ms:Math.max(0, finishedAt-receivedAt),
         retryable:false
-      }, correlation)));
+      }, resultPayload, correlation)));
     }catch(err){
       sysMsg('模拟端侧结果发送失败：'+err.message);
     }
@@ -534,8 +670,19 @@ async function sendManualText(){
 
 // Browser voice bridge: microphone PCM and TTS PCM share R5.2.2 /ws/session.
 async function toggleVoice(){
-  if(connectionState==='active' && activeAttempt){ stopVoice(); return; }
+  if(connectionState==='active' && activeAttempt){
+    if(standbyOn){ resumeFromStandby(); return; }
+    stopVoice(); return;
+  }
   await startVoice();
+}
+
+// 待命恢复(退出机制 2026-09-15):WS 一直连着(服务端待命≠断开),这里本地
+// 恢复发音频。唤醒是服务端语义:说话/发文字即真实用户输入(ctrl.frontend_state
+// 唤醒帧已退役 2026-10-13,服务端不再处理)。
+function resumeFromStandby(){
+  standbyOn=false; setAgent('idle'); setVoiceActive(voiceActive);
+  sysMsg('已唤醒小歌，可以继续说话');
 }
 
 async function startVoice(){
@@ -565,10 +712,11 @@ async function startVoice(){
     attempt.worklet=new AudioWorkletNode(attempt.captureCtx,'p');
     var socket=attempt.ws;
     attempt.worklet.port.onmessage=function(e){
-      if(isCurrentAttempt(attempt) && socket.readyState===WebSocket.OPEN && !muted) socket.send(e.data);
+      // 待命(standbyOn)即停发音频——服务端已通知端侧停止,唤醒后自动恢复。
+      if(isCurrentAttempt(attempt) && socket.readyState===WebSocket.OPEN && !muted && !standbyOn) socket.send(e.data);
     };
     attempt.source.connect(attempt.worklet);
-    connectionState='active'; setVoiceActive(true); sendCallStarted(attempt); sysMsg(VOICE_WELCOME);
+    connectionState='active'; setVoiceActive(true); sysMsg(VOICE_WELCOME);
   }catch(err){
     if(isCurrentAttempt(attempt)) failAttempt(attempt, '语音连接失败：'+err.message);
   }
@@ -598,11 +746,12 @@ function clearPlayback(){
 }
 function stopVoice(){
   var attempt=activeAttempt;
+  standbyOn=false;
   if(attempt) disposeAttempt(attempt, true);
   showIdleState();
 }
 function setVoiceConnecting(){
-  voiceActive=false;
+  voiceActive=false; standbyOn=false;
   var button=id('spkBtn');
   if(button){button.className='rnd';button.title='正在连接…';button.setAttribute('aria-label','正在连接语音通话');}
   id('sbVoice').textContent='Voice: connecting';
@@ -611,9 +760,9 @@ function setVoiceActive(active){
   voiceActive=active;
   var button=id('spkBtn');
   if(!button) return;
-  button.className='rnd'+(active?' on':'');
-  button.setAttribute('aria-label', active?'断开语音通话':'连接语音通话');
-  button.title=active?'断开语音通话':'连接语音通话';
+  button.className='rnd'+(standbyOn?' standby':(active?' on':''));
+  button.setAttribute('aria-label', standbyOn?'唤醒小歌':(active?'断开语音通话':'连接语音通话'));
+  button.title=standbyOn?'唤醒小歌':(active?'断开语音通话':'连接语音通话');
   id('sbVoice').textContent='Voice: '+(active?'connected':'disconnected');
 }
 function setVoiceError(text){
@@ -648,8 +797,9 @@ var stConn=false, stMuted=false, stAgent='';
 function updateStatus(){
   var pill=id('statepill'), dot=id('dot'), bg=id('badge');
   if(!stConn){ pill.className='statepill off'; dot.className='dot off'; bg.textContent='服务断开'; return; }
+  if(stAgent==='standby'){ pill.className='statepill susp'; dot.className='dot susp'; bg.textContent='已待命'; return; }
   if(stMuted){ pill.className='statepill susp'; dot.className='dot susp'; bg.textContent='挂起中'; return; }
-  var labels={idle:'空闲', listening:'监听中', thinking:'思考中', speaking:'播报中'};
+  var labels={idle:'空闲', listening:'监听中', thinking:'思考中', speaking:'播报中', standby:'已待命'};
   pill.className='statepill';
   dot.className='dot '+(stAgent==='speaking'?'speak':'ok');
   bg.textContent = labels[stAgent] || stAgent || '已连接';
@@ -657,10 +807,11 @@ function updateStatus(){
 function setAgent(s){ stAgent=s; updateStatus(); }
 
 function setMic(m){
-  stMuted=m;
-  id('micBtn').className='rnd'+(m?' off':'');   // 图标(开/带斜线关)由 CSS 切换,勿动 innerHTML
-  id('micBtn').setAttribute('aria-label', m?'已关麦,点击开麦':'录音中,点击关麦');
-  id('sbMic').textContent='麦克风: '+(m?'关闭':'开启');
+  muted=!!m;
+  stMuted=muted;
+  id('micBtn').className='rnd'+(muted?' off':'');   // 图标(开/带斜线关)由 CSS 切换,勿动 innerHTML
+  id('micBtn').setAttribute('aria-label', muted?'已关麦,点击开麦':'录音中,点击关麦');
+  id('sbMic').textContent='麦克风: '+(muted?'关闭':'开启');
   updateStatus();   // 关麦→挂起中,开麦→正常
 }
 
@@ -676,18 +827,45 @@ function setAsr(b){
   id('sbAsr').textContent='ASR: '+b;
 }
 
+var assistantBubbles={};
+var assistantDone={};
+function renderBubbleHtml(text, ts){
+  var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
+  return '<div>'+esc(text)+'</div><div class="ts">'+t+'</div>';
+}
 function addMsg(role, text, ts){
   if(!text) return;
   var d=document.createElement('div');
   d.className='bubble '+role+' appear';
-  var t=ts ? new Date(ts*1000).toLocaleTimeString('zh-CN') : '';
-  d.innerHTML='<div>'+esc(text)+'</div><div class="ts">'+t+'</div>';
+  d.innerHTML=renderBubbleHtml(text, ts);
   // Bug1 修复:助手回复(LLM 生成完才广播)若晚于用户已开口的 live 气泡到达,
   // 插到 live 气泡之上,保持时序 [用户上一轮][小歌回复][用户进行中],不被排到下面。
   if(role==='assistant' && liveBubble){ log().insertBefore(d, liveBubble); }
   else { log().appendChild(d); }
   log().scrollTop=log().scrollHeight;
   id('sbMsgs').textContent=(++msgN)+' 条消息';
+}
+
+function upsertAssistantMsg(replyId, text, ts, partial){
+  if(!text) return;
+  if(!replyId){ addMsg('assistant', text, ts); return; }
+  if(assistantDone[replyId]) return;
+  var d=assistantBubbles[replyId];
+  if(!d){
+    d=document.createElement('div');
+    d.className='bubble assistant appear';
+    assistantBubbles[replyId]=d;
+    if(liveBubble){ log().insertBefore(d, liveBubble); }
+    else { log().appendChild(d); }
+    id('sbMsgs').textContent=(++msgN)+' 条消息';
+  }
+  d.innerHTML=renderBubbleHtml(text, ts);
+  if(!partial){
+    delete assistantBubbles[replyId];
+    assistantDone[replyId]=Date.now();
+    setTimeout(function(){ delete assistantDone[replyId]; }, 60000);
+  }
+  log().scrollTop=log().scrollHeight;
 }
 
 function addProtocol(m){
@@ -730,8 +908,224 @@ function clearLog(){
 }
 
 async function toggleMic(){
-  var r=await fetch('/api/mic',{method:'POST'});
-  setMic((await r.json()).muted);
+  // 麦克风按钮同时承担“开始语音”和“静音/开麦”：语音按钮在当前布局中隐藏，
+  // 因而未连接时点击麦克风必须先建立浏览器采集与 WS 会话。
+  if(connectionState!=='active' || !activeAttempt){
+    await startVoice();
+    return;
+  }
+  var next=!muted;
+  setMic(next);
+  try{
+    var r=await fetch('/api/mic',{method:'POST'});
+    if(r.ok){
+      var d=await r.json();
+      if(typeof d.muted==='boolean') setMic(d.muted);
+    }
+  }catch(err){
+    // PCM 发送门已经由本地 muted 控制，网关同步失败不影响当前页面操作。
+  }
+}
+
+// 问题与反馈:走网关 /api/feedback(apikey 准入 + 无亲和反代),后台逐条落盘 data/feedback/。
+async function submitFeedback(){
+  var btn=id('fbBtn'), hint=id('fbHint'), text=id('fbText').value.trim();
+  if(!hint) return;
+  if(!text){ hint.className='fb-hint err'; hint.textContent='请先填写反馈内容'; return; }
+  var headers={'Content-Type':'application/json'};
+  var apiKey=getRuoyiApiKey();
+  if(apiKey) headers['X-API-Key']=apiKey;
+  if(btn) btn.disabled=true;
+  hint.className='fb-hint'; hint.textContent='提交中…';
+  try{
+    var r=await fetch('/api/feedback',{method:'POST', headers:headers,
+      body:JSON.stringify({text:text, contact:id('fbContact').value.trim()})});
+    var d={};
+    try{ d=await r.json(); }catch(err){}
+    if(r.ok && d.ok){
+      hint.className='fb-hint ok'; hint.textContent='已收到，感谢反馈！';
+      id('fbText').value=''; id('fbContact').value='';
+    }else if(r.status===401){
+      hint.className='fb-hint err'; hint.textContent='提交失败：请先在上方输入正确的 API Key';
+    }else{
+      hint.className='fb-hint err'; hint.textContent='提交失败：'+(d.error||('HTTP '+r.status));
+    }
+  }catch(err){
+    hint.className='fb-hint err'; hint.textContent='提交失败：'+err.message;
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+async function applySessionConfig(){
+  var hint=id('sessionConfigHint'), btn=id('sessionConfigBtn');
+  var persona=id('sessionPersona').value;
+  var voice=id('sessionVoice').value;
+  if(!persona || !voice){
+    if(hint){ hint.className='fb-hint err'; hint.textContent='性格和音色选项尚未加载'; }
+    return;
+  }
+  if(btn) btn.disabled=true;
+  try{
+    // Only the editable current-key fields are sent. Target/worker/session fields
+    // are intentionally not part of this contract.
+    await saveApiKeyOverride({persona:persona, voice:voice, reset:false});
+    if(ws && ws.readyState===WebSocket.OPEN){
+      ws.send(JSON.stringify({type:'ctrl.session_config', persona:persona, voice:voice}));
+    }
+    if(hint){ hint.className='fb-hint ok'; hint.textContent='已保存到当前 API Key 配置，本次会话已生效'; }
+  }catch(err){
+    if(hint){ hint.className='fb-hint err'; hint.textContent='保存失败：'+err.message; }
+  }finally{
+    if(btn) btn.disabled=false;
+  }
+}
+
+function fillSessionConfig(cfg){
+  var p=id('sessionPersona'), v=id('sessionVoice');
+  if(!p || !v) return;
+  p.innerHTML=''; v.innerHTML='';
+  (cfg.personas||[]).forEach(function(item){
+    var po=document.createElement('option'); po.value=item.key; po.textContent=item.label; p.appendChild(po);
+  });
+  (cfg.voices||[]).forEach(function(item){
+    var vo=document.createElement('option'); vo.value=item.key; vo.textContent=item.label; v.appendChild(vo);
+  });
+  if(p.options.length) p.value=cfg.persona_key||p.options[0].value;
+  if(v.options.length) v.value=cfg.voice_key||cfg.tts_voice||v.options[0].value;
+}
+
+// 持久化由 RuoYi 后台完成；当前会话设置仍通过受信任 session WS 帧临时覆盖。
+// 此调用只写当前 API Key 对应的后台覆盖，不会写 agent_config.json，也不接受目标字段。
+async function saveApiKeyOverride(payload){
+  var headers={'Content-Type':'application/json'};
+  var apiKey=saveRuoyiApiKey();
+  if(!apiKey) throw new Error('请输入 API Key');
+  headers['X-API-Key']=apiKey;
+  var r=await fetch('/api/api-key-override',{method:'PUT',headers:headers,
+    body:JSON.stringify(payload||{})});
+  var data={};
+  try{ data=await r.json(); }catch(err){}
+  if(!r.ok) throw new Error(data.error||data.code||('HTTP '+r.status));
+  return data;
+}
+
+async function loadAgentConfig(){
+  var hint=id('sessionConfigHint');
+  if(hint) hint.textContent='输入 API Key 后可保存该 API Key 的性格和音色设置；未设置覆盖时跟随项目默认';
+  try{
+    var r=await fetch('/api/agentconfig',{headers:{'X-API-Key':getRuoyiApiKey()}});
+    if(r.ok) fillSessionConfig(await r.json());
+  }catch(err){}
+}
+
+// 全双工开关(2026-10-12 恢复):只作用于当前会话,不写持久配置——默认状态
+// 由后台项目配置管理;新会话 attach 后服务端推 ctrl.duplex_state 对齐显示。
+async function saveDuplexToggle(){
+  var sel=id('agDuplex');
+  if(!sel) return;
+  var enabled=(sel.value!=='off');
+  sessionDuplexOn=enabled;
+  try{
+    if(ws && ws.readyState===WebSocket.OPEN && protoSession){
+      ws.send(JSON.stringify({
+        type:'ctrl.duplex',
+        trace_id:protoSession.trace_id,
+        session_id:protoSession.session_id,
+        enabled:enabled,
+        ts_ms:Date.now()
+      }));
+      sysMsg(enabled?'全双工对话已开启（仅本次会话）':'全双工已关闭：仅进行语音识别出字（仅本次会话）');
+    }else{
+      sysMsg(enabled?'新会话将按项目默认状态开启全双工':'当前还未连接语音，会话建立后按项目默认状态开启');
+    }
+  }catch(err){
+    sel.value=sessionDuplexOn?'on':'off';
+    sysMsg('切换失败：'+err.message);
+  }
+}
+
+// 项目配置由后台管理；以下兼容函数仅提示，不读写持久化配置。
+var _agCfg=null;   // loadAgentConfig 缓存(见上)
+
+function _agHeaders(json){ return json?{'Content-Type':'application/json'}:{}; }
+
+function _agPromptNote(){
+  var note=id('agPromptNote');
+  if(!note) return;
+  if(_agCfg && _agCfg.instructions){
+    note.style.display='block';
+    note.textContent='● 自定义完整提示词生效中：性格编辑不影响对话；音色仍生效';
+  }else{
+    note.style.display='none';
+  }
+}
+
+function _pmMax(){ return (_agCfg&&_agCfg.limits&&_agCfg.limits.instructions)||6000; }
+function _pmBase(){ return (_agCfg&&(_agCfg.instructions||_agCfg.default_instructions))||''; }
+function _pmDirty(){ var t=id('pmText'); return !!t && t.value!==_pmBase(); }
+
+function _pmUpdateCount(){
+  var t=id('pmText'), c=id('pmCount');
+  if(!t||!c) return;
+  var n=t.value.length, max=_pmMax();
+  c.className='fb-hint'+((n>max)?' err':'');
+  c.textContent=n+' / '+max+' 字';
+}
+
+async function openPromptModal(){
+  sysMsg('完整提示词由后台项目配置管理，Web 端不支持修改');
+}
+
+function closePromptModal(){
+  var mask=id('promptMask');
+  if(mask) mask.style.display='none';
+}
+
+// 会话性格(2026-09-22,仅 -97):三档即全部选项(下拉无空串项,第一档 witty
+// =默认档),选择只作用于当前会话(ctrl.persona 帧,服务端轮次起点按预设
+// traits/音色算生效配置,新会话 attach 回落默认档);预设内容的编辑走
+// 「性格预设…」弹框整表 POST(personas 参数),存 agent_config.json
+// 热加载,所有会话共用。结构与 saveDuplexToggle 同款。
+function savePersonaToggle(){
+  sysMsg('会话性格由后台项目配置管理');
+}
+
+// 弹框卡片顺序 = 下拉顺序(第一档=默认档);key 同时用作元素 id pe_<key>_<part>
+var PE_KEYS=['witty','sunny','gentle'];
+
+function _peEl(key, part){ return id('pe_'+key+'_'+part); }
+
+function _peLabelOf(key){
+  if(!key) return '';
+  if(_agCfg && _agCfg.personas){
+    for(var i=0;i<_agCfg.personas.length;i++){
+      if(_agCfg.personas[i].key===key) return _agCfg.personas[i].label;
+    }
+  }
+  return key;
+}
+
+function _peFillVoices(sel, selected){
+  sel.innerHTML='';
+  var follow=document.createElement('option');
+  follow.value=''; follow.textContent='跟随全局音色';
+  sel.appendChild(follow);
+  ((_agCfg&&_agCfg.voices)||[]).forEach(function(v){
+    var o=document.createElement('option');
+    o.value=v.key; o.textContent=v.label;
+    sel.appendChild(o);
+  });
+  sel.value=selected||'';
+}
+
+async function openPersonaModal(){
+  sysMsg('性格预设由后台项目配置管理，Web 端不支持修改');
+}
+
+function closePersonaModal(){
+  var mask=id('personaMask');
+  if(mask) mask.style.display='none';
 }
 
 function setTts(b){
@@ -779,11 +1173,29 @@ function id(x){ return document.getElementById(x); }
 function log(){ return id('log'); }
 function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
+// Key 保存后顺手重载小歌设置:首次输入 Key 时 loadAgentConfig 已 401 过,
+// 这里补上,下拉框/当前人设立即出现。更换 Key 必须先断开旧会话，
+// 临时性格/音色不跨 API Key 复用。
+var _loadedSessionApiKey='';
+function onApiKeySaved(){
+  var next=getRuoyiApiKey();
+  if(_loadedSessionApiKey && next!==_loadedSessionApiKey && activeAttempt){
+    stopVoice();
+  }
+  saveRuoyiApiKey();
+  _loadedSessionApiKey=next;
+  var hint=id('sessionConfigHint');
+  if(hint){ hint.className='fb-hint'; hint.textContent='API Key 已切换，请重新建立会话'; }
+  loadAgentConfig();
+}
+
 function initPage(){
   var apiKeyInput=id('apiKeyInput');
   apiKeyInput.value=loadRuoyiApiKey();
-  apiKeyInput.addEventListener('change', saveRuoyiApiKey);
-  apiKeyInput.addEventListener('blur', saveRuoyiApiKey);
+  _loadedSessionApiKey=apiKeyInput.value.trim();
+  apiKeyInput.addEventListener('change', onApiKeySaved);
+  apiKeyInput.addEventListener('blur', onApiKeySaved);
+  loadAgentConfig();
   id('spkBtn').style.display='flex';
   id('spkBtn').title='连接语音通话';
   id('sbVoice').textContent='Voice: disconnected';
@@ -792,6 +1204,21 @@ function initPage(){
       e.preventDefault();
       sendManualText();
     }
+  });
+  // 完整提示词弹框:计数实时更新;Esc/点遮罩空白处关闭(有改动先确认)
+  var pmText=id('pmText');
+  if(pmText) pmText.addEventListener('input', _pmUpdateCount);
+  document.addEventListener('keydown', function(e){
+    if(e.key==='Escape'){ closePromptModal(true); closePersonaModal(true); }
+  });
+  var promptMask=id('promptMask');
+  if(promptMask) promptMask.addEventListener('click', function(e){
+    if(e.target===id('promptMask')) closePromptModal(true);
+  });
+  // 性格预设弹框:同款 Esc/遮罩关闭(有改动先确认;Esc 在上面统一挂了)
+  var personaMask=id('personaMask');
+  if(personaMask) personaMask.addEventListener('click', function(e){
+    if(e.target===id('personaMask')) closePersonaModal(true);
   });
   sysMsg('点击通话按钮连接浏览器麦克风和播放声音');
 }

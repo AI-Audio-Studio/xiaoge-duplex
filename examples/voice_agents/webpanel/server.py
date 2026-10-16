@@ -1,7 +1,7 @@
 """Web 控制面板服务(独立线程 + 独立事件循环,aiohttp)。
 
 路由:GET /(static/index.html,后端 tab 按注册表注入)、GET /ws(实时日志/状态)、
-POST /api/{mic,asr,tts};WEB_AUDIO=1 时另有 GET /ws/audio(浏览器 PCM 双向)。
+POST /api/{mic,asr,tts,feedback};WEB_AUDIO=1 时另有 GET /ws/audio(浏览器 PCM 双向)。
 
 web→agent 的一切控制都经 runtime.agent_loop 的 *_threadsafe marshal,绝不直接 await。
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import threading
 import time
@@ -19,6 +20,7 @@ from pathlib import Path
 
 import aiohttp
 import aiohttp.web
+from app import interaction_host
 from app.backends import (
     STT_BACKENDS,
     TTS_BACKENDS,
@@ -26,14 +28,27 @@ from app.backends import (
     make_stt_backend,
     make_tts_backend,
 )
+from app.config_store import (
+    INSTRUCTIONS_MAX_CHARS,
+    PERSONA_KEYS,
+    PERSONA_NAME_MAX_CHARS,
+    PERSONA_TRAITS_MAX_CHARS,
+    VOICES,
+    VOICE_KEYS,
+    default_instructions,
+    load_agent_config,
+    personas_public,
+)
+from app.project_config_store import get_project_snapshot
 from app.listening_host import listen_on_mic_toggle
 from app.session_state import (
     COMMAND_FAILURE,
-    COMMAND_SUCCESS,
     runtime,
+    say_command_result,
     say_command_status,
     say_voice_welcome,
 )
+from app.standby_host import standby_cancel_all
 from app.web_audio import WebSocketAudioInput
 from common.runtime import append_turn_log
 
@@ -54,6 +69,9 @@ _CAPS = ("audio", "text", "cmd", "state")
 _CONFIG_VERSION = "cfg-r5.2.2-webpanel"
 _TOKEN_TTL_MS = 600_000
 _FRAME_JSON_MAX_BYTES = 8192
+_FEEDBACK_DIR = Path(os.getenv("XIAOGE_FEEDBACK_DIR", "data/feedback")).resolve()
+_FEEDBACK_TEXT_MAX_CHARS = 2000
+_FEEDBACK_CONTACT_MAX_CHARS = 100
 _INDEX_HTML_KEY = aiohttp.web.AppKey("index_html", str)
 _HIDDEN_BACKEND_TABS = """
   <button id="tabFunasr" class="asr-tab"></button>
@@ -145,11 +163,16 @@ async def _handle_create_session(request: aiohttp.web.Request) -> aiohttp.web.Re
     session_id = f"sess-r522-{int(time.time() * 1000)}-{secrets.token_hex(3)}"
     trace_id = f"trace-r522-{secrets.token_hex(8)}"
     token = f"tok-{secrets.token_urlsafe(24)}"
+    # The gateway strips client copies and injects this private header only after
+    # API-key authorization. Keep it in the short-lived token record; never echo
+    # it in responses or logs.
+    trusted_api_key = request.headers.get("X-XG-API-Key", "").strip()
     panel.issued_tokens[token] = {
         "session_id": session_id,
         "trace_id": trace_id,
         "granted_caps": list(caps),
         "expires_at_ms": int(time.time() * 1000) + _TOKEN_TTL_MS,
+        "api_key": trusted_api_key,
     }
     scheme = "wss" if request.secure else "ws"
     return aiohttp.web.json_response(
@@ -209,6 +232,11 @@ async def _serve_ws_session(
             await _process_session_payload(ws, payload, session_info, session_id)
     finally:
         _unregister_session_ws(ws, session_id)
+        runtime.project_api_key = None
+        runtime.session_persona = None
+        runtime.session_persona_explicit = False
+        runtime.session_voice = None
+        runtime.session_voice_explicit = False
         logger.info("R5.2.2 merged WS session disconnected: %s", session_id)
         _request_graceful_exit(request.headers.get("X-XG-Session"))
     return ws
@@ -242,6 +270,9 @@ async def _register_session_ws(
         panel.audio_ws_primary_client = ws
         panel.audio_ws_clients.add(ws)
     ws._xg_session_id = session_id  # type: ignore[attr-defined]
+    # This value was injected by the authenticated gateway into /create_session.
+    # It is session-scoped and is never accepted from ctrl frames.
+    runtime.project_api_key = str(session_info.get("api_key") or "") or None
     logger.info("R5.2.2 merged WS session connected: %s", session_id)
     return session_info, session_id
 
@@ -268,12 +299,118 @@ async def _process_session_payload(
         await _process_command_lifecycle(ws, payload, session_info, session_id)
     elif typ == "ctrl.hello":
         await _send_ctrl_ready_and_state(ws, payload, session_info)
-    elif typ == "ctrl.frontend_state" and _is_frontend_call_started(payload):
-        if not getattr(ws, "_xg_voice_welcome_sent", False):
-            ws._xg_voice_welcome_sent = True  # type: ignore[attr-defined]
-            _schedule_voice_welcome()
+        # 会话 attach 重置(2026-09-15 幽灵待命修复):entrypoint 只在 worker
+        # 进程启动跑一次,ctrl.hello 才是池化 worker 复用的真实会话起点——
+        # marshal 回 agent 循环热应用配置 + 清 standby/遗留定时器 + 重臂 idle。
+        _schedule_session_attach_reset()
+    elif typ == "ctrl.frontend_state":
+        # 唤醒帧窄处理(2026-10-13 按键死锁修复,同日整帧退役后恢复为窄过滤):
+        # 只认 trust_level=authoritative + wake_state=awake 的真实唤醒事件
+        # (button/local_kws/gui,协议 CLIENT_FRONTEND_STATE_AND_CMD_ACK_GUIDE
+        # _20260803 §2/§4),marshal 回 agent 循环 v2_wake_on_input。连接即发
+        # 的 seq:1 镜像/周期镜像(observe/hint)/VAD/DOA 提示帧一律零动作
+        # (2026-10-12 问题#1 的噪声源——当日下午整体忽略误伤按钮,教训是按
+        # trust_level 过滤而非整帧退役)。V1 不处理(回滚走 .bak 文件集);
+        # 欢迎语不恢复(V2 无欢迎语)。P0 校验照旧放行(固件停发前删校验
+        # 会让 merged WS 对 seq:1 帧 4400 断连)。
+        if _frontend_wake_event(payload) and _schedule_frontend_wake(
+            str(payload.get("wake_event"))
+        ):
+            append_turn_log(
+                f"V2_FRONTEND_WAKE_ACCEPTED wake_event={payload.get('wake_event')}"
+                " src=merged"
+            )
+    elif typ == "ctrl.duplex":
+        enabled = bool(payload.get("enabled"))
+        if _schedule_session_duplex(enabled):
+            await ws.send_str(
+                json.dumps(
+                    {
+                        "type": "ctrl.duplex_state",
+                        "trace_id": session_info["trace_id"],
+                        "session_id": session_id,
+                        "enabled": enabled,
+                        "ts_ms": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    elif typ == "ctrl.persona":
+        # 会话性格选择(2026-09-22,仅 -97):面板下拉只发三档 key(三档化后
+        # 不再有空串选项);空串仍接受=None=隐藏回落全局人设路径,兼容直发帧
+        # 的旧缓存页。ack 帧 ctrl.persona_state 原样回显 key(空串照回空串),
+        # 面板据此对齐下拉。非法 key 正常到不了这里(P0 校验 4400 先拒),
+        # 分支再兜一层:只调度/回显合法值,防 ack 与实际存储(=None)不一致。
+        raw_persona = payload.get("persona")
+        persona = "" if raw_persona is None else raw_persona
+        if (persona == "" or persona in PERSONA_KEYS) and _schedule_session_persona(persona):
+            await ws.send_str(
+                json.dumps(
+                    {
+                        "type": "ctrl.persona_state",
+                        "trace_id": session_info["trace_id"],
+                        "session_id": session_id,
+                        "persona": persona,
+                        "ts_ms": int(time.time() * 1000),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    elif typ == "ctrl.session_config":
+        if _schedule_session_config(payload):
+            state = {
+                "type": "ctrl.session_config_state",
+                "trace_id": session_info["trace_id"],
+                "session_id": session_id,
+                "persona": payload.get("persona") or "",
+                "voice": payload.get("voice") or "",
+                "ts_ms": int(time.time() * 1000),
+            }
+            await ws.send_str(json.dumps(state, ensure_ascii=False))
+    elif typ == "ctrl.ping":
+        await _send_ctrl_pong(ws, payload, str(session_info["trace_id"]), session_id)
     elif typ == "data.text":
         _push_manual_text_to_agent(str(payload.get("text") or ""))
+
+
+_BATTERY_SPEECH_SPEC = {
+    "cap": ("电量", "%"),
+    "vol": ("电池电压", "伏"),
+    "cur": ("电池电流", "安"),
+}
+
+
+def _battery_result_speech(payload: dict) -> str:
+    """把 check_battery 的 data.cmd_result 载荷转成一句口播; 认不出返回 ''。
+
+    设备侧结果契约未定稿, 这里容错读取: result/data/payload 任一层下的
+    {cap/vol/cur: 值} 或 {type,value,unit} 都认; 认不出就不播(维持现状)。
+    充电状态已从交互协议移除; 即使旧端侧仍带 chg/charging, 也会忽略。
+    """
+    body = payload
+    for key in ("result", "data", "payload"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            body = nested
+            break
+
+    def _fmt(key: str, value: object) -> str:
+        spec = _BATTERY_SPEECH_SPEC.get(key)
+        if spec is None or isinstance(value, bool) or value is None:
+            return ""
+        noun, unit = spec
+        text = str(value).strip().rstrip("%").rstrip()
+        return f"{noun}{text}{unit}" if text else ""
+
+    lines = [line for line in (_fmt(k, body.get(k)) for k in ("cap", "vol", "cur")) if line]
+    if not lines:
+        single = _fmt(str(body.get("type") or ""), body.get("value"))
+        if single:
+            lines.append(single)
+    if not lines:
+        return ""
+    gauge = body.get("gauge_id", payload.get("gauge_id"))
+    return ("2号" if str(gauge) == "2" else "") + "，".join(lines)
 
 
 async def _process_command_lifecycle(
@@ -284,10 +421,17 @@ async def _process_command_lifecycle(
 ) -> None:
     update = panel.command_lifecycle.accept_update(payload)
     append_turn_log(f"R522_CMD_LIFECYCLE event={update.lifecycle} cmd_id={payload['cmd_id']}")
-    if update.outcome == "success":
-        _schedule_command_status(COMMAND_SUCCESS)
-    elif update.outcome == "failure":
+    # 执行成功不再播报(2026-09-04): 下发时已把动作说进确认里, 成功无需再报;
+    # 失败仍要出声, 用户才知道命令没生效。
+    if update.outcome == "failure":
         _schedule_command_status(COMMAND_FAILURE)
+    elif str(payload.get("type") or "") == "data.cmd_result" and update.outcome == "success":
+        # 查询类命令(check_battery)成功后把数值说出口; 控制类命令维持静默。
+        cmd_id = str(payload.get("cmd_id") or "")
+        if panel.command_lifecycle.action_of(cmd_id) == "check_battery":
+            speech = _battery_result_speech(payload)
+            if speech:
+                _schedule_command_result(speech)
     if update.lifecycle != "unknown":
         return
     await ws.send_str(
@@ -312,6 +456,16 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
     # 网关为真实会话连接注入 X-XG-Session 标记;断开时据此优雅退出进程(#3,配合池回收)。
     # 无网关(PC/测试形态)时头缺失 → 退出逻辑天然不触发,行为不变。
     xg_session = request.headers.get("X-XG-Session")
+    if xg_session:
+        # bridge 设备帧回落取会话号用(_primary_session_id:纯设备会话没有
+        # merged WS 主连接,回落读音频侧主连接的此属性)。
+        ws._xg_session_id = xg_session  # type: ignore[attr-defined]
+    trusted_api_key = request.headers.get("X-XG-API-Key", "").strip()
+    if trusted_api_key:
+        # This endpoint is loopback-only behind the gateway. The gateway strips
+        # client copies and injects the authenticated key; bind it for audio-mode
+        # workers that do not use the merged /create_session flow.
+        runtime.project_api_key = trusted_api_key
     lock = panel.connection_lock
     if lock is not None:
         async with lock:
@@ -330,12 +484,27 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
     logger.info("audio WS client connected (%d total)", len(panel.audio_ws_clients))
 
     await ws.send_str(json.dumps({"type": "ready", "sample_rate": WebSocketAudioInput.SAMPLE_RATE}))
-    aloop = runtime.agent_loop
-    if aloop is not None and aloop.is_running():
-        logger.info("voice welcome scheduled")
-        aloop.call_soon_threadsafe(say_voice_welcome)
+    if interaction_host.mode_v2_enabled():
+        # V2(2026-10-12):设备连接即休眠态、无欢迎语——直接推 ctrl.state
+        # sleeping。硬编码而非读 runtime:连接建立早于任何会话 marshal,读
+        # runtime 可能拿到上一会话遗留态。engine_gate=open(2026-10-13 按键
+        # 死锁修复 B):attach 时推 kws_only 固件虽照发音频,但中途改推同样
+        # 内容会停发音频而按钮不重开门 → 死锁;统一 open,唤醒交由服务端
+        # voice_turn 判定。固件按钮本地恢复收音(C)落地后可改回 kws_only。
+        state: dict[str, object] = {
+            "type": "ctrl.state",
+            "link_state": "connected",
+            "interaction_mode": "sleeping",
+            "engine_gate": "open",
+            "resource_state": "SleepingHot",
+            "ts_ms": int(time.time() * 1000),
+        }
+        if xg_session:
+            state["session_id"] = xg_session
+        await ws.send_str(json.dumps(state, ensure_ascii=False))
+        append_turn_log(f"V2_AUDIO_STATE_PUSH session={xg_session or 'none'} mode=sleeping")
     else:
-        logger.info("voice welcome skipped: agent loop not ready")
+        _schedule_voice_welcome()
 
     frame_count = 0
     byte_count = 0
@@ -349,6 +518,10 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
             aloop = runtime.agent_loop
             if inp is not None and aloop is not None and aloop.is_running():
                 aloop.call_soon_threadsafe(inp._sync_push, msg.data)
+        elif msg.type == aiohttp.WSMsgType.TEXT:
+            # 设备侧文本帧(2026-10-12):ctrl.ping 保活;ctrl.frontend_state
+            # 唤醒帧窄处理(authoritative 才唤醒,见 _process_audio_text_frame)。
+            await _process_audio_text_frame(ws, msg.data, xg_session)
         elif msg.type == aiohttp.WSMsgType.ERROR:
             break
 
@@ -358,6 +531,47 @@ async def _handle_ws_audio(request: aiohttp.web.Request) -> aiohttp.web.WebSocke
     logger.info("audio WS client disconnected (%d remaining)", len(panel.audio_ws_clients))
     _request_graceful_exit(xg_session)
     return ws
+
+
+async def _process_audio_text_frame(
+    ws: aiohttp.web.WebSocketResponse, raw: str, xg_session: str | None
+) -> None:
+    """/ws/audio 文本帧处理(2026-10-12):设备侧只连音频通道、无 merged WS。
+
+    只认 ctrl.ping(保活应答,pong 只带 X-XG-Session 头里的 session_id)。
+    ctrl.frontend_state 唤醒帧窄处理(2026-10-13 按键死锁修复 A,与 merged
+    WS 分支同款过滤 _frontend_wake_event):authoritative 真实唤醒事件 marshal
+    回 agent 循环,镜像/噪声帧零动作。其余未知帧落 AUDIO_WS_TEXT_DROP。
+    非法帧记日志忽略——不 4400 关连接:音频通道是设备唯一生命线,坏帧不该
+    断音频。
+    """
+    if len(raw.encode("utf-8")) > _FRAME_JSON_MAX_BYTES:
+        append_turn_log("AUDIO_WS_TEXT_DROP reason=oversize")
+        return
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        append_turn_log("AUDIO_WS_TEXT_DROP reason=bad_json")
+        return
+    if not isinstance(payload, dict):
+        append_turn_log("AUDIO_WS_TEXT_DROP reason=not_object")
+        return
+    typ = payload.get("type")
+    if typ == "ctrl.ping":
+        ts = payload.get("ts_ms")
+        if ts is not None and not _is_non_negative_int(ts):
+            append_turn_log("AUDIO_WS_PING_DROP reason=bad_ts")
+            return
+        await _send_ctrl_pong(ws, payload, None, xg_session)
+        return
+    if typ == "ctrl.frontend_state" and _frontend_wake_event(payload):
+        if _schedule_frontend_wake(str(payload.get("wake_event"))):
+            append_turn_log(
+                f"V2_FRONTEND_WAKE_ACCEPTED wake_event={payload.get('wake_event')}"
+                " src=audio"
+            )
+        return
+    append_turn_log(f"AUDIO_WS_TEXT_DROP type={typ}")
 
 
 def _bearer_token(request: aiohttp.web.Request) -> str:
@@ -382,6 +596,15 @@ def _is_non_negative_int(value: object) -> bool:
 
 def _is_p0_client_frame(payload: dict) -> bool:
     typ = payload.get("type")
+    if typ == "ctrl.session_config":
+        persona = payload.get("persona")
+        voice = payload.get("voice")
+        reset = payload.get("reset", False)
+        return (
+            isinstance(reset, bool)
+            and (reset or (isinstance(persona, str) and persona in PERSONA_KEYS))
+            and (reset or (isinstance(voice, str) and voice in VOICE_KEYS))
+        )
     if typ == "ctrl.hello":
         caps = payload.get("caps")
         return (
@@ -396,7 +619,17 @@ def _is_p0_client_frame(payload: dict) -> bool:
             and all(cap in _CAPS for cap in caps)
             and "token" not in payload
         )
+    if typ == "ctrl.duplex":
+        return isinstance(payload.get("enabled"), bool)
+    if typ == "ctrl.persona":
+        # key 固定三档;空串/None = 回默认人设;其余一律拒(4400 关连接)。
+        persona = payload.get("persona")
+        return persona is None or (
+            isinstance(persona, str) and (persona == "" or persona in PERSONA_KEYS)
+        )
     if typ == "ctrl.frontend_state":
+        # 帧已退役(2026-10-13)仍校验放行:固件停发前删掉会让 merged WS 对
+        # 连接即发的 seq:1 帧直接 4400 断连。固件停发后连同处理分支一起删。
         return _is_non_negative_int(payload.get("seq")) and _is_non_negative_int(
             payload.get("ttl_ms")
         )
@@ -422,7 +655,33 @@ def _is_p0_client_frame(payload: dict) -> bool:
             and payload.get("status") in _CMD_RESULT_STATUS
             and _is_non_empty_str(payload.get("code"))
         )
+    if typ == "ctrl.ping":
+        # 保活(2026-10-12):ts_ms 可省;带则必须非负整数(毫秒时间戳)。
+        ts = payload.get("ts_ms")
+        return ts is None or _is_non_negative_int(ts)
     return False
+
+
+async def _send_ctrl_pong(
+    ws: aiohttp.web.WebSocketResponse,
+    payload: dict,
+    trace_id: str | None = None,
+    session_id: str | None = None,
+) -> None:
+    """保活应答(2026-10-12):客户端 ctrl.ping → 服务端 ctrl.pong(两条 WS 路径共用)。
+
+    ts_ms = 服务端毫秒时钟;客户端带了合法 ts_ms 就回显为 client_ts_ms(端侧
+    RTT 计算)。trace_id/session_id 有则带(merged WS 两者都有;/ws/audio 只有
+    X-XG-Session 头里的 session_id;裸测试连接都不带)。
+    """
+    pong: dict[str, object] = {"type": "ctrl.pong", "ts_ms": int(time.time() * 1000)}
+    if trace_id:
+        pong["trace_id"] = trace_id
+    if session_id:
+        pong["session_id"] = session_id
+    if _is_non_negative_int(payload.get("ts_ms")):
+        pong["client_ts_ms"] = payload["ts_ms"]
+    await ws.send_str(json.dumps(pong, ensure_ascii=False))
 
 
 async def _send_ctrl_ready_and_state(
@@ -441,14 +700,25 @@ async def _send_ctrl_ready_and_state(
         "granted_caps": caps,
         "config_version": _CONFIG_VERSION,
     }
+    # V2(2026-10-12):会话起点即休眠态(无欢迎语)。硬编码而非读 runtime:
+    # ctrl.hello 应答帧先于 attach marshal 到 agent 循环,读 runtime 会拿到
+    # 上一会话的遗留态(v2_session_start 随后在 agent 循环重置,不广播,
+    # 靠本帧已带 sleeping)。engine_gate=open(2026-10-13 按键死锁修复 B,
+    # 与 bridge._v2_ctrl_state_frame / 音频 attach 推送同改):固件对中途
+    # kws_only 帧停发音频且按钮不重开 → 死锁;open 让音频照流,唤醒由
+    # voice_turn/kws_hit 判定。固件按钮本地恢复收音(C)后可改回 kws_only。
+    if interaction_host.mode_v2_enabled():
+        interaction_mode, engine_gate, resource_state = "sleeping", "open", "SleepingHot"
+    else:
+        interaction_mode, engine_gate, resource_state = "dialogue", "open", "ActiveAgent"
     state = {
         "type": "ctrl.state",
         "trace_id": trace_id,
         "session_id": session_id,
         "link_state": "connected",
-        "interaction_mode": "dialogue",
-        "engine_gate": "open",
-        "resource_state": "ActiveAgent",
+        "interaction_mode": interaction_mode,
+        "engine_gate": engine_gate,
+        "resource_state": resource_state,
         "ts_ms": int(time.time() * 1000),
     }
     await ws.send_str(json.dumps(ready, ensure_ascii=False))
@@ -492,10 +762,133 @@ def _push_manual_text_to_agent(text: str) -> None:
         asyncio.run_coroutine_threadsafe(handler(text), aloop)
 
 
-def _schedule_voice_welcome() -> None:
+def _schedule_voice_welcome(tag: str = "voice welcome") -> None:
+    """欢迎语统一入口:优先走 agent 侧异步包装(先热应用面板配置再说,修池化
+    worker 复连后第一句仍是旧音色);handler 未注册(旧代码/单测)回落同步直说。"""
     aloop = runtime.agent_loop
-    if aloop is not None and aloop.is_running():
-        aloop.call_soon_threadsafe(say_voice_welcome)
+    if aloop is None or not aloop.is_running():
+        logger.info("%s skipped: agent loop not ready", tag)
+        return
+    handler = runtime.voice_welcome_handler
+    if handler is not None:
+        logger.info("%s scheduled (config pre-apply)", tag)
+        asyncio.run_coroutine_threadsafe(handler(), aloop)
+        return
+    logger.info("%s scheduled", tag)
+    aloop.call_soon_threadsafe(say_voice_welcome)
+
+
+def _schedule_session_attach_reset() -> None:
+    """会话 attach 重置 marshal(web 线程 → agent 循环)。
+
+    agent 注册了 session_attach_handler 就走它(热应用面板配置 + 清脏
+    standby + 撤遗留定时器 + 重臂满额 idle);旧代码/单测没注册则回落
+    只撤定时器——无论哪路,池化 worker 都不再带幽灵定时器进新会话。
+    """
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return
+    handler = runtime.session_attach_handler
+    if handler is not None:
+        asyncio.run_coroutine_threadsafe(handler(), aloop)
+        return
+    aloop.call_soon_threadsafe(standby_cancel_all)
+
+
+def _set_session_duplex(enabled: bool) -> None:
+    """当前会话内全双工开关:不落 agent_config.json,下次 ctrl.hello 重置为默认开。"""
+    runtime.duplex_enabled = enabled
+    append_turn_log(f"SESSION_DUPLEX_SET duplex={'on' if enabled else 'off'}")
+
+
+def _schedule_session_duplex(enabled: bool) -> bool:
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return False
+    aloop.call_soon_threadsafe(_set_session_duplex, enabled)
+    return True
+
+
+def _frontend_wake_event(payload: dict) -> bool:
+    """ctrl.frontend_state 是否为真实唤醒事件(2026-10-13 按键死锁修复 A)。
+
+    只认 V2 + trust_level=authoritative + wake_state=awake + wake_event∈
+    {button, local_kws, gui}(协议 §2/§4:仅 authoritative wake_event 可唤醒
+    并开 engine_gate)。连接即发的 seq:1 镜像、~60s 周期镜像(trust_level=
+    observe/hint)、VAD/DOA 提示帧一律不算——2026-10-12 问题#1 的噪声源
+    就是这些镜像帧,当时整体忽略误伤了按钮,教训:按 trust_level 过滤而非
+    整帧退役。V1 不处理(回滚走 .bak 文件集)。
+    """
+    return bool(
+        interaction_host.mode_v2_enabled()
+        and str(payload.get("trust_level")) == "authoritative"
+        and str(payload.get("wake_state")) == "awake"
+        and str(payload.get("wake_event")) in ("button", "local_kws", "gui")
+    )
+
+
+def _schedule_frontend_wake(wake_event: str) -> bool:
+    """authoritative 唤醒事件 marshal 回 agent 循环跑 v2_wake_on_input。
+
+    状态变更函数的线程契约在 agent 线程(interaction_host 线程语义,同
+    _schedule_session_duplex 模式)。循环不可用(池化预热/竞窗)丢弃并记
+    日志——设备下帧还会再来,不重试。
+    """
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        append_turn_log(f"V2_FRONTEND_WAKE_DROPPED wake_event={wake_event} no_loop")
+        return False
+    aloop.call_soon_threadsafe(
+        interaction_host.v2_wake_on_input, f"frontend_{wake_event}"
+    )
+    return True
+
+
+def _set_session_persona(persona: str) -> None:
+    """当前会话内性格选择，仅存内存并在下一轮生效。"""
+    key = persona if persona in PERSONA_KEYS else None
+    runtime.session_persona = key
+    runtime.session_persona_explicit = key is not None
+    append_turn_log(f"SESSION_PERSONA_SET persona={key or 'none'}")
+
+
+def _schedule_session_persona(persona: str) -> bool:
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return False
+    aloop.call_soon_threadsafe(_set_session_persona, persona)
+    return True
+
+
+def _set_session_config(persona: str | None, voice: str | None, reset: bool = False) -> None:
+    """Set ephemeral overrides for this authenticated session only."""
+    if reset:
+        runtime.session_persona = None
+        runtime.session_persona_explicit = False
+        runtime.session_voice = None
+        runtime.session_voice_explicit = False
+    else:
+        runtime.session_persona = persona if persona in PERSONA_KEYS else None
+        runtime.session_persona_explicit = runtime.session_persona is not None
+        runtime.session_voice = voice if voice in VOICE_KEYS else None
+        runtime.session_voice_explicit = runtime.session_voice is not None
+    append_turn_log(
+        f"SESSION_CONFIG_SET persona={runtime.session_persona or 'default'} "
+        f"voice={runtime.session_voice or 'default'} reset={reset}"
+    )
+
+
+def _schedule_session_config(payload: dict) -> bool:
+    aloop = runtime.agent_loop
+    if aloop is None or not aloop.is_running():
+        return False
+    aloop.call_soon_threadsafe(
+        _set_session_config,
+        payload.get("persona"),
+        payload.get("voice"),
+        bool(payload.get("reset", False)),
+    )
+    return True
 
 
 def _schedule_command_status(text: str) -> None:
@@ -504,12 +897,10 @@ def _schedule_command_status(text: str) -> None:
         aloop.call_soon_threadsafe(say_command_status, text)
 
 
-def _is_frontend_call_started(payload: dict[str, object]) -> bool:
-    return (
-        payload.get("wake_event") == "button"
-        and payload.get("wake_state") == "awake"
-        and payload.get("trust_level") == "authoritative"
-    )
+def _schedule_command_result(text: str) -> None:
+    aloop = runtime.agent_loop
+    if aloop is not None and aloop.is_running():
+        aloop.call_soon_threadsafe(say_command_result, text)
 
 
 def _clear_agent_audio() -> None:
@@ -581,13 +972,8 @@ async def _handle_ws(request: aiohttp.web.Request) -> aiohttp.web.WebSocketRespo
             ensure_ascii=False,
         )
     )
-    if not WEB_AUDIO:
-        aloop = runtime.agent_loop
-        if aloop is not None and aloop.is_running():
-            logger.info("local welcome scheduled")
-            aloop.call_soon_threadsafe(say_voice_welcome)
-        else:
-            logger.info("local welcome skipped: agent loop not ready")
+    if not WEB_AUDIO and not interaction_host.mode_v2_enabled():
+        _schedule_voice_welcome(tag="local welcome")
 
     async for _ in ws:
         pass  # keep-alive; messages from browser not used
@@ -818,6 +1204,83 @@ async def _handle_knows_delete(request: aiohttp.web.Request) -> aiohttp.web.Resp
     return aiohttp.web.json_response({"ok": ok})
 
 
+async def _handle_feedback(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """POST /api/feedback {text, contact?}:问题与反馈 → data/feedback/ 逐条落盘(.md)。
+
+    产品功能路由(同 /api/mic 始终注册,不随 ADMIN_ROUTES 隐藏);鉴权在网关层
+    (apikey 准入 + 无亲和反代,同 /api/knows/*):任意 READY agent 都能处理,
+    每条反馈独立文件 + 文件名随机后缀,两 worker 并发写也不撞名。
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp.web.json_response({"error": "invalid json"}, status=400)
+    text = str(data.get("text", "")).strip()
+    contact = str(data.get("contact", "")).strip()
+    if not text:
+        return aiohttp.web.json_response({"error": "text is empty"}, status=400)
+    if len(text) > _FEEDBACK_TEXT_MAX_CHARS:
+        return aiohttp.web.json_response(
+            {"error": f"text too long (max {_FEEDBACK_TEXT_MAX_CHARS} chars)"}, status=400
+        )
+    if len(contact) > _FEEDBACK_CONTACT_MAX_CHARS:
+        return aiohttp.web.json_response(
+            {"error": f"contact too long (max {_FEEDBACK_CONTACT_MAX_CHARS} chars)"}, status=400
+        )
+    now = time.time()
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+    name = f"feedback-{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{secrets.token_hex(2)}.md"
+    body = (
+        f"# 问题与反馈\n\n"
+        f"- 提交时间：{ts}\n"
+        f"- 联系方式：{contact or '（未填写）'}\n"
+        f"- 来源：webpanel\n\n"
+        f"## 内容\n\n{text}\n"
+    )
+    try:
+        _FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        (_FEEDBACK_DIR / name).write_text(body, encoding="utf-8")
+    except Exception as exc:
+        logger.exception("failed to save feedback")
+        return aiohttp.web.json_response({"error": f"save failed: {exc}"}, status=500)
+    logger.info("feedback saved: %s (%d chars)", name, len(text))
+    append_turn_log(f"FEEDBACK_SAVED file={name} chars={len(text)}")
+    return aiohttp.web.json_response({"ok": True, "file": name})
+
+
+async def _handle_agent_config_get(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """Return the option catalog plus exact-key persisted selectors."""
+    api_key = request.headers.get("X-XG-API-Key", "").strip() or None
+    snapshot = get_project_snapshot(api_key, force_refresh=True)
+    cfg = snapshot.config if snapshot is not None else load_agent_config()
+    return aiohttp.web.json_response({
+        "personas": personas_public(cfg),
+        "voices": VOICES,
+        "persona_key": snapshot.persona_key if snapshot is not None else None,
+        "voice_key": snapshot.voice_key if snapshot is not None else None,
+        "tts_voice": cfg.tts_voice,
+        "limits": {
+            "persona_name": PERSONA_NAME_MAX_CHARS,
+            "persona_traits": PERSONA_TRAITS_MAX_CHARS,
+        },
+    })
+
+
+async def _handle_agent_config_post(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """Legacy write path: kept disabled for old clients."""
+    return aiohttp.web.json_response(
+        {"error": "agent configuration is managed by the backend"}, status=403
+    )
+
+
+async def _handle_agent_config_persist(request: aiohttp.web.Request) -> aiohttp.web.Response:
+    """Legacy compatibility route; project writes are not performed by workers."""
+    return aiohttp.web.json_response(
+        {"code": "persistence_unavailable", "error": "project configuration must be saved by RuoYi"},
+        status=410,
+    )
+
+
 def build_web_app(
     *,
     admin_routes: bool = ADMIN_ROUTES,
@@ -844,6 +1307,14 @@ def build_web_app(
     app.router.add_post("/api/knows/append", _handle_knows_append)
     app.router.add_post("/api/knows/query", _handle_knows_query)
     app.router.add_delete("/api/knows/{chunk_id}", _handle_knows_delete)
+    # 问题与反馈(产品功能,始终注册):网关层 apikey 准入 + 无亲和反代,逐条落盘 data/feedback/
+    app.router.add_post("/api/feedback", _handle_feedback)
+    # 项目配置由 RuoYi 后台管理；面板保留路径仅为旧客户端返回只读拒绝。
+    app.router.add_route("GET", "/api/agentconfig", _handle_agent_config_get)
+    # Preserve legacy POST semantics (403); authenticated persistence has an
+    # explicit route so old clients cannot accidentally mutate project config.
+    app.router.add_post("/api/agentconfig", _handle_agent_config_post)
+    app.router.add_post("/api/agentconfig/persist", _handle_agent_config_persist)
     if admin_routes:  # M5:隐藏态不注册 → aiohttp 默认 404
         app.router.add_post("/api/asr", _handle_switch_asr)
         app.router.add_post("/api/tts", _handle_switch_tts)

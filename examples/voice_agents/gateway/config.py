@@ -53,10 +53,16 @@ class GatewayConfig:
     api_key_db_user: str = ""
     api_key_db_password: str = ""
     api_key_db_name: str = ""
+    # Direct WebPanel writer. Defaults to the read credentials only when the
+    # dedicated writer variables are absent; deployments should use least privilege.
+    api_key_write_host: str = ""
+    api_key_write_port: int = 3306
+    api_key_write_user: str = ""
+    api_key_write_password: str = ""
+    api_key_write_name: str = ""
     api_key_refresh_sec: float = 60.0  # 后台刷新有效集合的周期
-    # 浏览器原生 WebSocket 不能设置 Authorization。仅测试环境可显式打开隔离 debug 端点；
-    # 正式 /ws/session 始终 Bearer-only。
-    webpanel_debug_query_token: bool = False
+    # 浏览器面板使用短期 create_session token 连接 debug WebSocket；网关仍校验 token 映射。
+    webpanel_debug_query_token: bool = True
 
     @classmethod
     def from_env(cls) -> GatewayConfig:
@@ -78,8 +84,13 @@ class GatewayConfig:
             api_key_db_user=os.getenv("XG_API_KEY_DB_USER", "").strip(),
             api_key_db_password=os.getenv("XG_API_KEY_DB_PASSWORD", ""),
             api_key_db_name=os.getenv("XG_API_KEY_DB_NAME", "").strip(),
+            api_key_write_host=os.getenv("XG_API_KEY_WRITE_HOST", os.getenv("XG_API_KEY_DB_HOST", "")).strip(),
+            api_key_write_port=_env_int("XG_API_KEY_WRITE_PORT", _env_int("XG_API_KEY_DB_PORT", 3306)),
+            api_key_write_user=os.getenv("XG_API_KEY_WRITE_USER", os.getenv("XG_API_KEY_DB_USER", "")).strip(),
+            api_key_write_password=os.getenv("XG_API_KEY_WRITE_PASSWORD", os.getenv("XG_API_KEY_DB_PASSWORD", "")),
+            api_key_write_name=os.getenv("XG_API_KEY_WRITE_NAME", os.getenv("XG_API_KEY_DB_NAME", "")).strip(),
             api_key_refresh_sec=_env_float("XG_API_KEY_REFRESH_SEC", 60.0),
-            webpanel_debug_query_token=_env_bool("XG_WEBPANEL_DEBUG_QUERY_TOKEN", False),
+            webpanel_debug_query_token=_env_bool("XG_WEBPANEL_DEBUG_QUERY_TOKEN", True),
         )
 
     @property

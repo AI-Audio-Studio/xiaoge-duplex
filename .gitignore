@@ -192,8 +192,28 @@ docs/reports/concurrency_soak_*.md
 # Large model artifacts (KWS etc.) — copied in locally, not source. See RUN.md.
 models/
 
-# Xiaoge clients local build/test artifacts (CMake build dirs, compiler
-# output logs, mic trace dumps) — regenerated locally, not source.
+# Xiaoge clients local build/test artifacts
 clients/c/build-*/
 clients/c/cc-std*.txt
 clients/trace_mic.jsonl
+
+# Local credentials, backups, and deployment/diagnostic artifacts
+.env.*
+!.env.example
+.xg_db_password
+*.pem
+*.key
+*.bak
+*.bak.*
+*.bak_*
+.backups/
+**/.backup*/
+.codex_backup*/
+.deploy_backups/
+.deploy_staging/
+_bak_*/
+_diagnostics/
+_remote_tools/
+_remote_edit/
+.ruff_cache/
+*.jsonl

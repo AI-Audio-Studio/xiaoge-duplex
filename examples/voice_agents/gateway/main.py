@@ -23,6 +23,7 @@ import json
 import logging
 import random
 import ssl
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,27 @@ from gateway.apikey import ApiKeyStore
 from gateway.config import GatewayConfig
 from gateway.pool_client import PoolClient
 from gateway.proxy import _HOP_HEADERS, Proxy
+
+# Direct API-key override writer.  It is deliberately separate from the legacy
+# agent_config.json path and from the RuoYi HTTP bridge.
+try:
+    from app.api_key_override_store import ApiKeyOverrideStore, ApiKeyOverrideUnavailable
+except Exception:  # pragma: no cover - standalone gateway packaging
+    ApiKeyOverrideStore = None  # type: ignore[assignment,misc]
+    ApiKeyOverrideUnavailable = RuntimeError  # type: ignore[assignment,misc]
+
+# API-key override persistence is handled by the dedicated DB adapter above.
+# The legacy /api/agentconfig route remains read-only/disabled for writes; it
+# never writes the process-wide agent_config.json from the gateway.
+# The gateway is started with `python -m gateway` (cwd=voice_agents); the path
+# fallback keeps TestClient and standalone imports working.
+_VA_ROOT = Path(__file__).resolve().parents[1]
+if str(_VA_ROOT) not in sys.path:
+    sys.path.insert(0, str(_VA_ROOT))
+try:
+    from app import config_store
+except Exception:  # pragma: no cover - app/ 不在(独立网关部署):回落老反代路
+    config_store = None
 
 logger = logging.getLogger("gateway")
 
@@ -170,12 +192,18 @@ class _Router:
         proxy: Proxy,
         pool: PoolClient,
         apikeys: ApiKeyStore,
+        override_store: Any = None,
     ) -> None:
         self._cfg = config
         self._table = table
         self._proxy = proxy
         self._pool = pool
         self._apikeys = apikeys
+        self._override_store = (
+            override_store
+            if override_store is not None
+            else (ApiKeyOverrideStore.from_config(config) if ApiKeyOverrideStore is not None else None)
+        )
         self._token_sessions: dict[str, str] = {}
         self._token_issued_at: dict[str, float] = {}
         self._active_session_ws: set[str] = set()
@@ -221,14 +249,15 @@ class _Router:
                     await ws.send_str('{"type":"error","code":1001,"message":"auth failed"}')
                 await ws.close(code=4401, message=b"unauthorized")
                 return ws
-            info = await self._pool.alloc()
+            info = await self._pool.alloc(api_key=presented)
             if info is None:  # 池满 → WS busy(PROTOCOL 语义)
                 with contextlib.suppress(Exception):
                     await ws.send_str('{"type":"busy"}')
                 await ws.close(code=1013, message=b"busy")
                 return ws
             session = self._table.register(
-                info["session_id"], info["proc_id"], info["port"], browser=False
+                info["session_id"], info["proc_id"], info["port"], browser=False,
+                api_key=presented or "",
             )
         result, session, conn_id = self._table.on_audio_connect(session.session_id)
         if result == af.CONNECT_REJECT_BUSY:  # 规则6:双标签页
@@ -261,16 +290,17 @@ class _Router:
         if not self._apikeys.authorize(presented):
             return web.json_response({"code": "auth_failed"}, status=401)
         await self._cleanup_pending_sessions()
-        info = await self._pool.alloc()
+        info = await self._pool.alloc(api_key=presented)
         if info is None:
             await self._cleanup_pending_sessions(force=True)
-            info = await self._alloc_after_cleanup()
+            info = await self._alloc_after_cleanup(api_key=presented)
         if info is None:
             return web.json_response({"code": "resource_exhausted"}, status=503)
         session = self._table.register(
-            info["session_id"], info["proc_id"], info["port"], browser=False
+            info["session_id"], info["proc_id"], info["port"], browser=False,
+            api_key=presented or "",
         )
-        resp = await self._proxy.proxy_http(request, session)
+        resp = await self._proxy.proxy_http(request, session, trusted_api_key=presented)
         if resp.status != 200:
             self._table.close(session.session_id)
             await self._pool.release(session.session_id, "create_session rejected")
@@ -339,10 +369,10 @@ class _Router:
             if self._table.close(session_id) is not None:
                 await self._pool.release(session_id, "create_session pending timeout")
 
-    async def _alloc_after_cleanup(self) -> dict[str, Any] | None:
+    async def _alloc_after_cleanup(self, *, api_key: str | None = None) -> dict[str, Any] | None:
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
-            info = await self._pool.alloc()
+            info = await self._pool.alloc(api_key=api_key)
             if info is not None:
                 return info
             await asyncio.sleep(0.25)
@@ -375,7 +405,14 @@ class _Router:
             return None
         return None
 
-    async def _proxy_to_port(self, request: web.Request, port: int, *, prefix: str) -> web.Response:
+    async def _proxy_to_port(
+        self,
+        request: web.Request,
+        port: int,
+        *,
+        prefix: str,
+        trusted_api_key: str | None = None,
+    ) -> web.Response:
         """无亲和反代:把 request 透传到 http://127.0.0.1:{port}{prefix}{tail}。
 
         与 Proxy.proxy_http 的区别:不依赖 Session(无 cookie 亲和);每次请求新建上游连接
@@ -387,7 +424,11 @@ class _Router:
             url = f"{url}?{request.query_string}"
         sess = aiohttp.ClientSession()
         try:
-            fwd = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS}
+            fwd = {k: v for k, v in request.headers.items()
+                   if k.lower() not in _HOP_HEADERS and k.lower() != "x-xg-api-key"}
+            fwd["X-XG-Session"] = f"http-{port}"
+            if trusted_api_key:
+                fwd["X-XG-API-Key"] = trusted_api_key
             body = await request.read()
             try:
                 async with sess.request(request.method, url, data=body, headers=fwd) as up:
@@ -429,6 +470,89 @@ class _Router:
             return web.json_response({"code": "resource_exhausted"}, status=503)
         return await self._proxy_to_port(request, port, prefix="/api/knows/")
 
+    async def feedback_api(self, request: web.Request) -> web.Response:
+        """POST /api/feedback:apikey 准入 → 选任意 READY agent → 反代 webpanel 的 /api/feedback。
+
+        面板页"问题与反馈"入口(JS fetch 带 X-API-Key 头,面板 localStorage 已有 key)。
+        同 knows 的无亲和反代:低频、逐条落盘 data/feedback/(文件名随机后缀不撞名),
+        **不走 alloc/release**(release 会 kill 进程,见 _pick_any_port 注释)。
+        """
+        presented = _api_key_from_request_headers(request)
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        port = await self._pick_any_port()
+        if port is None:
+            return web.json_response({"code": "resource_exhausted"}, status=503)
+        return await self._proxy_to_port(request, port, prefix="/api/feedback")
+
+    async def agentconfig_api(self, request: web.Request) -> web.Response:
+        """Authenticated read-only config plus explicit persistence bridge."""
+        presented = _api_key_from_request_headers(request)
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        if request.method == "GET":
+            if not hasattr(self._pool, "list_ready"):
+                return web.json_response({"error": "not found"}, status=404)
+            port = await self._pick_any_port()
+            if port is None:
+                return web.json_response({"code": "resource_exhausted"}, status=503)
+            return await self._proxy_to_port(
+                request, port, prefix="/api/agentconfig", trusted_api_key=presented
+            )
+        return web.json_response(
+            {"error": "agent configuration is managed by the backend"},
+            status=403,
+        )
+
+    async def api_key_override_api(self, request: web.Request) -> web.Response:
+        """Persist only the authenticated API key's persona/voice overrides."""
+        presented = _api_key_from_request_headers(request)
+        if not self._apikeys.authorize(presented):
+            return web.json_response({"code": "auth_failed"}, status=401)
+        if request.method not in {"POST", "PUT"}:
+            return web.json_response({"error": "method not allowed"}, status=405)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        if not isinstance(payload, dict):
+            return web.json_response({"error": "json object expected"}, status=400)
+        allowed = {"persona", "voice", "reset"}
+        if set(payload) - allowed:
+            return web.json_response(
+                {"error": "only persona, voice, and reset are accepted"}, status=400
+            )
+        reset = payload.get("reset", False)
+        if not isinstance(reset, bool):
+            return web.json_response({"error": "reset must be boolean"}, status=400)
+        persona = payload.get("persona")
+        voice = payload.get("voice")
+        if reset:
+            persona = voice = None
+        elif not (
+            isinstance(persona, str)
+            and persona in {"witty", "sunny", "gentle"}
+            and isinstance(voice, str)
+            and voice in {"longyan_v3", "longxiaochun_v3", "longanlang_v3"}
+        ):
+            return web.json_response({"error": "invalid persona or voice"}, status=400)
+        if self._override_store is None:
+            return web.json_response(
+                {"code": "persistence_unavailable"}, status=503
+            )
+        try:
+            updated = await asyncio.to_thread(
+                self._override_store.update,
+                presented,
+                persona_key=persona,
+                voice_key=voice,
+            )
+        except ApiKeyOverrideUnavailable:
+            return web.json_response({"code": "persistence_unavailable"}, status=503)
+        if not updated:
+            return web.json_response({"code": "auth_failed"}, status=401)
+        return web.json_response({"ok": True, "reset": reset})
+
     async def healthz(self, _: web.Request) -> web.Response:
         return web.json_response({"ok": True, "pool": await self._pool.status()})
 
@@ -439,24 +563,30 @@ def build_gateway_app(
     proxy: Proxy,
     pool: PoolClient,
     apikeys: ApiKeyStore | None = None,
+    override_store: Any = None,
 ) -> web.Application:
     """装配路由(与启动/ TLS 解耦,便于 TestClient 集成测)。"""
     apikeys = apikeys or ApiKeyStore(config)
-    r = _Router(config, table, proxy, pool, apikeys)
+    r = _Router(config, table, proxy, pool, apikeys, override_store=override_store)
     app = web.Application()
     app.router.add_get("/", r.root)
     app.router.add_post("/access", r.access)
     app.router.add_post("/create_session", r.create_session)
     app.router.add_get("/healthz", r.healthz)
     app.router.add_get("/ws/session", r.ws_session)
-    if config.webpanel_debug_query_token:
-        app.router.add_get("/debug/ws/session", r.debug_ws_session)
+    app.router.add_get("/debug/ws/session", r.debug_ws_session)
     app.router.add_get("/ws", r.ws_state)
     app.router.add_get("/ws/audio", r.ws_audio)
     # 知识库独立管理界面:apikey 准入 + 无亲和反代。必须在 /api/{tail:.*} 之前注册,
     # 否则 /api/knows/list 会被 r.api(白名单 + cookie 亲和)拦截 → 404/409。
     app.router.add_get("/knows", r.knows_page)
     app.router.add_route("*", "/api/knows/{tail:.*}", r.knows_api)
+    # 问题与反馈(面板页入口):apikey 准入 + 无亲和反代,同样必须先于 /api/{tail:.*} 注册。
+    app.router.add_route("*", "/api/feedback", r.feedback_api)
+    # 小歌设置(音色+人设,面板页入口):同上无亲和反代,先于 /api/{tail:.*} 注册;
+    # * 方法 = GET(读) + POST(存) 都走这里。
+    app.router.add_route("*", "/api/agentconfig", r.agentconfig_api)
+    app.router.add_route("*", "/api/api-key-override", r.api_key_override_api)
     app.router.add_route("*", "/api/{tail:.*}", r.api)
     return app
 

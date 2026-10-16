@@ -1,18 +1,26 @@
 """R5.2.2 G3 cloud intent routing and X3 command validation.
 
-The command catalog is derived from docs/智元X3语音交互需求0723-已讨论答复.xlsx,
-sheet "离线技能清单（待更新）". This module remains deterministic: every
-command-like turn is routed, slot-filled, validated, and only then converted into
-protocol-shaped frames. Real robot execution is still gated outside this module.
+命令清单已配置化: commands.yaml(与本文件同目录)是唯一事实来源, 启动时经
+load_registry() 读入——参数/枚举/风险级别喂确定性注册表, examples/params 自动
+生成 SemanticRouter 的分类提示词。改命令只改 YAML, 不动代码。
+
+This module remains deterministic: every command-like turn is routed, slot-filled,
+validated, and only then converted into protocol-shaped frames. Real robot
+execution is still gated outside this module.
 """
 
 from __future__ import annotations
 
+import os
+import random
 import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
+
+import yaml
 
 Delivery = Literal[
     "data.cmd",
@@ -51,37 +59,47 @@ EXECUTABLE_DELIVERIES = {"data.cmd", "data.cmd after confirmation"}
 _MULTI_MARKERS = ("然后", "同时", "并且", "接着", "顺便")
 _AFFIRMATIVE_CONFIRM = frozenset({"确认", "确认执行", "执行", "可以", "是的", "好的", "同意"})
 _CANCEL_CONFIRM = frozenset({"取消", "取消执行", "算了", "不要了", "停止执行"})
-_ASK_WORDS = ("什么", "怎么", "为什么", "多少", "哪里", "在哪", "介绍", "查询", "查一下")
+_ASK_WORDS = ("什么", "怎么", "为什么", "多少", "哪里", "在哪", "哪些", "哪个", "介绍", "查询", "查一下", "干啥", "干嘛", "做啥")
 _PROHIBIT_MARKERS = ("不要", "别", "先别", "不用", "禁止", "不准", "别让")
 _HYPOTHETICAL_MARKERS = ("如果", "假如", "假设", "要是", "万一")
 _FUTURE_MARKERS = ("等会", "待会", "稍后", "以后", "明天", "下次", "过一会", "将来")
 _QUOTATION_MARKERS = ("他说", "她说", "他们说", "有人说", "刚才说", "原话", "转述")
 _POLITE_EXECUTE_MARKERS = ("请", "帮我", "麻烦", "给我")
+# 命令相关词表(与 commands.yaml 对齐): 只用于"未命中注册表时是否值得走
+# semantic LLM 兜底"的闸门, 目录本身以 YAML 为准。
+# 音乐词已随 2026-09-15 control_music 下线移除: 音乐话术不再触发 semantic 兜底,
+# 由前置过滤层(云端直行)或聊天 LLM 自然处理。
 _COMMAND_RELEVANT_MARKERS = (
-    "走",
-    "挪",
-    "移动",
-    "转",
-    "头",
-    "眼",
-    "眉",
-    "挥手",
-    "举手",
-    "握手",
-    "点赞",
-    "比心",
-    "讲解",
-    "导览",
     "音量",
     "声音",
-    "wifi",
-    "wi-fi",
-    "蓝牙",
-    "重启",
-    "关机",
+    "静音",
+    "拍照",
+    "照片",
+    "拍个",
+    "拍一",
+    "张照",
+    "张相",
+    "电量",
+    "电池",
+    "多少电",
+    "电压",
+    "电流",
     "充电",
+    "续航",
 )
-_STEP_DISTANCE_CM = 50
+
+# 能力问句自然回复模板(2026-09-02 用户反馈"可以，这项能力当前可用。"太生硬,
+# 选 B 方案轮换, 不调用 LLM): available=注册表命中且设备有 cmd 能力。
+_CAPABILITY_REPLIES = (
+    "可以呀，随时都能做～",
+    "没问题，这个我拿手～",
+    "会呀，你一说我就动～",
+    "可以的，想试就说一声～",
+)
+_CAPABILITY_MISSING_REPLIES = (
+    "哎，这个我还不会，要不换个试试？",
+    "这项技能还没解锁，试试别的？",
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +125,8 @@ class RegistryEntry:
     unsupported_behavior: str
     source_seed: str
     positive_examples: tuple[str, ...] = ()
+    # ask_missing 时的话术(如 adjust_volume 问方向); 空 = 通用"请补充参数"。
+    missing_reply: str = ""
     match: Callable[[str], bool] | None = None
     extract: Callable[[str], dict[str, Any]] | None = None
 
@@ -151,234 +171,211 @@ class ValidationResult:
     reason: str = ""
 
 
-def default_registry() -> tuple[RegistryEntry, ...]:
-    """Executable X3 command registry view approved for cloud-side dry-run output."""
+# ── 确定性中文解析(matcher/extractor), 按 commands.yaml 里的名字挂载 ──────────
 
-    owner = "Cloud owner"
-    return (
-        RegistryEntry(
-            action="navigation.move",
-            capability_id="motion.move",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="medium",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-18-26",
-            params=(
-                ParamSpec("direction", "enum", enum=("forward", "backward", "left", "right")),
-                ParamSpec("distance_cm", "int", minimum=1, maximum=10000, unit="cm"),
-            ),
-            positive_examples=(
-                "往前走一米",
-                "往后走50公分",
-                "往左走30公分",
-                "往右走10米",
-                "再走10cm",
-            ),
-            match=_match_move,
-            extract=_extract_move,
-        ),
-        RegistryEntry(
-            action="motion.turn",
-            capability_id="motion.turn",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="medium",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-38-44",
-            params=(
-                ParamSpec("direction", "enum", enum=("left", "right", "back")),
-                ParamSpec("angle_deg", "int", required=False, minimum=1, maximum=360, unit="deg"),
-            ),
-            positive_examples=("转身", "往左转身", "往右转一点", "向后转", "再转一点"),
-            match=_match_turn,
-            extract=_extract_turn,
-        ),
-        RegistryEntry(
-            action="head.motion",
-            capability_id="head.motion",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-2-7",
-            params=(ParamSpec("gesture", "enum", enum=("shake", "nod", "look")),),
-            positive_examples=("摇摇头", "点点头", "往左边看一下", "往右边看一下"),
-            match=_match_head,
-            extract=_extract_head,
-        ),
-        RegistryEntry(
-            action="face.eye",
-            capability_id="face.eye",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-8-37",
-            params=(
-                ParamSpec("operation", "str"),
-                ParamSpec("side", "enum", required=False, enum=("left", "right", "both")),
-            ),
-            positive_examples=("闭上眼睛", "闭左眼", "睁开双眼", "眨眨眼", "翻白眼", "抛媚眼"),
-            match=_match_eye,
-            extract=_extract_eye,
-        ),
-        RegistryEntry(
-            action="face.eyebrow",
-            capability_id="face.eyebrow",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-45-49",
-            params=(
-                ParamSpec("operation", "enum", enum=("raise", "frown")),
-                ParamSpec("side", "enum", required=False, enum=("left", "right", "both")),
-            ),
-            positive_examples=("挑眉毛", "挑左边眉毛", "皱眉"),
-            match=_match_eyebrow,
-            extract=_extract_eyebrow,
-        ),
-        RegistryEntry(
-            action="gesture.perform",
-            capability_id="gesture.perform",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-50-112",
-            params=(
-                ParamSpec("gesture", "str"),
-                ParamSpec("side", "enum", required=False, enum=("left", "right", "both")),
-                ParamSpec("count", "int", required=False, minimum=1, maximum=99),
-            ),
-            positive_examples=("挥手", "左手挥手", "举手", "握手", "点赞", "比心", "拿两瓶水"),
-            match=_match_gesture,
-            extract=_extract_gesture,
-        ),
-        RegistryEntry(
-            action="tour.control",
-            capability_id="tour.control",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-113-149",
-            params=(
-                ParamSpec("operation", "str"),
-                ParamSpec("language", "str", required=False),
-                ParamSpec("mode", "enum", required=False, enum=("auto", "manual")),
-                ParamSpec("point_index", "int", required=False, minimum=1, maximum=999),
-            ),
-            positive_examples=(
-                "开始讲解",
-                "暂停讲解",
-                "继续讲解",
-                "结束讲解",
-                "下一个点",
-                "英文讲解",
-            ),
-            match=_match_tour,
-            extract=_extract_tour,
-        ),
-        RegistryEntry(
-            action="audio.volume.set",
-            capability_id="audio.volume",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-150-151",
-            params=(
-                ParamSpec("operation", "enum", enum=("set", "increase", "decrease", "max", "min")),
-                ParamSpec("volume_percent", "int", required=False, minimum=0, maximum=100),
-            ),
-            positive_examples=("音量调到60%", "声音调大一点", "音量调到最大"),
-            match=_match_volume,
-            extract=_extract_volume,
-        ),
-        RegistryEntry(
-            action="connection.set",
-            capability_id="connection.set",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-159-160",
-            params=(
-                ParamSpec("target", "enum", enum=("wifi", "bluetooth")),
-                ParamSpec("enabled", "bool"),
-            ),
-            positive_examples=("打开WiFi", "关闭蓝牙"),
-            match=_match_connection,
-            extract=_extract_connection,
-        ),
-        RegistryEntry(
-            action="system.reboot",
-            capability_id="system.reboot",
-            intent_type="control_cmd",
-            delivery="data.cmd after confirmation",
-            risk_level="high",
-            owner=owner,
-            unsupported_behavior="ask confirmation",
-            source_seed="X3-SHEET-ROWS-161-162",
-            params=(),
-            positive_examples=("重启系统", "重启机器人"),
-            match=lambda text: "重启" in text,
-            extract=lambda text: {"operation": "reboot"},
-        ),
-        RegistryEntry(
-            action="system.shutdown",
-            capability_id="system.shutdown",
-            intent_type="control_cmd",
-            delivery="data.cmd after confirmation",
-            risk_level="high",
-            owner=owner,
-            unsupported_behavior="ask confirmation",
-            source_seed="X3-SHEET-ROWS-161-162",
-            params=(),
-            positive_examples=("关机", "关闭系统"),
-            match=lambda text: "关机" in text or "关闭系统" in text,
-            extract=lambda text: {"operation": "shutdown"},
-        ),
-        RegistryEntry(
-            action="power.query",
-            capability_id="power.query",
-            intent_type="info_query",
-            delivery="cloud_tool + data.reply",
-            risk_level="low",
-            owner=owner,
-            unsupported_behavior="reply only",
-            source_seed="X3-SHEET-ROWS-163-164",
-            params=(),
-            positive_examples=("查电量", "还有多少电"),
-            match=lambda text: "电量" in text or "多少电" in text,
-            extract=lambda text: {"topic": "battery"},
-        ),
-        RegistryEntry(
-            action="power.charge",
-            capability_id="power.charge",
-            intent_type="control_cmd",
-            delivery="data.cmd",
-            risk_level="medium",
-            owner=owner,
-            unsupported_behavior="reply unsupported",
-            source_seed="X3-SHEET-ROWS-163-164",
-            params=(ParamSpec("operation", "enum", enum=("return_to_charge",)),),
-            positive_examples=("回去充电", "去充电"),
-            match=lambda text: "充电" in text and not any(word in text for word in _ASK_WORDS),
-            extract=lambda text: {"operation": "return_to_charge"},
-        ),
-    )
+# 音量抱怨句(2026-09-16 用户实测"当前声音有点小"被反向调小):
+# "有点小/太小了/小了点/变小了/听不清"是描述现状而非祈使——极性描述的是
+# 现状, 期望动作与之相反(嫌小→调大)。祈使句("调小一点/再小点")极性即方向,
+# 不命中这些模式, 仍走下面的字面判定。
+_VOL_COMPLAINT_UP_RE = re.compile(
+    r"(?:有点儿?|过于|太|好|蛮|挺)(?:小|低|轻)"  # 有点小 / 太小了 / 好小声 / 挺低的
+    r"|听不[清见到]"  # 声音听不清(嫌小)
+    r"|变(?:小|低|轻)了"  # 变小了(带"了"=状态已变; "变小一点"是祈使, 不入)
+    r"|(?:小|低|轻)了(?:一点|一点儿|点|些)"  # 小了点 / 小了一点 / 小了一些
+)
+_VOL_COMPLAINT_DOWN_RE = re.compile(
+    r"(?:有点儿?|过于|太|好|蛮|挺)(?:大|高|响)"  # 有点大 / 太大了 / 好大声 / 挺响的
+    r"|变(?:大|高|响)了"  # 变大了
+    r"|(?:大|高|响)了(?:一点|一点儿|点|些)"  # 大了点 / 大了一点 / 大了一些
+)
+
+
+def _match_volume(text: str) -> bool:
+    if _is_question(text):
+        return False
+    if "音量" in text or "声音" in text or "静音" in text:
+        return any(
+            t in text for t in (
+                "调", "大", "小", "最大", "最小", "高", "低", "轻", "响",
+                "静音", "关", "听不清", "听不见", "听不到", "%", "百分",
+            )
+        )
+    # 裸"好大声/好小声"抱怨(2026-09-16): 句中无"声音/音量"也进音量路由。
+    # 仅限强度词抱怨命中(太/好/有点+大/小…), "别大声说话/大声唱歌"无强度词不误收。
+    if "大声" in text or "小声" in text:
+        return bool(_VOL_COMPLAINT_UP_RE.search(text)
+                    or _VOL_COMPLAINT_DOWN_RE.search(text))
+    return False
+
+
+def _extract_volume(text: str) -> dict[str, Any]:
+    # 方向不明("音量调一下"/"音量调到60%")返回空 → ask_missing,
+    # 用 YAML 里的 missing_reply 问"要调大还是调小"。
+    if "静音" in text or "关掉" in text or "关闭" in text or "关了" in text:
+        return {"command": "mute"}
+    if "最大" in text:
+        return {"command": "max"}
+    if "最小" in text:
+        return {"command": "min"}
+    # 抱怨句先于字面极性(2026-09-16): "有点小"=嫌小要调大, 与"调小一点"相反。
+    if _VOL_COMPLAINT_UP_RE.search(text):
+        return {"command": "up"}
+    if _VOL_COMPLAINT_DOWN_RE.search(text):
+        return {"command": "down"}
+    if "大" in text or "高" in text or "打开" in text or "响一点" in text:
+        return {"command": "up"}
+    if "小" in text or "低" in text or "轻" in text:
+        return {"command": "down"}
+    return {}
+
+
+# 口语拆分式拍照说法(2026-09-08 用户实测"拍个照"两道闸门全漏):
+# "拍个照/拍张照/拍个相/来张照片/照个相"——"拍"和"照/相"中间隔了量词。
+_PHOTO_SPLIT_RE = re.compile(
+    r"拍[个一几张]*[照相]"  # 拍个照 / 拍张照 / 拍一个照 / 拍几张
+    r"|来[个一几张]*照片?"  # 来一张照片 / 来张照片 / 来个照
+    r"|照[个一几张]*相"  # 照个相 / 照一张相
+)
+
+
+def _match_photo(text: str) -> bool:
+    if _is_question(text):
+        return False
+    if "拍照" in text or "照张相" in text or "照相" in text:
+        # "拍照的地方/拍照的时候"是描述不是祈使。
+        return re.search(r"(?:拍照|照张相|照相)的", text) is None
+    # 拍 + 无"的"gap + 照/照片/张照/张相: "拍的照片"是描述, gap 有"的"就放走聊天。
+    if re.search(r"拍[^的]{0,3}(?:照片?|张照|张相)", text):
+        return True
+    if _PHOTO_SPLIT_RE.search(text) is not None:
+        return True
+    return re.search(r"拍[0-9一两二三四五六七八九十]+张", text) is not None
+
+
+def _extract_photo(text: str) -> dict[str, Any]:
+    return {"mode": "on"}
+
+
+def _match_battery(text: str) -> bool:
+    # 查询天然是问句("还有多少电?"), 不能加 _is_question 闸门。
+    # 2026-09-08 补口语变体: "还有电吗/没电了/续航多久"此前两道闸门全漏,
+    # 掉进聊天兜底(用户观感"走了知识库")。裸"充电"只认状态问句语境,
+    # 排除"怎么充电"类 how-to。
+    if any(
+        k in text
+        for k in ("电量", "多少电", "电池", "电压", "电流", "充电状态", "还有电", "还剩电", "没电", "续航")
+    ):
+        return True
+    return "充电" in text and not any(h in text for h in ("怎么", "如何", "为什么", "为啥"))
+
+
+def _extract_battery(text: str) -> dict[str, Any]:
+    if "电压" in text:
+        kind = "vol"
+    elif "电流" in text:
+        kind = "cur"
+    elif "充电" in text:
+        kind = "chg"
+    else:
+        kind = "cap"
+    # gauge_id 可选, 默认 1; 显式带上让帧自描述。
+    gauge_id = 2 if ("2号" in text or "电池2" in text or "第二块" in text) else 1
+    return {"type": kind, "gauge_id": gauge_id}
+
+
+# matcher/extractor 注册名 → 函数。commands.yaml 的 matcher 字段引用这里的键;
+# 引用了不存在的名字会在 load_registry() 里报错(fail loud, 启动期暴露配置错误)。
+# music matcher 已随 2026-09-15 control_music 下线移除(本地音乐通道不再下发)。
+_MATCHERS: dict[str, Callable[[str], bool]] = {
+    "volume": _match_volume,
+    "photo": _match_photo,
+    "battery": _match_battery,
+}
+_EXTRACTORS: dict[str, Callable[[str], dict[str, Any]]] = {
+    "volume": _extract_volume,
+    "photo": _extract_photo,
+    "battery": _extract_battery,
+}
+
+_DEFAULT_COMMANDS_YAML = Path(__file__).with_name("commands.yaml")
+
+
+def load_registry(path: str | Path | None = None) -> tuple[RegistryEntry, ...]:
+    """从 commands.yaml 构建命令注册表(唯一事实来源)。
+
+    YAML 声明 action/参数/枚举/示例/风险级别; matcher/extractor 按名字挂载
+    上面的确定性中文解析函数。文件缺失/为空/引用未知 matcher 时直接抛错,
+    让配置错误在启动期暴露而不是运行期静默降级。
+    """
+    yaml_path = Path(path or os.getenv("XIAOGE_COMMANDS_YAML", "") or _DEFAULT_COMMANDS_YAML)
+    try:
+        raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"commands.yaml not found: {yaml_path}") from exc
+    except yaml.YAMLError as exc:
+        raise RuntimeError(f"commands.yaml parse error: {yaml_path}: {exc}") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("commands"), list):
+        raise RuntimeError(f"commands.yaml must contain a 'commands' list: {yaml_path}")
+
+    entries: list[RegistryEntry] = []
+    for item in raw["commands"]:
+        if not isinstance(item, dict) or "action" not in item:
+            raise RuntimeError(f"commands.yaml: invalid command entry: {item!r}")
+        action = str(item["action"])
+        matcher_name = str(item.get("matcher") or "")
+        extractor_name = str(item.get("extractor") or matcher_name)
+        match = _MATCHERS.get(matcher_name) if matcher_name else None
+        extract = _EXTRACTORS.get(extractor_name) if extractor_name else None
+        if matcher_name and match is None:
+            raise RuntimeError(f"commands.yaml: unknown matcher {matcher_name!r} for {action}")
+        if extractor_name and extract is None:
+            raise RuntimeError(f"commands.yaml: unknown extractor {extractor_name!r} for {action}")
+        params = tuple(
+            ParamSpec(
+                name=str(p["name"]),
+                type=str(p.get("type", "str")),
+                required=bool(p.get("required", True)),
+                enum=tuple(p.get("enum") or ()),
+                minimum=p.get("minimum"),
+                maximum=p.get("maximum"),
+                unit=str(p.get("unit") or ""),
+            )
+            for p in item.get("params") or []
+        )
+        for spec in params:
+            # YAML 1.1 会把裸 on/off/yes/no 解析成布尔——枚举值出现布尔
+            # 几乎必然是这个坑(如 enum: [on]), 启动期直接报错。
+            if any(isinstance(v, bool) for v in spec.enum):
+                raise RuntimeError(
+                    f"commands.yaml: enum of {action}.{spec.name} contains a boolean "
+                    f"(YAML 1.1 parses bare on/off/yes/no as bool); "
+                    f"quote the literal, e.g. enum: ['on']"
+                )
+        entries.append(
+            RegistryEntry(
+                action=action,
+                capability_id=str(item.get("capability_id") or action),
+                intent_type=str(item.get("intent_type") or "control_cmd"),  # type: ignore[arg-type]
+                delivery=str(item.get("delivery") or "data.cmd"),  # type: ignore[arg-type]
+                params=params,
+                risk_level=str(item.get("risk_level") or "low"),  # type: ignore[arg-type]
+                owner=str(item.get("owner") or "Cloud owner"),
+                unsupported_behavior=str(item.get("unsupported_behavior") or "reply unsupported"),
+                source_seed=str(item.get("source_seed") or f"commands.yaml:{action}"),
+                positive_examples=tuple(item.get("examples") or ()),
+                missing_reply=str(item.get("missing_reply") or ""),
+                match=match,
+                extract=extract,
+            )
+        )
+    if not entries:
+        raise RuntimeError(f"commands.yaml defines no commands: {yaml_path}")
+    return tuple(entries)
+
+
+def default_registry() -> tuple[RegistryEntry, ...]:
+    """命令注册表视图(读取 commands.yaml; 路径可用 XIAOGE_COMMANDS_YAML 覆盖)。"""
+    return load_registry()
 
 
 class G3IntentEngine:
@@ -436,8 +433,19 @@ class G3IntentEngine:
             if entry.intent_type == "control_cmd"
         ]
         non_execution = _non_execution_act(normalized)
+        if (
+            non_execution == "capability_query"
+            and not _is_capability_query(normalized)
+            and _match_battery(normalized)
+        ):
+            # 吗式电量状态问句("还有电吗/在充电吗")是查询本体, 不是能力问句:
+            # 此前被 _is_plain_command_question 拦成 info_query 罐头回复,
+            # 不产 data.cmd。放行落到 check_battery 匹配出真实查询帧。
+            non_execution = None
         if non_execution is not None and (
-            referenced_control or _has_command_relevant_marker(normalized)
+            referenced_control
+            or _has_command_relevant_marker(normalized)
+            or _capability_action(normalized) != ""
         ):
             entry = (
                 referenced_control[0]
@@ -465,6 +473,18 @@ class G3IntentEngine:
             )
         if len(control) == 1:
             entry = control[0]
+            if _embedded_control(normalized):
+                # 命令词嵌在谈论/罗列语境里（前后都有实质内容），不是祈使句。
+                # 不做确定性执行，交给 LLM 聊天兜底。
+                return IntentResult(
+                    intent_type="chat",
+                    confidence=0.6,
+                    route_reason="chat_fallback",
+                    raw_text=text,
+                    delivery="cloud_tool + data.reply",
+                    candidate_action=entry.action,
+                    source_seed="embedded_control_divert",
+                )
             slots = entry.extract(normalized) if entry.extract else {}
             return IntentResult(
                 intent_type="control_cmd",
@@ -494,33 +514,13 @@ class G3IntentEngine:
                 source_seed=entry.source_seed,
             )
 
-        if _looks_like_knowledge(normalized):
+        if _looks_like_knowledge(normalized) and not _embedded_control(normalized):
             return IntentResult(
                 intent_type="knowledge_qa",
                 confidence=0.86,
                 route_reason="knowledge_route",
                 raw_text=text,
                 delivery="cloud_knowledge + data.reply",
-            )
-        if _looks_like_info(normalized):
-            return IntentResult(
-                intent_type="info_query",
-                confidence=0.83,
-                route_reason="cloud_tool_route",
-                raw_text=text,
-                delivery="cloud_tool + data.reply",
-            )
-        if _looks_like_incomplete_move(normalized):
-            return IntentResult(
-                intent_type="control_cmd",
-                confidence=0.62,
-                route_reason="generic_command_missing_slots",
-                raw_text=text,
-                delivery="data.cmd",
-                candidate_action="navigation.move",
-                slots=_extract_move(normalized),
-                needs_validator=True,
-                source_seed="X3-GENERIC-MOVE",
             )
         return IntentResult(
             intent_type="chat",
@@ -632,7 +632,13 @@ class G3IntentEngine:
         if result.decision == "ask_confirm":
             return [_reply(base, "control_cmd", "这个操作风险较高，请先确认是否执行。", "ack")]
         if result.decision == "ask_missing":
-            return [_reply(base, "control_cmd", "我还缺少必要参数，请补充后再说一遍。", "ack")]
+            # 命令专属追问(如 adjust_volume 问方向)优先, 否则通用话术。
+            text = (
+                result.entry.missing_reply
+                if result.entry is not None and result.entry.missing_reply
+                else "我还缺少必要参数，请补充后再说一遍。"
+            )
+            return [_reply(base, "control_cmd", text, "ack")]
         if result.decision == "reject_capability":
             return [_reply(base, "control_cmd", "当前设备没有授权这个控制能力。", "ack")]
         if result.decision == "reject_policy":
@@ -641,7 +647,10 @@ class G3IntentEngine:
             return [_reply(base, "control_cmd", "已取消，不会下发控制指令。", "ack")]
         if intent.route_reason == "capability_query":
             available = result.entry is not None and "cmd" in state.caps
-            text = "可以，这项能力当前可用。" if available else "当前设备不支持这项能力。"
+            # 2026-09-02 用户反馈"可以，这项能力当前可用。"太生硬: 自然模板轮换(B 方案, 不走 LLM)。
+            text = random.choice(
+                _CAPABILITY_REPLIES if available else _CAPABILITY_MISSING_REPLIES
+            )
             return [_reply(base, "info_query", text, "final_only")]
         if intent.route_reason in {
             "prohibit",
@@ -662,16 +671,13 @@ class G3IntentEngine:
                 )
             ]
         if intent.intent_type == "knowledge_qa":
-            return [_reply(base, "knowledge_qa", _rag_answer(intent.raw_text), "final_only")]
+            # 知识问句不再走确定性 RAG 直答(标题+首句拼接结构死板, 回复也不进
+            # 对话历史); 不产帧, 落到 LLM 聊天, 由其按人设自然调 query_knowledge。
+            return []
         if intent.intent_type == "info_query":
-            return [
-                _reply(
-                    base,
-                    "info_query",
-                    _info_answer(intent.raw_text, intent.slots),
-                    "final_only",
-                )
-            ]
+            # 电量查询已改为 check_battery 真实 data.cmd 查询(见 commands.yaml);
+            # 其余信息类问题没有确定性设备状态源, 不产帧, 落到 LLM 聊天兜底。
+            return []
         return [
             _reply(base, "chat", "我可以聊天，也可以在授权范围内处理单条控制指令。", "final_only")
         ]
@@ -773,329 +779,6 @@ class G3IntentEngine:
         ]
 
 
-def _match_move(text: str) -> bool:
-    if _is_question(text):
-        return False
-    if "再走" in text:
-        return _parse_distance_cm(text) is not None or "一点" in text
-    return any(
-        k in text
-        for k in (
-            "往前走",
-            "前进",
-            "向前走",
-            "往后走",
-            "后退",
-            "往左走",
-            "向左走",
-            "往右走",
-            "向右走",
-        )
-    )
-
-
-def _extract_move(text: str) -> dict[str, Any]:
-    slots: dict[str, Any] = {}
-    if any(k in text for k in ("往前", "向前", "前进")) or "再走" in text:
-        slots["direction"] = "forward"
-    elif any(k in text for k in ("往后", "向后", "后退")):
-        slots["direction"] = "backward"
-    elif any(k in text for k in ("往左走", "向左走", "左移")):
-        slots["direction"] = "left"
-    elif any(k in text for k in ("往右走", "向右走", "右移")):
-        slots["direction"] = "right"
-    distance = _parse_distance_cm(text)
-    if distance is not None:
-        slots["distance_cm"] = distance
-    elif "一点" in text:
-        slots["distance_cm"] = 10
-        slots["distance_hint"] = "a_little"
-    elif "direction" in slots:
-        slots["distance_cm"] = _STEP_DISTANCE_CM
-        slots["distance_hint"] = "default_step"
-    return slots
-
-
-def _match_turn(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return (
-        "转身" in text
-        or "向后转" in text
-        or "往左转" in text
-        or "往右转" in text
-        or "向左转" in text
-        or "向右转" in text
-        or "再转" in text
-    )
-
-
-def _extract_turn(text: str) -> dict[str, Any]:
-    if "向后转" in text or "后转" in text:
-        direction = "back"
-    elif "右" in text:
-        direction = "right"
-    elif "左" in text:
-        direction = "left"
-    else:
-        direction = "back"
-    slots: dict[str, Any] = {"direction": direction}
-    angle = _parse_angle_deg(text)
-    if angle is not None:
-        slots["angle_deg"] = angle
-    elif "一点" in text:
-        slots["angle_deg"] = 15
-        slots["angle_hint"] = "a_little"
-    return slots
-
-
-def _match_head(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return (
-        "摇头" in text
-        or "摇摇头" in text
-        or "点头" in text
-        or any(
-            token in text
-            for token in (
-                "往左边看",
-                "往右边看",
-                "往前边看",
-                "往后边看",
-                "往左看",
-                "往右看",
-                "往前看",
-                "往后看",
-            )
-        )
-    )
-
-
-def _extract_head(text: str) -> dict[str, Any]:
-    if "摇" in text and "头" in text:
-        return {"gesture": "shake"}
-    if "点" in text and "头" in text:
-        return {"gesture": "nod"}
-    direction = "front"
-    if "左" in text:
-        direction = "left"
-    elif "右" in text:
-        direction = "right"
-    elif "后" in text:
-        direction = "back"
-    return {"gesture": "look", "direction": direction}
-
-
-def _match_eye(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return "眼" in text and any(
-        token in text
-        for token in ("闭", "睁", "眯", "瞪", "眨", "放电", "翻白眼", "转转", "抛媚眼")
-    )
-
-
-def _extract_eye(text: str) -> dict[str, Any]:
-    operation = "blink"
-    if "闭" in text:
-        operation = "close"
-    elif "睁" in text:
-        operation = "open"
-    elif "眯" in text:
-        operation = "squint"
-    elif "瞪" in text:
-        operation = "wide_open"
-    elif "放电" in text:
-        operation = "wink_light"
-    elif "翻白眼" in text:
-        operation = "roll"
-    elif "转转" in text:
-        operation = "rotate"
-    elif "抛媚眼" in text:
-        operation = "wink"
-    return {"operation": operation, "side": _side(text, default="both")}
-
-
-def _match_eyebrow(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return "眉" in text and ("挑" in text or "皱" in text)
-
-
-def _extract_eyebrow(text: str) -> dict[str, Any]:
-    return {
-        "operation": "frown" if "皱" in text else "raise",
-        "side": _side(text, default="both"),
-    }
-
-
-_GESTURES: tuple[tuple[str, str], ...] = (
-    ("打招呼", "greet"),
-    ("招手", "wave"),
-    ("挥手", "wave"),
-    ("动动手", "hand_move"),
-    ("动手", "hand_move"),
-    ("举手", "raise_hand"),
-    ("握手", "handshake"),
-    ("敬礼", "salute"),
-    ("跑步", "run"),
-    ("站起", "stand_up"),
-    ("蹲下", "squat"),
-    ("坐下", "sit_down"),
-    ("上下台阶", "stairs"),
-    ("上下坡道", "slope"),
-    ("摔倒爬起", "fall_recover"),
-    ("躺下", "lie_down"),
-    ("拍照", "photo_pose"),
-    ("跳舞", "dance"),
-    ("打太极", "tai_chi"),
-    ("做个动作", "random_action"),
-    ("大哭", "cry_loudly"),
-    ("哭", "cry"),
-    ("大笑", "laugh_loudly"),
-    ("微笑", "smile"),
-    ("奸笑", "smirk"),
-    ("笑", "laugh"),
-    ("点赞", "thumbs_up"),
-    ("碰拳", "fist_bump"),
-    ("比心", "heart"),
-    ("比耶", "victory"),
-    ("拿宣传册", "fetch_brochure"),
-    ("拿饮料", "fetch_drink"),
-    ("拿水", "fetch_water"),
-    ("迎宾欢迎", "welcome_guest"),
-    ("开启导览", "start_guide"),
-    ("拍照区带领", "lead_photo_area"),
-    ("回到原点", "return_origin"),
-    ("告别", "farewell"),
-)
-
-
-def _match_gesture(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return (
-        any(keyword in text for keyword, _ in _GESTURES) or re.search(r"拿.+水", text) is not None
-    )
-
-
-def _extract_gesture(text: str) -> dict[str, Any]:
-    if re.search(r"拿.+水", text):
-        slots: dict[str, Any] = {"gesture": "fetch_water"}
-        count = _parse_count_before(text, "水")
-        if count is not None:
-            slots["count"] = count
-        return slots
-    for keyword, gesture in _GESTURES:
-        if keyword in text:
-            slots: dict[str, Any] = {"gesture": gesture}
-            side = _side(text, default="")
-            if side:
-                slots["side"] = side
-            count = _parse_count_before(text, keyword)
-            if count is not None:
-                slots["count"] = count
-            return slots
-    return {}
-
-
-def _match_tour(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return any(
-        token in text
-        for token in (
-            "讲解",
-            "导览",
-            "上一个点",
-            "下一个点",
-            "跳过",
-            "第",
-            "英文",
-            "中文",
-            "日文",
-            "韩文",
-            "自动模式",
-            "手动模式",
-            "播报模式",
-            "播报风格",
-            "tts",
-        )
-    )
-
-
-def _extract_tour(text: str) -> dict[str, Any]:
-    slots: dict[str, Any] = {"operation": "configure"}
-    language = _extract_language(text)
-    if language:
-        slots["operation"] = "set_language"
-        slots["language"] = language
-    if "开始讲解" in text or "开启导览" in text:
-        slots["operation"] = "start"
-    elif "暂停讲解" in text:
-        slots["operation"] = "pause"
-    elif "继续讲解" in text or "继续导览" in text:
-        slots["operation"] = "resume"
-    elif "结束讲解" in text or "停止讲解" in text:
-        slots["operation"] = "stop"
-    elif "上一个点" in text:
-        slots["operation"] = "previous_point"
-    elif "下一个点" in text:
-        slots["operation"] = "next_point"
-    elif "跳过" in text:
-        slots["operation"] = "skip_point"
-    elif "自动模式" in text:
-        slots["operation"] = "set_mode"
-        slots["mode"] = "auto"
-    elif "手动模式" in text:
-        slots["operation"] = "set_mode"
-        slots["mode"] = "manual"
-    point_index = _parse_point_index(text)
-    if point_index is not None:
-        slots["operation"] = "goto_point"
-        slots["point_index"] = point_index
-    return slots
-
-
-def _match_volume(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return ("音量" in text or "声音" in text) and any(
-        token in text for token in ("调", "大", "小", "最大", "最小", "%", "百分")
-    )
-
-
-def _extract_volume(text: str) -> dict[str, Any]:
-    percent = _parse_percent(text)
-    if percent is not None:
-        return {"operation": "set", "volume_percent": percent}
-    if "最大" in text:
-        return {"operation": "max", "volume_percent": 100}
-    if "最小" in text:
-        return {"operation": "min", "volume_percent": 0}
-    if "大" in text or "高" in text:
-        return {"operation": "increase"}
-    if "小" in text or "低" in text:
-        return {"operation": "decrease"}
-    return {"operation": "set"}
-
-
-def _match_connection(text: str) -> bool:
-    if _is_question(text):
-        return False
-    return ("wifi" in text or "wi-fi" in text or "蓝牙" in text) and (
-        "打开" in text or "开启" in text or "关闭" in text or "关掉" in text
-    )
-
-
-def _extract_connection(text: str) -> dict[str, Any]:
-    return {
-        "target": "bluetooth" if "蓝牙" in text else "wifi",
-        "enabled": not ("关闭" in text or "关掉" in text),
-    }
-
-
 def _reply(base: dict[str, Any], intent_type: str, text: str, speak_policy: str) -> dict[str, Any]:
     return {
         "type": "data.reply",
@@ -1119,12 +802,17 @@ def _has_command_relevant_marker(text: str) -> bool:
 
 
 def _capability_action(text: str) -> str:
-    if "转头" in text or "转身" in text:
-        return "motion.turn"
-    if "头" in text:
-        return "head.motion"
-    if "走" in text or "移动" in text or "挪" in text:
-        return "navigation.move"
+    # 与 commands.yaml 三条命令对齐: 能力问句("你能调大音量吗")指向注册的动作,
+    # 供非执行闸门给出自然的能力答复。
+    # 音乐能力问句不再指向 control_music(2026-09-15 下线): 云端放歌仍可用,
+    # 留在注册表会让"你能放音乐吗"落到 _CAPABILITY_MISSING_REPLIES"我还不会"
+    # —— 删除该分支让音乐能力问句落到聊天 LLM 自然回答。
+    if "音量" in text or "声音" in text or "静音" in text:
+        return "adjust_volume"
+    if any(k in text for k in ("电量", "电池", "多少电", "电压", "电流", "还有电", "没电", "续航")):
+        return "check_battery"
+    if "拍照" in text or "照片" in text or "照相" in text:
+        return "take_photo"
     return ""
 
 
@@ -1167,123 +855,6 @@ def _is_question(text: str) -> bool:
     return any(word in text for word in _ASK_WORDS) or text.endswith(("吗", "呢", "？", "?"))
 
 
-def _parse_distance_cm(text: str) -> int | None:
-    match = re.search(
-        r"([0-9]+(?:\.[0-9]+)?|[一二两三四五六七八九十百千万半点]+)(米|厘米|公分|cm|m)", text
-    )
-    if not match:
-        step_match = re.search(r"([0-9]+|[一二两三四五六七八九十百]+)步", text)
-        if not step_match:
-            return None
-        value = _parse_number(step_match.group(1))
-        if value is None:
-            return None
-        return max(1, int(round(value * _STEP_DISTANCE_CM)))
-    value = _parse_number(match.group(1))
-    if value is None:
-        return None
-    unit = match.group(2)
-    cm = value * 100 if unit in {"米", "m"} else value
-    return max(1, int(round(cm)))
-
-
-def _parse_angle_deg(text: str) -> int | None:
-    match = re.search(r"([0-9]+|[一二两三四五六七八九十百]+)度", text)
-    if not match:
-        return None
-    value = _parse_number(match.group(1))
-    return int(value) if value is not None else None
-
-
-def _parse_percent(text: str) -> int | None:
-    match = re.search(r"([0-9]+|[一二两三四五六七八九十百]+)\s*(?:%|百分之)", text)
-    if not match:
-        match = re.search(r"(?:调到|调至|设置为)([0-9]+|[一二两三四五六七八九十百]+)", text)
-    if not match:
-        return None
-    value = _parse_number(match.group(1))
-    return int(value) if value is not None else None
-
-
-def _parse_count_before(text: str, keyword: str) -> int | None:
-    index = text.find(keyword)
-    if index <= 0:
-        return None
-    prefix = text[max(0, index - 5) : index]
-    match = re.search(r"([0-9]+|[一二两三四五六七八九十百]+)(?:个|瓶|次|张)?$", prefix)
-    if not match:
-        return None
-    value = _parse_number(match.group(1))
-    return int(value) if value is not None else None
-
-
-def _parse_point_index(text: str) -> int | None:
-    match = re.search(r"第([0-9]+|[一二两三四五六七八九十百]+)(?:个)?(?:讲解)?点", text)
-    if not match:
-        return None
-    value = _parse_number(match.group(1))
-    return int(value) if value is not None else None
-
-
-def _parse_number(raw: str) -> float | None:
-    raw = raw.strip()
-    if not raw:
-        return None
-    if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw):
-        return float(raw)
-    if raw == "半":
-        return 0.5
-    table = {
-        "零": 0,
-        "一": 1,
-        "二": 2,
-        "两": 2,
-        "三": 3,
-        "四": 4,
-        "五": 5,
-        "六": 6,
-        "七": 7,
-        "八": 8,
-        "九": 9,
-    }
-    if raw in table:
-        return float(table[raw])
-    if raw == "十":
-        return 10.0
-    if "百" in raw:
-        left, _, right = raw.partition("百")
-        base = table.get(left, 1) * 100
-        return float(base + int(_parse_number(right) or 0))
-    if "十" in raw:
-        left, _, right = raw.partition("十")
-        tens = table.get(left, 1) * 10 if left else 10
-        ones = table.get(right, 0) if right else 0
-        return float(tens + ones)
-    return None
-
-
-def _side(text: str, *, default: str) -> str:
-    if "左" in text:
-        return "left"
-    if "右" in text:
-        return "right"
-    if "双" in text or "两" in text:
-        return "both"
-    return default
-
-
-def _extract_language(text: str) -> str:
-    if "英文" in text or "英语" in text:
-        return "en"
-    if "中文" in text or "汉语" in text:
-        return "zh"
-    if "日文" in text or "日语" in text:
-        return "ja"
-    if "韩文" in text or "韩语" in text:
-        return "ko"
-    return ""
-
-
 def _invalid_param_reason(slots: dict[str, Any], entry: RegistryEntry) -> str:
     for spec in entry.params:
         if spec.name not in slots:
@@ -1296,7 +867,7 @@ def _invalid_param_reason(slots: dict[str, Any], entry: RegistryEntry) -> str:
         if spec.type == "str" and not isinstance(value, str):
             return f"{spec.name} type invalid"
         if spec.type == "int":
-            if not isinstance(value, int):
+            if isinstance(value, bool) or not isinstance(value, int):
                 return f"{spec.name} type invalid"
             if spec.minimum is not None and value < spec.minimum:
                 return f"{spec.name} lower than minimum"
@@ -1309,20 +880,90 @@ def _has_multi_marker(text: str) -> bool:
     return any(marker in text for marker in _MULTI_MARKERS)
 
 
-def _looks_like_incomplete_move(text: str) -> bool:
-    return any(
-        k in text
-        for k in ("移动", "走一下", "往前走", "往后走", "往左走", "往右走", "前进", "后退")
-    )
+# 控制命令的"锚点词"：用于定位命令词在句中的位置，判断是否被谈论/罗列。
+# 覆盖各 control matcher 的关键词（与 commands.yaml 对齐）。
+# 音乐锚点已随 2026-09-15 control_music 下线移除: 音乐话术终点是无帧→LLM 聊天,
+# 少了锚点只影响路由标签(knowledge_qa/chat_fallback), 两者用户不可见。
+_CONTROL_ANCHORS: tuple[str, ...] = (
+    # adjust_volume
+    "音量", "声音", "静音",
+    # take_photo (含"拍个照"拆分式, 与 _PHOTO_SPLIT_RE 对齐)
+    "拍照", "照片", "照相", "照张相", "个照", "个相", "张照", "张相",
+    # check_battery (含"还有电/没电"口语变体)
+    "电量", "电池", "电压", "电流", "多少电", "充电状态", "还有电", "还剩电", "没电", "续航",
+)
+
+# 祈使句允许的礼貌/称呼前缀：剥掉这些之后剩下的才算"实质内容"
+_POLITE_LEADS: tuple[str, ...] = (
+    "请", "请你", "请帮我", "帮我", "帮忙", "麻烦你", "麻烦", "给我",
+    "你能", "你能帮", "你可以", "可以", "能不能", "小歌", "你好", "哎", "喂",
+)
+
+# 命令词之后允许出现的参数/语气尾巴（从句尾往前剥）
+_PARAM_SUFFIX = re.compile(
+    r"[0-9一二两三四五六七八九十百千万半点米厘公分步度%‰大小高低快慢"
+    r"左右前后上下吧了呀啊哦嘛呢吗呗，。！？、,!?~～\s]+$"
+)
+
+
+def _strip_polite_lead(text: str) -> str:
+    changed = True
+    while changed and text:
+        changed = False
+        for lead in _POLITE_LEADS:
+            if text.startswith(lead):
+                text = text[len(lead) :]
+                changed = True
+        if text and text[0] in "，。！？、,!?~～ \t":
+            text = text[1:]
+            changed = True
+    return text
+
+
+def _strip_param_tail(text: str) -> str:
+    while True:
+        stripped = _PARAM_SUFFIX.sub("", text)
+        if stripped == text:
+            return stripped
+        text = stripped
+
+
+def _embedded_control(text: str) -> bool:
+    """命令词被"谈论/罗列"而非"下达"：前后都剩实质内容时返回 True。
+
+    只拦双侧嵌入（如"我们在讨论……有向前走向后走，你觉得还差哪些"）：
+    命令词前面有话题、后面还有描述/追问，语言学上是对动作的引用而不是
+    祈使句，应交给 LLM 聊天兜底。单侧内容（"请你往前走"、"我是说往前走"、
+    "往前走两米然后停下"）不算嵌入，保持原有确定性路由不变。
+    """
+    positions = [(text.find(k), len(k)) for k in _CONTROL_ANCHORS if k in text]
+    if not positions:
+        return False
+    first = min(pos for pos, _ in positions)
+    last = max(pos + size for pos, size in positions)
+    lead = _strip_polite_lead(text[:first])
+    tail = _strip_param_tail(text[last:])
+    # "除了"虽只有两个字，但引出的是对比/排除话题（"除了向前走你还会干啥"），
+    # 后面必然还有内容，视为话题前置。
+    lead_substantive = len(lead) >= 3 or lead.endswith("除了")
+    return lead_substantive and len(tail) >= 3
 
 
 def _looks_like_knowledge(text: str) -> bool:
-    """Route only product/小歌 knowledge to the deterministic knowledge path.
+    """Mark short product/小歌 knowledge questions as knowledge_qa.
 
-    Broad open-domain phrases like “什么是/为什么/介绍一下杭州” should stay in
-    normal chat so G3 does not answer with a fixed fake-RAG template.
+    The knowledge_qa intent emits no frames (see build_outputs) and falls
+    through to the LLM chat fallback, which answers via the query_knowledge
+    tool per persona. Broad open-domain phrases like “什么是/为什么/介绍一下杭州”
+    should stay in normal chat so G3 does not answer with a fixed fake-RAG
+    template.
     """
 
+    if len(text) > 30:
+        # 长句基本是闲聊, 只是不巧同时带出"机器人/设备"和"功能/价格"等词
+        # (2026-09-08 会话实测三例 52~400 字闲聊全被误判进知识路径);
+        # 短句才可能是正经知识问句, 超长一律落回聊天。
+        return False
     product_subject = any(
         k in text for k in ("小歌", "产品", "设备", "机器人", "说明书", "手册")
     )
@@ -1351,48 +992,12 @@ def _looks_like_knowledge(text: str) -> bool:
     return "全双工" in text and any(k in text for k in ("小歌", "语音", "通话", "对话"))
 
 
-def _looks_like_info(text: str) -> bool:
-    """Route only device-self state queries to the deterministic info path.
-
-    Open-domain external queries (天气/时间/百科/菜谱/健康/单位换算/日历) are
-    deliberately NOT matched here: they have no device-side source and would
-    otherwise hit the fixed ``_info_answer`` placeholder, cutting off the LLM.
-    Letting them fall through to ``chat_fallback`` lets the model (and any
-    downstream tools) answer them normally.
-    """
-    return any(
-        k in text
-        for k in (
-            "状态",
-            "能力",
-            "配置",
-            "还能做什么",
-        )
-    )
-
-
 def _is_confirmation_accept(text: str) -> bool:
     return text in _AFFIRMATIVE_CONFIRM
 
 
 def _is_confirmation_cancel(text: str) -> bool:
     return text in _CANCEL_CONFIRM
-
-
-def _rag_answer(text: str) -> str:
-    if "不存在" in text or "这个" in text:
-        return "暂未找到高置信度知识结果，请换个问法。"
-    return "这个问题需要查询产品知识库后回答；如果暂时查不到，我会如实说不确定。"
-
-
-def _info_answer(text: str, slots: dict[str, Any]) -> str:
-    if slots.get("topic") == "battery" or "电量" in text or "多少电" in text:
-        return "电量查询属于状态信息路径，只返回 data.reply，不下发控制指令。"
-    # Non-battery info queries have no device-side source; surface that honestly
-    # rather than claiming a fake "cloud link normal" status. Normal open-domain
-    # queries should never reach here (they fall through to chat/LLM upstream);
-    # this branch only guards residual state-shaped queries.
-    return "这个问题我暂时没有对应的设备状态来源，请稍等我直接回答你。"
 
 
 def _cmd_id(trace_id: str, utterance_id: str, now_ms: int) -> str:
