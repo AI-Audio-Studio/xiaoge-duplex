@@ -8,13 +8,20 @@ int xiaoge_test_json_cloud_cmd_compatible(const char *cmd_json);
 int xiaoge_test_parse_session_url(const char *url);
 int xiaoge_test_build_ready_event(const char *json, xiaoge_ready_event *event, char *caps,
                                   char *config, char *trace, char *session);
+int xiaoge_test_build_state_event(const char *json, xiaoge_state_event *event, char link[64],
+                                  char mode[64], char gate[64], char resource[64], char pending[1024],
+                                  char trace[128], char session[128]);
 int xiaoge_test_build_cmd_ack_json(const char *cmd_json, const char *status, const char *code,
                                    const char *message, char *out, size_t out_len);
 int xiaoge_test_build_cmd_result_json(const char *cmd_json, const char *status, const char *code,
                                       const char *message, int retryable, long long started_at_ms,
-                                      long long finished_at_ms, long long duration_ms, char *out,
-                                      size_t out_len);
+                                      long long finished_at_ms, long long duration_ms,
+                                      const char *result_json, char *out, size_t out_len);
 int xiaoge_test_auto_fake_cmd_enabled(int value);
+int xiaoge_test_build_ping_json(char *out, size_t out_len);
+int xiaoge_test_build_duplex_json(int enabled, char *out, size_t out_len);
+int xiaoge_test_build_duplex_state_event(const char *json, xiaoge_duplex_state_event *event,
+                                         char *trace, char *session);
 int xiaoge_test_build_stt_event(const char *json, xiaoge_stt_event *event, char *text, char *utt,
                                 char *trace, char *session);
 int xiaoge_test_build_reply_event(const char *json, xiaoge_reply_event *event, char *text, char *utt,
@@ -41,6 +48,11 @@ static void test_clear_callback(const xiaoge_clear_event *event, void *user) {
 }
 
 static void test_state_callback(const xiaoge_state_event *event, void *user) {
+    (void)event;
+    (void)user;
+}
+
+static void test_duplex_state_callback(const xiaoge_duplex_state_event *event, void *user) {
     (void)event;
     (void)user;
 }
@@ -122,6 +134,7 @@ int main(void) {
         .on_error = test_error_callback,
         .on_json = test_json_callback,
         .on_failure = test_failure_callback,
+        .on_duplex_state = test_duplex_state_callback,
         .user = &callbacks,
     };
     if (must(callbacks.struct_size == sizeof(callbacks), "event callback struct initializes")) return 1;
@@ -202,6 +215,49 @@ int main(void) {
              "null frontend_state client rejected")) {
         return 1;
     }
+    if (must(xiaoge_send_ping(NULL) == -1, "null ping client rejected")) return 1;
+    if (must(xiaoge_test_build_ping_json(body, sizeof(body)) == 0, "ctrl.ping frame builds")) return 1;
+    if (must(strstr(body, "\"type\":\"ctrl.ping\"") != NULL, "ctrl.ping type serialized")) return 1;
+    if (must(strstr(body, "\"ts_ms\":") != NULL, "ctrl.ping ts_ms serialized")) return 1;
+
+    if (must(xiaoge_send_duplex(NULL, 1) == -1, "null duplex client rejected")) return 1;
+    if (must(xiaoge_test_build_duplex_json(1, body, sizeof(body)) == 0, "ctrl.duplex on builds")) {
+        return 1;
+    }
+    if (must(strstr(body, "\"type\":\"ctrl.duplex\"") != NULL, "ctrl.duplex type serialized")) return 1;
+    if (must(strstr(body, "\"enabled\":true") != NULL, "ctrl.duplex enabled true serialized")) return 1;
+    if (must(xiaoge_test_build_duplex_json(0, body, sizeof(body)) == 0 &&
+             strstr(body, "\"enabled\":false") != NULL,
+             "ctrl.duplex enabled false serialized")) {
+        return 1;
+    }
+    {
+        xiaoge_duplex_state_event ev;
+        char trace[128], session[128];
+        const char *duplex_json =
+            "{\"type\":\"ctrl.duplex_state\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+            "\"enabled\":false,\"ts_ms\":1789000001000}";
+        if (must(xiaoge_test_build_duplex_state_event(duplex_json, &ev, trace, session) == 0,
+                 "ctrl.duplex_state event builds")) {
+            return 1;
+        }
+        if (must(ev.enabled == 0 && ev.ts_ms == 1789000001000LL &&
+                 strcmp(ev.trace_id, "trace") == 0 && strcmp(ev.session_id, "sess") == 0,
+                 "ctrl.duplex_state fields parsed")) {
+            return 1;
+        }
+    }
+    {
+        xiaoge_duplex_state_event ev;
+        char trace[128], session[128];
+        const char *bad_duplex_json =
+            "{\"type\":\"ctrl.duplex_state\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+            "\"ts_ms\":1789000001000}";
+        if (must(xiaoge_test_build_duplex_state_event(bad_duplex_json, &ev, trace, session) == -1,
+                 "ctrl.duplex_state missing enabled rejected")) {
+            return 1;
+        }
+    }
 
     const char *cloud_json =
         "{"
@@ -259,7 +315,7 @@ int main(void) {
     }
 
     if (must(xiaoge_test_build_cmd_result_json(cloud_json, XIAOGE_CMD_RESULT_STATUS_SUCCEEDED, "ok", "done", 0, 11, 12,
-                                               1, frame, sizeof(frame)) == 0,
+                                               1, NULL, frame, sizeof(frame)) == 0,
              "cmd_result builds")) {
         return 1;
     }
@@ -268,8 +324,24 @@ int main(void) {
     if (must(strstr(frame, "\"started_at_ms\":11") != NULL, "cmd_result start serialized")) return 1;
     if (must(strstr(frame, "\"finished_at_ms\":12") != NULL, "cmd_result finish serialized")) return 1;
     if (must(strstr(frame, "\"duration_ms\":1") != NULL, "cmd_result duration serialized")) return 1;
+    if (must(strstr(frame, "\"result\"") == NULL, "cmd_result without result omits field")) return 1;
+    if (must(xiaoge_test_build_cmd_result_json(cloud_json, XIAOGE_CMD_RESULT_STATUS_SUCCEEDED, "ok", "done", 0, -1,
+                                               -1, -1, "{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}",
+                                               frame, sizeof(frame)) == 0,
+             "cmd_result with result builds")) {
+        return 1;
+    }
+    if (must(strstr(frame, "\"result\":{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}") != NULL,
+             "cmd_result result serialized")) {
+        return 1;
+    }
+    if (must(xiaoge_test_build_cmd_result_json(cloud_json, XIAOGE_CMD_RESULT_STATUS_SUCCEEDED, "ok", "done", 0, -1,
+                                               -1, -1, "\"not an object\"", frame, sizeof(frame)) == -1,
+             "cmd_result non-object result rejected")) {
+        return 1;
+    }
     if (must(xiaoge_test_build_cmd_result_json(cloud_json, "accepted", "bad", "bad", 0, -1,
-                                               -1, -1, frame, sizeof(frame)) == -1,
+                                               -1, -1, NULL, frame, sizeof(frame)) == -1,
              "invalid cmd_result status rejected")) {
         return 1;
     }
@@ -283,7 +355,7 @@ int main(void) {
         return 1;
     }
     if (must(xiaoge_test_build_cmd_result_json(missing_cmd_id, XIAOGE_CMD_RESULT_STATUS_RUNNING, "ok", "", 0, -1,
-                                               -1, -1, frame, sizeof(frame)) == -1,
+                                               -1, -1, NULL, frame, sizeof(frame)) == -1,
              "cmd_result missing cmd_id rejected")) {
         return 1;
     }
@@ -308,6 +380,38 @@ int main(void) {
     if (must(xiaoge_test_build_ready_event(bad_ready_json, &ready_event, ready_caps, ready_config, ready_trace,
                                            ready_session) == -1,
              "wrong ready sample rate rejected")) {
+        return 1;
+    }
+
+    const char *state_json =
+        "{\"type\":\"ctrl.state\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"link_state\":\"connected\",\"interaction_mode\":\"dialogue\",\"engine_gate\":\"open\","
+        "\"resource_state\":\"ActiveAgent\",\"ts_ms\":1790000000000}";
+    xiaoge_state_event state_event;
+    char st_link[64], st_mode[64], st_gate[64], st_resource[64];
+    char st_pending[1024], st_trace[128], st_session[128];
+    if (must(xiaoge_test_build_state_event(state_json, &state_event, st_link, st_mode, st_gate, st_resource,
+                                           st_pending, st_trace, st_session) == 0,
+             "state event builds")) {
+        return 1;
+    }
+    if (must(strcmp(state_event.link_state, XIAOGE_LINK_STATE_CONNECTED) == 0 &&
+             strcmp(state_event.interaction_mode, XIAOGE_INTERACTION_MODE_DIALOGUE) == 0,
+             "state event link/mode match wire constants")) {
+        return 1;
+    }
+    if (must(strcmp(state_event.engine_gate, XIAOGE_ENGINE_GATE_OPEN) == 0 &&
+             strcmp(state_event.resource_state, XIAOGE_RESOURCE_STATE_ACTIVE_AGENT) == 0,
+             "state event gate/resource match wire constants")) {
+        return 1;
+    }
+    const char *bad_state_json =
+        "{\"type\":\"ctrl.state\",\"trace_id\":\"trace\",\"session_id\":\"sess\","
+        "\"link_state\":\"connected\",\"interaction_mode\":\"dozing\",\"engine_gate\":\"open\","
+        "\"resource_state\":\"ActiveAgent\",\"ts_ms\":1}";
+    if (must(xiaoge_test_build_state_event(bad_state_json, &state_event, st_link, st_mode, st_gate, st_resource,
+                                           st_pending, st_trace, st_session) == -1,
+             "unknown interaction_mode rejected")) {
         return 1;
     }
 

@@ -18,6 +18,8 @@ public interface XiaogeSessionListener {
 
     default void onServerState(StateEvent event) {}
 
+    default void onDuplexState(DuplexStateEvent event) {}
+
     default void onStt(SttEvent event) {}
 
     default void onReply(ReplyEvent event) {}

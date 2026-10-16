@@ -25,7 +25,7 @@
 #include <string.h>
 #include <time.h>
 
-#define DEFAULT_CREATE_SESSION_URL "https://60.205.197.165:10099/create_session"
+#define DEFAULT_CREATE_SESSION_URL "https://60.205.197.165:10097/create_session"
 #define DEFAULT_DEVICE_ID "robot-x3-001"
 #define DEFAULT_CREDENTIAL_JSON "{\"key_id\":\"dev\",\"signature\":\"mock\"}"
 #define FRAME_SAMPLES 320
@@ -105,7 +105,7 @@ static void usage(const char *argv0) {
         "usage:\n"
         "  %s [create_session_url] [device_id] [credential-json-or-string] "
         "[--seconds N] [--reply-wait N] [--silence-ms N] [--no-playback] "
-        "[--ca-cert path] [--insecure] [--api-key key]\n"
+        "[--ca-cert path] [--insecure] [--api-key key] [--duplex off|on]\n"
         "defaults:\n"
         "  create_session_url=%s\n"
         "  device_id=%s\n"
@@ -510,6 +510,11 @@ static void on_json(const char *json, void *u) {
     printf("%s\n", json);
 }
 
+static void on_duplex_state(const xiaoge_duplex_state_event *event, void *u) {
+    (void)u;
+    printf("duplex_state: enabled=%d ts_ms=%lld\n", event->enabled, event->ts_ms);
+}
+
 static BOOL WINAPI console_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT || type == CTRL_CLOSE_EVENT) {
         if (g_state) InterlockedExchange(&g_state->stop, 1);
@@ -532,6 +537,7 @@ int main(int argc, char **argv) {
     int reply_wait_seconds = DEFAULT_REPLY_WAIT_SECONDS;
     int silence_ms = DEFAULT_SILENCE_MS;
     int playback_enabled = 1;
+    int duplex = -1; /* -1 = do not touch the duplex switch */
     int positional = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -564,6 +570,15 @@ int main(int argc, char **argv) {
             ca_cert_path = argv[++i];
         } else if (strcmp(argv[i], "--api-key") == 0 && i + 1 < argc && arg_is_value(argv[i + 1])) {
             api_key = argv[++i];
+        } else if (strcmp(argv[i], "--duplex") == 0 && i + 1 < argc && arg_is_value(argv[i + 1])) {
+            const char *v = argv[++i];
+            if (strcmp(v, "off") == 0) duplex = 0;
+            else if (strcmp(v, "on") == 0) duplex = 1;
+            else {
+                fprintf(stderr, "--duplex must be off|on\n");
+                usage(argv[0]);
+                return 2;
+            }
         } else if (strncmp(argv[i], "--", 2) == 0) {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             usage(argv[0]);
@@ -624,6 +639,7 @@ int main(int argc, char **argv) {
         .on_audio = on_audio,
         .on_clear = on_clear,
         .on_json = on_json,
+        .on_duplex_state = on_duplex_state,
         .user = &state,
     };
     xiaoge_client *c = xiaoge_create_from_session_with_ca(&cfg, &sess, ca_cert_path, insecure, &cb);
@@ -655,6 +671,7 @@ int main(int argc, char **argv) {
     DWORD reply_wait_started = 0;
     unsigned long last_dropped = 0;
     int capture_done = 0;
+    int sent_duplex = 0;
     while (!InterlockedCompareExchange(&state.stop, 0, 0)) {
         if (InterlockedCompareExchange(&state.ready, 0, 0) &&
             !InterlockedCompareExchange(&state.sent_state, 1, 1)) {
@@ -669,6 +686,11 @@ int main(int argc, char **argv) {
                 started = GetTickCount();
                 printf("talking; press Ctrl-C to exit\n");
             }
+        }
+        if (InterlockedCompareExchange(&state.ready, 0, 0) && duplex >= 0 && !sent_duplex) {
+            printf("duplex: %s\n", duplex ? "on" : "off");
+            xiaoge_send_duplex(c, duplex);
+            sent_duplex = 1;
         }
         int sent_count = 0;
         while (input_started && sent_count < SEND_BURST_FRAMES && queue_pop(&q, frame, &frame_len)) {

@@ -44,6 +44,28 @@ public class EventCodecTest {
     }
 
     @Test
+    public void duplexStateEventParsesFieldsAndWarnsOnMissingEnabled() throws Exception {
+        JSONObject payload = new JSONObject()
+                .put("type", "ctrl.duplex_state")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("enabled", false)
+                .put("ts_ms", 1790000001000L);
+        DuplexStateEvent event = DuplexStateEvent.fromJson(payload);
+        assertFalse(event.enabled);
+        assertEquals(1790000001000L, event.tsMs);
+        assertEquals("trace", event.traceId);
+        assertEquals("sess", event.sessionId);
+        assertEquals(0, event.parseWarnings.length);
+
+        DuplexStateEvent missing = DuplexStateEvent.fromJson(
+                new JSONObject("{\"type\":\"ctrl.duplex_state\",\"trace_id\":\"trace\","
+                        + "\"session_id\":\"sess\",\"ts_ms\":1}"));
+        assertFalse(missing.enabled);
+        assertTrue(contains(missing.parseWarnings, "missing field: enabled"));
+    }
+
+    @Test
     public void commandEventCanBuildAckAndResult() throws Exception {
         CommandEvent event = CommandEvent.fromJson(validCommand());
         JSONObject ack = new JSONObject(ProtocolCodec.cmdAck(
@@ -64,6 +86,19 @@ public class EventCodecTest {
         assertEquals("data.cmd_result", result.getString("type"));
         assertEquals("cmd-1", result.getString("cmd_id"));
         assertFalse(result.getBoolean("retryable"));
+        assertFalse(result.has("result"));
+
+        JSONObject payload = new JSONObject("{" + "\"type\":\"cap\",\"value\":40,\"gauge_id\":1" + "}");
+        JSONObject withResult = new JSONObject(ProtocolCodec.cmdResult(
+                event,
+                ProtocolCodec.CMD_RESULT_STATUS_SUCCEEDED,
+                "ok",
+                "completed",
+                false,
+                payload));
+        assertEquals(40, withResult.getJSONObject("result").getInt("value"));
+        assertEquals("cap", withResult.getJSONObject("result").getString("type"));
+        assertEquals(1, withResult.getJSONObject("result").getInt("gauge_id"));
     }
 
     @Test
@@ -128,6 +163,23 @@ public class EventCodecTest {
         assertTrue(contains(event.parseWarnings, "missing field: granted_caps"));
     }
 
+    @Test
+    public void stateEventFieldsMatchWireConstants() throws Exception {
+        StateEvent event = StateEvent.fromJson(validState());
+        assertEquals(ProtocolCodec.LINK_STATE_CONNECTED, event.linkState);
+        assertEquals(ProtocolCodec.INTERACTION_MODE_DIALOGUE, event.interactionMode);
+        assertEquals(ProtocolCodec.ENGINE_GATE_OPEN, event.engineGate);
+        assertEquals(ProtocolCodec.RESOURCE_STATE_ACTIVE_AGENT, event.resourceState);
+        assertEquals(0, event.parseWarnings.length);
+    }
+
+    @Test
+    public void stateEventUnknownEnumPassesThrough() throws Exception {
+        StateEvent event = StateEvent.fromJson(validState().put("interaction_mode", "dozing"));
+        assertEquals("dozing", event.interactionMode);
+        assertTrue(contains(event.parseWarnings, "unknown interaction_mode: dozing"));
+    }
+
     private static JSONObject validStt() throws Exception {
         return new JSONObject()
                 .put("type", "data.stt")
@@ -159,6 +211,18 @@ public class EventCodecTest {
                 .put("sample_rate", ProtocolCodec.SAMPLE_RATE)
                 .put("granted_caps", new org.json.JSONArray(java.util.Arrays.asList("audio", "text")))
                 .put("config_version", "cfg");
+    }
+
+    private static JSONObject validState() throws Exception {
+        return new JSONObject()
+                .put("type", "ctrl.state")
+                .put("trace_id", "trace")
+                .put("session_id", "sess")
+                .put("link_state", "connected")
+                .put("interaction_mode", "dialogue")
+                .put("engine_gate", "open")
+                .put("resource_state", "ActiveAgent")
+                .put("ts_ms", 1790000000000L);
     }
 
     private static boolean contains(String[] values, String expected) {

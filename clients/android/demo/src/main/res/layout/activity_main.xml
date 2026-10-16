@@ -24,6 +24,28 @@
         android:overScrollMode="always"
         android:paddingBottom="12dp" />
 
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Duplex"
+            android:textColor="#1F2933"
+            android:textSize="16sp" />
+
+        <Switch
+            android:id="@+id/duplexSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:checked="true" />
+    </LinearLayout>
+
     <Button
         android:id="@+id/callButton"
         android:layout_width="match_parent"

@@ -9,6 +9,9 @@ import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
@@ -21,6 +24,8 @@ import okio.ByteString;
 
 public final class XiaogeClient {
     private static final String TAG = "XiaogeClient";
+    /** Default application keep-alive cadence; a client policy, not a server deadline. */
+    public static final long DEFAULT_PING_INTERVAL_SEC = 25L;
     public interface Listener {
         default void onReady(int sampleRate) {}
         default void onAudio(byte[] pcm) {}
@@ -28,6 +33,7 @@ public final class XiaogeClient {
         default void onReadyEvent(ReadyEvent event) {}
         default void onClear(ClearEvent event) {}
         default void onState(StateEvent event) {}
+        default void onDuplexState(DuplexStateEvent event) {}
         default void onStt(SttEvent event) {}
         default void onReply(ReplyEvent event) {}
         default void onCommand(CommandEvent event) {}
@@ -39,6 +45,8 @@ public final class XiaogeClient {
     private final XiaogeConfig config;
     private final Listener listener;
     private final OkHttpClient http;
+    private final long pingIntervalSec;
+    private final ScheduledExecutorService pingScheduler;
     private final ExecutorService callbackExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "xiaoge-cb");
         t.setDaemon(true);
@@ -47,15 +55,27 @@ public final class XiaogeClient {
     private SessionInfo session;
     private WebSocket ws;
     private int frontendSeq;
+    private ScheduledFuture<?> pingTask;
 
     public XiaogeClient(XiaogeConfig config, Listener listener) {
         this(config, listener, new OkHttpClient());
     }
 
     public XiaogeClient(XiaogeConfig config, Listener listener, OkHttpClient http) {
+        this(config, listener, http, DEFAULT_PING_INTERVAL_SEC);
+    }
+
+    /** pingIntervalSec <= 0 disables the automatic ctrl.ping keep-alive. */
+    public XiaogeClient(XiaogeConfig config, Listener listener, OkHttpClient http, long pingIntervalSec) {
         this.config = config;
         this.listener = listener;
         this.http = http;
+        this.pingIntervalSec = pingIntervalSec;
+        this.pingScheduler = pingIntervalSec > 0 ? Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "xiaoge-ping");
+            t.setDaemon(true);
+            return t;
+        }) : null;
     }
 
     public void start() throws Exception {
@@ -98,6 +118,11 @@ public final class XiaogeClient {
         sendJson(ProtocolCodec.frontendState(session, frontendSeq, trustLevel, wakeState, vad, ttlMs));
     }
 
+    /** Toggles the duplex switch; the ack arrives through {@link Listener#onDuplexState}. */
+    public void sendDuplex(boolean enabled) throws Exception {
+        sendJson(ProtocolCodec.duplex(enabled));
+    }
+
     public void sendCmdAck(JSONObject cmd, String status, String code) throws Exception {
         sendJson(ProtocolCodec.cmdAck(cmd, status, code));
     }
@@ -115,13 +140,49 @@ public final class XiaogeClient {
         sendJson(ProtocolCodec.cmdResult(event, status, code, message, retryable));
     }
 
+    public void sendCmdResult(CommandEvent event, String status, String code, String message, Boolean retryable,
+                              JSONObject result) throws Exception {
+        sendJson(ProtocolCodec.cmdResult(event, status, code, message, retryable, result));
+    }
+
     public void close() {
+        stopKeepalive();
         WebSocket socket = ws;
         ws = null;
         if (socket != null) {
             socket.close(1000, "client close");
         }
         callbackExecutor.shutdown();
+    }
+
+    private void startKeepalive() {
+        ScheduledExecutorService scheduler = pingScheduler;
+        if (scheduler == null || pingTask != null) {
+            return;
+        }
+        pingTask = scheduler.scheduleAtFixedRate(
+                this::sendKeepalivePing, pingIntervalSec, pingIntervalSec, TimeUnit.SECONDS);
+    }
+
+    private void sendKeepalivePing() {
+        try {
+            sendJson(ProtocolCodec.ping());
+        } catch (Exception e) {
+            Log.w(TAG, "keepalive ping failed; stopping keepalive", e);
+            stopKeepalive();
+        }
+    }
+
+    private void stopKeepalive() {
+        ScheduledFuture<?> task = pingTask;
+        pingTask = null;
+        if (task != null) {
+            task.cancel(false);
+        }
+        ScheduledExecutorService scheduler = pingScheduler;
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+        }
     }
 
     private void sendJson(String text) {
@@ -162,6 +223,7 @@ public final class XiaogeClient {
         public void onOpen(WebSocket webSocket, Response response) {
             try {
                 sendJson(ProtocolCodec.hello(config, session));
+                startKeepalive();
             } catch (Exception e) {
                 dispatch(() -> listener.onFailure(e));
             }
@@ -201,6 +263,23 @@ public final class XiaogeClient {
                             listener.onJson(payload);
                             listener.onState(event);
                         });
+                        break;
+                    }
+                    case "ctrl.duplex_state": {
+                        DuplexStateEvent event = DuplexStateEvent.fromJson(payload);
+                        logParseWarnings(type, event.parseWarnings);
+                        dispatch(() -> {
+                            listener.onJson(payload);
+                            listener.onDuplexState(event);
+                        });
+                        break;
+                    }
+                    case "ctrl.pong": {
+                        long clientTs = payload.optLong("client_ts_ms", -1L);
+                        if (clientTs >= 0) {
+                            Log.d(TAG, "ctrl.pong rtt_ms=" + (System.currentTimeMillis() - clientTs));
+                        }
+                        dispatch(() -> listener.onJson(payload));
                         break;
                     }
                     case "data.stt": {
@@ -269,11 +348,13 @@ public final class XiaogeClient {
 
         @Override
         public void onClosed(WebSocket webSocket, int code, String reason) {
+            stopKeepalive();
             callbackExecutor.shutdown();
         }
 
         @Override
         public void onFailure(WebSocket webSocket, Throwable t, Response response) {
+            stopKeepalive();
             dispatch(() -> listener.onFailure(t));
             callbackExecutor.shutdown();
         }

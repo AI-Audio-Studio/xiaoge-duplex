@@ -64,7 +64,7 @@ async def _handle_cmd(client: XiaogeClient, event: CommandEvent) -> None:
     await client.send_command_result(event, CmdResultStatus.SUCCEEDED, "ok")
 
 
-async def _run(client: XiaogeClient) -> None:
+async def _run(client: XiaogeClient, duplex: str | None) -> None:
     loop = asyncio.get_running_loop()
     up_q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=50)
     play = _Playback()
@@ -78,6 +78,7 @@ async def _run(client: XiaogeClient) -> None:
     client.on_ready = lambda sr: print("ready", sr)
     client.on_audio = play.push
     client.on_clear = lambda event: play.clear()
+    client.on_duplex_state = lambda event: print("duplex_state: enabled=", event.enabled, "ts_ms=", event.ts_ms)
     client.on_stt_text = _print_final_stt
     client.on_reply = lambda event: print("reply:", event.text)
     client.on_command = lambda event: asyncio.create_task(_handle_cmd(client, event))
@@ -102,6 +103,9 @@ async def _run(client: XiaogeClient) -> None:
         while client.frontend_state is None:
             await asyncio.sleep(0.01)
         await client.send_frontend_state(trust_level="hint", wake_state="awake", vad="speech")
+        if duplex is not None:
+            print("duplex:", duplex)
+            await client.send_duplex(duplex == "on")
         print("talking; press Ctrl-C to exit")
         while not runner.done():
             await client.send_pcm(await up_q.get())
@@ -121,6 +125,12 @@ def main() -> None:
     p.add_argument("--ca-cert", default=None, help="PEM CA file for HTTPS/WSS; defaults to ../certs/cloud-ca.pem")
     p.add_argument("--api-key", default="", help="create_session x-api-key header value; defaults to no header")
     p.add_argument("--trace-log", default=None, help="optional client JSONL trace path")
+    p.add_argument(
+        "--duplex",
+        choices=["off", "on"],
+        default=None,
+        help="toggle the duplex switch after connect; omit to leave it untouched",
+    )
     a = p.parse_args()
     client = XiaogeClient(
         a.create_session_url,
@@ -131,7 +141,7 @@ def main() -> None:
         trace_log_path=a.trace_log,
     )
     try:
-        asyncio.run(_run(client))
+        asyncio.run(_run(client, a.duplex))
     except KeyboardInterrupt:
         print("\nexited")
 

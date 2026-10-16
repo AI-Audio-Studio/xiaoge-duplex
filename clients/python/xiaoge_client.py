@@ -39,6 +39,7 @@ PROTO_VERSION = 2
 JSON_TEXT_FRAME_MAX_BYTES = 8192
 BINARY_FRAME_MAX_BYTES = 32768
 WSS_SESSION_PATH = "/ws/session"
+KEEPALIVE_PING_INTERVAL_S = 25.0
 CONTRACT_VERSION = "xiaoge-duplex-protocol-r5.2.2"
 MANIFEST_SHA256 = "845F0F4125061FF37A7F4DA20E0C88BC089200A08B319F1035D6522C80B56559"
 BUNDLED_CA_CERT = Path(__file__).resolve().parents[1] / "certs" / "cloud-ca.pem"
@@ -62,12 +63,50 @@ VALID_ERROR_CODES = frozenset(
     }
 )
 VALID_CLEAR_REASONS = frozenset({"barge_in", "user_stop", "system_cancel", "sleep"})
-VALID_LINK_STATES = frozenset({"connecting", "connected", "reconnecting", "closed"})
-VALID_INTERACTION_MODES = frozenset({"sleeping", "dialogue", "listening"})
-VALID_ENGINE_GATES = frozenset({"closed", "open", "kws_only"})
-VALID_RESOURCE_STATES = frozenset(
-    {"SleepingHot", "SleepingWarm", "ActiveAgent", "ReleasedIdle", "PendingReconnect"}
-)
+
+
+class LinkState(str, Enum):
+    """Wire values of ctrl.state.link_state; str mixin allows == "connected"."""
+
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+    CLOSED = "closed"
+
+
+class InteractionMode(str, Enum):
+    """Wire values of ctrl.state.interaction_mode.
+
+    Note: this is the server business mode, not the SDK-local agent_state.
+    """
+
+    SLEEPING = "sleeping"
+    DIALOGUE = "dialogue"
+    LISTENING = "listening"
+
+
+class EngineGate(str, Enum):
+    """Wire values of ctrl.state.engine_gate."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    KWS_ONLY = "kws_only"
+
+
+class ResourceState(str, Enum):
+    """Wire values of ctrl.state.resource_state."""
+
+    SLEEPING_HOT = "SleepingHot"
+    SLEEPING_WARM = "SleepingWarm"
+    ACTIVE_AGENT = "ActiveAgent"
+    RELEASED_IDLE = "ReleasedIdle"
+    PENDING_RECONNECT = "PendingReconnect"
+
+
+VALID_LINK_STATES = frozenset(member.value for member in LinkState)
+VALID_INTERACTION_MODES = frozenset(member.value for member in InteractionMode)
+VALID_ENGINE_GATES = frozenset(member.value for member in EngineGate)
+VALID_RESOURCE_STATES = frozenset(member.value for member in ResourceState)
 EXECUTABLE_DELIVERIES = {"data.cmd", "data.cmd after confirmation"}
 COMMAND_MAX_AGE_GRACE_MS = 1000
 
@@ -159,6 +198,16 @@ class StateEvent:
     session_id: str
     raw: JsonObject
     pending_confirmation: JsonObject | None = None
+    parse_warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DuplexStateEvent:
+    enabled: bool
+    ts_ms: int
+    trace_id: str
+    session_id: str
+    raw: JsonObject
     parse_warnings: tuple[str, ...] = ()
 
 
@@ -440,6 +489,19 @@ class ProtocolCodec:
         return payload
 
     @staticmethod
+    def ctrl_ping(ts_ms: int | None = None) -> JsonObject:
+        effective_ts = now_ms() if ts_ms is None else ts_ms
+        if not isinstance(effective_ts, int) or isinstance(effective_ts, bool) or effective_ts < 0:
+            raise XiaogeProtocolError("ctrl.ping ts_ms must be an integer >= 0")
+        return {"type": "ctrl.ping", "ts_ms": effective_ts}
+
+    @staticmethod
+    def ctrl_duplex(enabled: bool) -> JsonObject:
+        if not isinstance(enabled, bool):
+            raise XiaogeProtocolError("ctrl.duplex enabled must be a boolean")
+        return {"type": "ctrl.duplex", "enabled": enabled}
+
+    @staticmethod
     def ctrl_frontend_state(
         session: SessionInfo,
         *,
@@ -516,6 +578,7 @@ class ProtocolCodec:
         started_at_ms: int | None = None,
         finished_at_ms: int | None = None,
         duration_ms: int | None = None,
+        result: JsonObject | None = None,
     ) -> JsonObject:
         status_value = _coerce_status(
             status,
@@ -540,6 +603,8 @@ class ProtocolCodec:
             "duration_ms": duration_ms,
         }
         payload.update({k: v for k, v in optional.items() if v is not None and v != ""})
+        if result is not None:
+            payload["result"] = result
         return payload
 
     @staticmethod
@@ -760,6 +825,25 @@ def _state_event_from_payload(payload: JsonObject) -> StateEvent:
         session_id=_lenient_string(payload, "session_id", warnings),
         raw=_raw_copy(payload),
         pending_confirmation=_lenient_optional_object(payload, "pending_confirmation", warnings),
+        parse_warnings=tuple(warnings),
+    )
+
+
+def _duplex_state_event_from_payload(payload: JsonObject) -> DuplexStateEvent:
+    _require_type(payload, "ctrl.duplex_state")
+    warnings: list[str] = []
+    _warn_extra_fields(
+        payload,
+        {"type", "trace_id", "session_id", "enabled", "ts_ms"},
+        "ctrl.duplex_state",
+        warnings,
+    )
+    return DuplexStateEvent(
+        enabled=_lenient_bool(payload, "enabled", warnings),
+        ts_ms=_lenient_int(payload, "ts_ms", warnings),
+        trace_id=_lenient_string(payload, "trace_id", warnings),
+        session_id=_lenient_string(payload, "session_id", warnings),
+        raw=_raw_copy(payload),
         parse_warnings=tuple(warnings),
     )
 
@@ -1094,11 +1178,15 @@ class XiaogeClient:
         self.frontend_state: FrontendStateReporter | None = None
         self.dispatcher = CommandDispatcher(self.send_json, executor)
         self.trace_logger = TraceLogger(trace_log_path)
+        # Application keep-alive: send ctrl.ping every N seconds once connected.
+        # Assign before run() to tune; <= 0 disables keep-alive entirely.
+        self.ping_interval_s = KEEPALIVE_PING_INTERVAL_S
 
         self.on_ready: SyncCallback | None = None
         self.on_audio: SyncCallback | None = None
         self.on_clear: SyncCallback | None = None
         self.on_state: SyncCallback | None = None
+        self.on_duplex_state: SyncCallback | None = None
         self.on_stt: SyncCallback | None = None
         self.on_reply: SyncCallback | None = None
         self.on_command: SyncCallback | None = None
@@ -1152,12 +1240,21 @@ class XiaogeClient:
         async with await self._connect_ws(session.ws_url, headers) as ws:
             self._ws = ws
             logger.info("connected %s", session.ws_url)
+            ping_task: asyncio.Task[None] | None = None
             try:
                 await self.send_json(ProtocolCodec.ctrl_hello(self.config, session))
                 self.frontend_state = FrontendStateReporter(session, self.send_json)
+                if self.ping_interval_s > 0:
+                    ping_task = asyncio.create_task(self._ping_loop())
                 async for message in ws:
                     await self._dispatch(message)
             finally:
+                if ping_task is not None:
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except asyncio.CancelledError:
+                        pass
                 self.frontend_state = None
                 self._ws = None
                 logger.info("disconnected")
@@ -1184,6 +1281,21 @@ class XiaogeClient:
         if self.frontend_state is None:
             raise XiaogeProtocolError("frontend_state reporter is not ready")
         return await self.frontend_state.report(**kwargs)
+
+    async def send_ping(self) -> None:
+        await self.send_json(ProtocolCodec.ctrl_ping())
+
+    async def send_duplex(self, enabled: bool) -> None:
+        await self.send_json(ProtocolCodec.ctrl_duplex(enabled))
+
+    async def _ping_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.ping_interval_s)
+            try:
+                await self.send_ping()
+            except Exception:
+                logger.warning("keepalive ping failed; stopping keepalive", exc_info=True)
+                return
 
     async def send_command_ack(
         self,
@@ -1265,6 +1377,10 @@ class XiaogeClient:
             event = self._build_event(payload, kind, _state_event_from_payload)
             if event is not None:
                 self._call(self.on_state, event)
+        elif kind == "ctrl.duplex_state":
+            event = self._build_event(payload, kind, _duplex_state_event_from_payload)
+            if event is not None:
+                self._call(self.on_duplex_state, event)
         elif kind == "data.stt":
             event = self._build_event(payload, kind, _stt_event_from_payload)
             if event is not None:
@@ -1283,6 +1399,11 @@ class XiaogeClient:
             event = self._build_event(payload, kind, _error_event_from_payload)
             if event is not None:
                 self._call(self.on_error, event)
+        elif kind == "ctrl.pong":
+            client_ts = payload.get("client_ts_ms")
+            if isinstance(client_ts, int) and not isinstance(client_ts, bool) and client_ts >= 0:
+                logger.debug("ctrl.pong rtt_ms=%d", now_ms() - client_ts)
+            self._call(self.on_json, payload)
         else:
             self._call(self.on_json, payload)
             logger.debug("ignored message type: %s", kind)

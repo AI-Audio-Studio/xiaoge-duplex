@@ -76,6 +76,9 @@ instead of handwritten status strings:
 client.sendCmdAck(event, ProtocolCodec.CMD_ACK_STATUS_ACCEPTED, "ok", "queued");
 client.sendCmdResult(event, ProtocolCodec.CMD_RESULT_STATUS_RUNNING, "ok", "started", false);
 client.sendCmdResult(event, ProtocolCodec.CMD_RESULT_STATUS_SUCCEEDED, "ok", "completed", false);
+// With an optional business result payload:
+client.sendCmdResult(event, ProtocolCodec.CMD_RESULT_STATUS_SUCCEEDED, "ok", "completed", false,
+        new JSONObject("{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}"));
 ```
 
 Use `CMD_ACK_STATUS_REJECTED` when refusing a command, or

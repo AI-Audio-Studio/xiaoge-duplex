@@ -60,12 +60,13 @@ async def _handle_cmd(client: XiaogeClient, event: CommandEvent) -> None:
     await client.send_command_result(event, CmdResultStatus.SUCCEEDED, "ok")
 
 
-async def _run(client: XiaogeClient, in_wav: str, out_wav: str) -> None:
+async def _run(client: XiaogeClient, in_wav: str, out_wav: str, duplex: str | None) -> None:
     pcm = _read_wav(in_wav)
     received = bytearray()
     client.on_ready = lambda sr: print("ready", sr)
     client.on_audio = received.extend
     client.on_clear = lambda event: received.clear()
+    client.on_duplex_state = lambda event: print("duplex_state: enabled=", event.enabled, "ts_ms=", event.ts_ms)
     client.on_reply = lambda event: print("reply:", event.text)
     client.on_command = lambda event: asyncio.create_task(_handle_cmd(client, event))
     client.on_error = lambda event: print("error:", event.code, event.message)
@@ -74,6 +75,9 @@ async def _run(client: XiaogeClient, in_wav: str, out_wav: str) -> None:
     while client.frontend_state is None:
         await asyncio.sleep(0.01)
     await client.send_frontend_state(trust_level="hint", wake_state="awake", vad="speech")
+    if duplex is not None:
+        print("duplex:", duplex)
+        await client.send_duplex(duplex == "on")
     for i in range(0, len(pcm), FRAME_BYTES):
         await client.send_pcm(pcm[i : i + FRAME_BYTES])
         await asyncio.sleep(FRAME_MS / 1000)
@@ -98,6 +102,12 @@ def main() -> None:
     p.add_argument("--ca-cert", default=None, help="PEM CA file for HTTPS/WSS; defaults to ../certs/cloud-ca.pem")
     p.add_argument("--api-key", default="", help="create_session x-api-key header value; defaults to no header")
     p.add_argument("--trace-log", default=None, help="optional client JSONL trace path")
+    p.add_argument(
+        "--duplex",
+        choices=["off", "on"],
+        default=None,
+        help="toggle the duplex switch after connect; omit to leave it untouched",
+    )
     a = p.parse_args()
     client = XiaogeClient(
         a.create_session_url,
@@ -107,7 +117,7 @@ def main() -> None:
         ssl=default_ssl_context(ca_cert=a.ca_cert, insecure=a.insecure),
         trace_log_path=a.trace_log,
     )
-    asyncio.run(_run(client, a.in_wav, a.out_wav))
+    asyncio.run(_run(client, a.in_wav, a.out_wav, a.duplex))
 
 
 if __name__ == "__main__":

@@ -21,6 +21,9 @@ extern "C" {
 #define XIAOGE_SAMPLE_RATE 16000
 #define XIAOGE_JSON_MAX_BYTES 8192
 #define XIAOGE_BINARY_MAX_BYTES 32768
+/* Application keep-alive: xiaoge_service() sends ctrl.ping every 25s after the
+ * connection is established. Client-side policy, not a server deadline. */
+#define XIAOGE_KEEPALIVE_PING_INTERVAL_MS 25000
 #define XIAOGE_MANIFEST_SHA256 "845F0F4125061FF37A7F4DA20E0C88BC089200A08B319F1035D6522C80B56559"
 #define XIAOGE_DEFAULT_API_KEY ""
 #define XIAOGE_AUTO_FAKE_CMD_DEFAULT 0
@@ -44,6 +47,24 @@ extern "C" {
 #define XIAOGE_ERROR_DUPLICATE_CONNECTION "duplicate_connection"
 #define XIAOGE_ERROR_RESOURCE_EXHAUSTED "resource_exhausted"
 #define XIAOGE_ERROR_UNKNOWN_CMD_ID "unknown_cmd_id"
+
+/* Wire values of the four ctrl.state enums (DEVICE_PROTOCOL 3.1). Compare
+ * xiaoge_state_event fields against these instead of hand-written strings. */
+#define XIAOGE_LINK_STATE_CONNECTING "connecting"
+#define XIAOGE_LINK_STATE_CONNECTED "connected"
+#define XIAOGE_LINK_STATE_RECONNECTING "reconnecting"
+#define XIAOGE_LINK_STATE_CLOSED "closed"
+#define XIAOGE_INTERACTION_MODE_SLEEPING "sleeping"
+#define XIAOGE_INTERACTION_MODE_DIALOGUE "dialogue"
+#define XIAOGE_INTERACTION_MODE_LISTENING "listening"
+#define XIAOGE_ENGINE_GATE_CLOSED "closed"
+#define XIAOGE_ENGINE_GATE_OPEN "open"
+#define XIAOGE_ENGINE_GATE_KWS_ONLY "kws_only"
+#define XIAOGE_RESOURCE_STATE_SLEEPING_HOT "SleepingHot"
+#define XIAOGE_RESOURCE_STATE_SLEEPING_WARM "SleepingWarm"
+#define XIAOGE_RESOURCE_STATE_ACTIVE_AGENT "ActiveAgent"
+#define XIAOGE_RESOURCE_STATE_RELEASED_IDLE "ReleasedIdle"
+#define XIAOGE_RESOURCE_STATE_PENDING_RECONNECT "PendingReconnect"
 
 typedef struct xiaoge_client xiaoge_client;
 
@@ -95,6 +116,14 @@ typedef struct {
     const char *session_id;
     const char *raw_json;
 } xiaoge_state_event;
+
+typedef struct {
+    int enabled; /* 1 when duplex is on, 0 when off */
+    long long ts_ms;
+    const char *trace_id;
+    const char *session_id;
+    const char *raw_json;
+} xiaoge_duplex_state_event;
 
 typedef struct {
     const char *text;
@@ -156,6 +185,10 @@ typedef struct {
     void (*on_json)(const char *json, void *user);
     void (*on_failure)(int code, const char *message, void *user);
     void *user;
+    /* Appended after user: copy_callbacks() only copies the caller's
+     * struct_size prefix, so binaries built against older headers keep
+     * working and see NULL here. New callbacks must be appended at the end. */
+    void (*on_duplex_state)(const xiaoge_duplex_state_event *event, void *user);
 } xiaoge_callbacks;
 
 /* Build a compact create_session request JSON. Returns bytes written excluding
@@ -180,6 +213,13 @@ xiaoge_client *xiaoge_create_from_session_with_ca(const xiaoge_config *cfg,
 int xiaoge_send_pcm(xiaoge_client *c, const void *pcm, size_t len);
 int xiaoge_send_frontend_state(xiaoge_client *c, const char *trust_level,
                                const char *wake_state, const char *vad, int ttl_ms);
+/* Send one application keep-alive frame {"type":"ctrl.ping","ts_ms":now}. The
+ * service loop also sends this automatically every
+ * XIAOGE_KEEPALIVE_PING_INTERVAL_MS; use this for manual/extra pings. */
+int xiaoge_send_ping(xiaoge_client *c);
+/* Toggle the duplex switch: {"type":"ctrl.duplex","enabled":<bool>}. The
+ * server acks with ctrl.duplex_state, delivered through on_duplex_state. */
+int xiaoge_send_duplex(xiaoge_client *c, int enabled);
 
 /* Send command acknowledgement/result frames derived from a downlink data.cmd JSON.
  * cmd_json must contain trace_id, session_id, utterance_id, and cmd_id. */
@@ -192,11 +232,24 @@ int xiaoge_send_cmd_result_ex(xiaoge_client *c, const char *cmd_json,
                               const char *status, const char *code, const char *message,
                               int retryable, long long started_at_ms,
                               long long finished_at_ms, long long duration_ms);
+/* Like xiaoge_send_cmd_result_ex, plus an optional business result object.
+ * result_json is a JSON object string (e.g. "{\"type\":\"cap\",\"value\":40}");
+ * pass NULL to omit the field. Non-object or invalid JSON is rejected locally. */
+int xiaoge_send_cmd_result_ex2(xiaoge_client *c, const char *cmd_json,
+                               const char *status, const char *code, const char *message,
+                               int retryable, long long started_at_ms,
+                               long long finished_at_ms, long long duration_ms,
+                               const char *result_json);
 int xiaoge_send_cmd_ack_event(xiaoge_client *c, const xiaoge_command_event *event,
                               const char *status, const char *code, const char *message);
 int xiaoge_send_cmd_result_event(xiaoge_client *c, const xiaoge_command_event *event,
                                  const char *status, const char *code, const char *message,
                                  int retryable);
+/* Like xiaoge_send_cmd_result_event, plus an optional business result object.
+ * result_json semantics match xiaoge_send_cmd_result_ex2. */
+int xiaoge_send_cmd_result_event_ex(xiaoge_client *c, const xiaoge_command_event *event,
+                                    const char *status, const char *code, const char *message,
+                                    int retryable, const char *result_json);
 int xiaoge_service(xiaoge_client *c, int timeout_ms);
 void xiaoge_destroy(xiaoge_client *c);
 

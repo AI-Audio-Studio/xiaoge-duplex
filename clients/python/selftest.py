@@ -17,12 +17,21 @@ import websockets
 from xiaoge_client import (
     CmdAckStatus,
     CmdResultStatus,
+    EngineGate,
     FakeExecutor,
+    InteractionMode,
     JSON_TEXT_FRAME_MAX_BYTES,
+    LinkState,
     ProtocolCodec,
     ReadyEvent,
     ReplyEvent,
+    ResourceState,
+    StateEvent,
     SttEvent,
+    VALID_ENGINE_GATES,
+    VALID_INTERACTION_MODES,
+    VALID_LINK_STATES,
+    VALID_RESOURCE_STATES,
     XiaogeClient,
     XiaogeProtocolError,
     json_utf8_size,
@@ -83,6 +92,21 @@ def _request_headers(conn: Any) -> Any:
     if hasattr(conn, "request") and hasattr(conn.request, "headers"):
         return conn.request.headers
     return getattr(conn, "request_headers", {})
+
+
+def _duplex_state_reply(payload: dict[str, Any]) -> str:
+    enabled = payload.get("enabled")
+    assert isinstance(enabled, bool), payload
+    return json.dumps(
+        {
+            "type": "ctrl.duplex_state",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "enabled": enabled,
+            "ts_ms": now_ms(),
+        },
+        separators=(",", ":"),
+    )
 
 
 async def _mock_ws(conn: Any) -> None:
@@ -209,6 +233,8 @@ async def _mock_ws(conn: Any) -> None:
                 saw_frontend_state = payload["trust_level"] == "authoritative"
                 if saw_frontend_state and sent_cmd:
                     frontend_deadline = got_pcm
+            elif kind == "ctrl.duplex":
+                await conn.send(_duplex_state_reply(payload))
             elif kind in {"data.cmd_ack", "data.cmd_result"}:
                 raise AssertionError("client must not auto-send command ack/result")
             if frontend_deadline and got_pcm >= frontend_deadline:
@@ -226,6 +252,8 @@ async def _scenario() -> dict[str, Any]:
         "audio": 0,
         "clear": 0,
         "state": 0,
+        "state_event": None,
+        "duplex_state": None,
         "stt": None,
         "stt_text": None,
         "reply": None,
@@ -247,7 +275,13 @@ async def _scenario() -> dict[str, Any]:
             client.on_ready_event = lambda event: events.__setitem__("ready_event", event.sample_rate)
             client.on_audio = lambda pcm: events.__setitem__("audio", events["audio"] + len(pcm))
             client.on_clear = lambda event: events.__setitem__("clear", events["clear"] + 1)
-            client.on_state = lambda event: events.__setitem__("state", events["state"] + 1)
+
+            def on_state(event: StateEvent) -> None:
+                events["state"] += 1
+                events["state_event"] = event
+
+            client.on_state = on_state
+            client.on_duplex_state = lambda event: events.__setitem__("duplex_state", event.enabled)
             client.on_stt = lambda event: events.__setitem__("stt", event)
             client.on_stt_text = lambda text, final: events.__setitem__("stt_text", (text, final))
             client.on_reply = lambda event: events.__setitem__("reply", event)
@@ -267,6 +301,7 @@ async def _scenario() -> dict[str, Any]:
                 vad="speech",
                 lock_mode=False,
             )
+            await client.send_duplex(False)
             for _ in range(3):
                 await client.send_pcm(b"\x00" * 320)
                 await asyncio.sleep(0.02)
@@ -274,6 +309,100 @@ async def _scenario() -> dict[str, Any]:
     finally:
         http.shutdown()
     return events
+
+
+async def _mock_keepalive_ws(conn: Any, events: dict[str, Any]) -> None:
+    headers = _request_headers(conn)
+    assert headers.get("Authorization") == f"Bearer {TOKEN}"
+    hello = json.loads(await conn.recv())
+    assert hello["type"] == "ctrl.hello"
+    await conn.send(
+        json.dumps(
+            {
+                "type": "ctrl.ready",
+                "trace_id": TRACE_ID,
+                "session_id": SESSION_ID,
+                "sample_rate": 16000,
+                "granted_caps": ["audio", "text", "cmd", "state"],
+                "config_version": "cfg-selftest",
+            },
+            separators=(",", ":"),
+        )
+    )
+    async for msg in conn:
+        if isinstance(msg, (bytes, bytearray)):
+            continue
+        payload = json.loads(msg)
+        if payload.get("type") != "ctrl.ping":
+            continue
+        ts_ms = payload.get("ts_ms")
+        assert isinstance(ts_ms, int) and not isinstance(ts_ms, bool) and ts_ms >= 0, payload
+        await conn.send(
+            json.dumps(
+                {
+                    "type": "ctrl.pong",
+                    "trace_id": TRACE_ID,
+                    "session_id": SESSION_ID,
+                    "ts_ms": now_ms(),
+                    "client_ts_ms": ts_ms,
+                },
+                separators=(",", ":"),
+            )
+        )
+        events["pings"] += 1
+        if events["pings"] >= 2:
+            await conn.close()
+            return
+
+
+async def _keepalive_scenario() -> dict[str, Any]:
+    events: dict[str, Any] = {"pings": 0, "pongs": 0}
+    http = _start_http(8908, 8909)
+    try:
+        async with websockets.serve(lambda conn: _mock_keepalive_ws(conn, events), "127.0.0.1", 8909):
+            client = XiaogeClient(
+                "http://127.0.0.1:8908/create_session",
+                "robot-selftest",
+                {"type": "mock", "value": "selftest"},
+                api_key="selftest-api-key",
+            )
+            client.ping_interval_s = 0.05
+
+            def on_json(payload: dict[str, Any]) -> None:
+                if payload.get("type") == "ctrl.pong":
+                    events["pongs"] += 1
+
+            client.on_json = on_json
+            await asyncio.wait_for(client.run(), timeout=3.0)
+    finally:
+        http.shutdown()
+    return events
+
+
+def _ping_frame() -> None:
+    assert ProtocolCodec.ctrl_ping(ts_ms=123) == {"type": "ctrl.ping", "ts_ms": 123}
+    frame = ProtocolCodec.ctrl_ping()
+    assert frame["type"] == "ctrl.ping", frame
+    assert isinstance(frame["ts_ms"], int) and not isinstance(frame["ts_ms"], bool), frame
+    assert frame["ts_ms"] >= 0, frame
+    try:
+        ProtocolCodec.ctrl_ping(ts_ms=-1)
+    except XiaogeProtocolError:
+        pass
+    else:
+        raise AssertionError("negative ctrl.ping ts_ms must fail")
+
+
+def _duplex_frame() -> None:
+    assert ProtocolCodec.ctrl_duplex(False) == {"type": "ctrl.duplex", "enabled": False}
+    assert ProtocolCodec.ctrl_duplex(True) == {"type": "ctrl.duplex", "enabled": True}
+    for bad in ("true", 1, None):
+        try:
+            ProtocolCodec.ctrl_duplex(bad)  # type: ignore[arg-type]
+        except XiaogeProtocolError:
+            pass
+        else:
+            raise AssertionError("non-bool ctrl.duplex enabled must fail")
 
 
 def _transport_limits() -> None:
@@ -358,6 +487,12 @@ def _command_boundaries() -> None:
         payload = ProtocolCodec.cmd_result(base, status, "ok")
         assert payload["status"] == status.value
     assert ProtocolCodec.cmd_result(base, "running", "ok")["status"] == "running"
+    assert "result" not in ProtocolCodec.cmd_result(base, "running", "ok")
+    result_payload = ProtocolCodec.cmd_result(
+        base, CmdResultStatus.SUCCEEDED, "ok", "completed",
+        result={"type": "cap", "value": 40, "gauge_id": 1},
+    )
+    assert result_payload["result"] == {"type": "cap", "value": 40, "gauge_id": 1}
     try:
         ProtocolCodec.cmd_result(base, "done", "bad")
     except XiaogeProtocolError:
@@ -412,12 +547,42 @@ def _no_legacy_session_path() -> None:
     assert ProtocolCodec.parse_session_response(extra_field).session_id == SESSION_ID
 
 
+def _state_constants() -> None:
+    assert LinkState.CONNECTING == "connecting"
+    assert LinkState.CONNECTED == "connected"
+    assert LinkState.RECONNECTING == "reconnecting"
+    assert LinkState.CLOSED == "closed"
+    assert InteractionMode.SLEEPING == "sleeping"
+    assert InteractionMode.DIALOGUE == "dialogue"
+    assert InteractionMode.LISTENING == "listening"
+    assert EngineGate.CLOSED == "closed"
+    assert EngineGate.OPEN == "open"
+    assert EngineGate.KWS_ONLY == "kws_only"
+    assert ResourceState.SLEEPING_HOT == "SleepingHot"
+    assert ResourceState.SLEEPING_WARM == "SleepingWarm"
+    assert ResourceState.ACTIVE_AGENT == "ActiveAgent"
+    assert ResourceState.RELEASED_IDLE == "ReleasedIdle"
+    assert ResourceState.PENDING_RECONNECT == "PendingReconnect"
+    assert VALID_LINK_STATES == {"connecting", "connected", "reconnecting", "closed"}
+    assert VALID_INTERACTION_MODES == {"sleeping", "dialogue", "listening"}
+    assert VALID_ENGINE_GATES == {"closed", "open", "kws_only"}
+    assert VALID_RESOURCE_STATES == {
+        "SleepingHot",
+        "SleepingWarm",
+        "ActiveAgent",
+        "ReleasedIdle",
+        "PendingReconnect",
+    }
+    assert isinstance(InteractionMode.SLEEPING, str)
+
+
 async def _event_validation() -> None:
     client = XiaogeClient("http://127.0.0.1/create_session", "robot", {"type": "mock"})
-    seen: dict[str, int] = {"protocol_error": 0, "ready": 0, "stt": 0}
+    seen: dict[str, int] = {"protocol_error": 0, "ready": 0, "stt": 0, "state": 0}
     stt_events: list[SttEvent] = []
     ready_events: list[ReadyEvent] = []
     reply_events: list[ReplyEvent] = []
+    state_events: list[StateEvent] = []
 
     def on_stt(event: SttEvent) -> None:
         seen["stt"] += 1
@@ -430,12 +595,17 @@ async def _event_validation() -> None:
     def on_reply(event: ReplyEvent) -> None:
         reply_events.append(event)
 
+    def on_state(event: StateEvent) -> None:
+        seen["state"] += 1
+        state_events.append(event)
+
     client.on_protocol_error = lambda event: seen.__setitem__(
         "protocol_error", seen["protocol_error"] + 1
     )
     client.on_ready_event = on_ready
     client.on_stt = on_stt
     client.on_reply = on_reply
+    client.on_state = on_state
     await client._handle_json(  # noqa: SLF001 - selftest covers inbound leniency.
         {
             "type": "data.stt",
@@ -479,7 +649,31 @@ async def _event_validation() -> None:
             "ts_ms": 1,
         }
     )
-    assert seen == {"protocol_error": 0, "ready": 1, "stt": 2}, seen
+    await client._handle_json(  # noqa: SLF001 - selftest covers enum-constant comparison.
+        {
+            "type": "ctrl.state",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "link_state": "connected",
+            "interaction_mode": "dialogue",
+            "engine_gate": "open",
+            "resource_state": "ActiveAgent",
+            "ts_ms": 1,
+        }
+    )
+    await client._handle_json(  # noqa: SLF001 - selftest covers unknown-enum passthrough.
+        {
+            "type": "ctrl.state",
+            "trace_id": TRACE_ID,
+            "session_id": SESSION_ID,
+            "link_state": "connected",
+            "interaction_mode": "dozing",
+            "engine_gate": "open",
+            "resource_state": "ActiveAgent",
+            "ts_ms": 2,
+        }
+    )
+    assert seen == {"protocol_error": 0, "ready": 1, "stt": 2, "state": 2}, seen
     assert stt_events[0].is_final is False
     assert "field is not a boolean: final" in stt_events[0].parse_warnings
     assert "data.stt has extra fields: ['extra']" in stt_events[1].parse_warnings
@@ -490,12 +684,22 @@ async def _event_validation() -> None:
     assert reply_events[0].intent_type == "control_cmd_multi"
     assert "missing field: text" in reply_events[0].parse_warnings
     assert "unknown intent_type: control_cmd_multi" in reply_events[0].parse_warnings
+    assert state_events[0].link_state == LinkState.CONNECTED
+    assert state_events[0].interaction_mode == InteractionMode.DIALOGUE
+    assert state_events[0].engine_gate == EngineGate.OPEN
+    assert state_events[0].resource_state == ResourceState.ACTIVE_AGENT
+    assert state_events[0].parse_warnings == ()
+    assert state_events[1].interaction_mode == "dozing"
+    assert "unknown interaction_mode: dozing" in state_events[1].parse_warnings
 
 
 async def main() -> int:
     _transport_limits()
     _command_boundaries()
     _no_legacy_session_path()
+    _ping_frame()
+    _duplex_frame()
+    _state_constants()
     await _event_validation()
     events = await _scenario()
     assert events["json"] >= 5, events
@@ -504,6 +708,12 @@ async def main() -> int:
     assert events["audio"] == 320, events
     assert events["clear"] == 1, events
     assert events["state"] == 1, events
+    state = events["state_event"]
+    assert state.link_state == LinkState.CONNECTED, events
+    assert state.interaction_mode == InteractionMode.DIALOGUE, events
+    assert state.engine_gate == EngineGate.OPEN, events
+    assert state.resource_state == ResourceState.ACTIVE_AGENT, events
+    assert events["duplex_state"] is False, events
     stt = events["stt"]
     assert stt.text == "往前走一米" and stt.is_final is True and stt.final is True, events
     assert stt.raw["text"] == "往前走一米", events
@@ -516,9 +726,15 @@ async def main() -> int:
     command = events["command"]
     assert command.cmd_id == "cmd-selftest" and command.action == "navigation.move", events
     assert events["protocol_error"] == 0, events
+    keepalive = await _keepalive_scenario()
+    assert keepalive["pings"] >= 2, keepalive
+    assert keepalive["pongs"] >= 2, keepalive
     print("[r5.2.2] create_session/auth/hello/ready/state/pcm/clear/cmd callback OK")
+    print("[state] LinkState/InteractionMode/EngineGate/ResourceState constants OK")
     print("[transport] 8192 pass / 8193 fail OK")
     print("[cmd] accepted/rejected/duplicate/late/result-status OK")
+    print("[keepalive] ctrl.ping interval + ctrl.pong echo OK")
+    print("[duplex] ctrl.duplex switch + ctrl.duplex_state ack OK")
     print("records=local-selftest failures=0")
     return 0
 

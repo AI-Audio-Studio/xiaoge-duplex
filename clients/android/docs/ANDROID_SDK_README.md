@@ -143,6 +143,7 @@ session.stop();
 | `stop()` | 停止会话并释放 WebSocket、音频、音频焦点等资源。幂等。 |
 | `state()` | 获取当前 `SessionState`。 |
 | `sendFrontendState(trustLevel, wakeState, vad, ttlMs)` | 发送前端状态，例如唤醒、VAD、信任等级。 |
+| `sendDuplex(boolean enabled)` | 双工开关：`false` 关闭双工（语音/手发文字只显示不回复），`true` 开启；回执见 `onDuplexState`。 |
 | `sendPcm(byte[] pcm)` | 仅在 `AudioInputMode.EXTERNAL` 外部音频输入模式下可用。 |
 | `sendCmdAck(...)` / `sendCmdResult(...)` | App 自行接管命令执行时发送 ack/result。 |
 
@@ -154,6 +155,7 @@ session.stop();
 | `onReady(int sampleRate, boolean reconnected)` | 服务端 `ctrl.ready` 到达，语音链路可用。 |
 | `onClear(ClearEvent event)` | 服务端清理/打断事件，常用 `event.reason`。 |
 | `onServerState(StateEvent event)` | 服务端 `ctrl.state` 状态更新，常用 `event.interactionMode`、`event.resourceState`。 |
+| `onDuplexState(DuplexStateEvent event)` | `ctrl.duplex_state` 回执（`sendDuplex` 后到达），`event.enabled` 为最新开关状态；表示已调度，不一定已生效。 |
 | `onStt(SttEvent event)` | 用户语音识别文本事件，常用 `event.text`、`event.isFinal`。 |
 | `onReply(ReplyEvent event)` | 助手回复文本事件，常用 `event.text`、`event.intentType`。 |
 | `onCommand(CommandEvent event)` | 服务端下发命令事件，常用 `event.cmdId`、`event.action`、`event.params`。 |
@@ -167,6 +169,86 @@ session.stop();
 ### 下行事件宽松解析
 
 下行事件不会因服务端协议字段漂移而丢失：字段缺失时以类型默认值交付（字符串 `""`、数字 `0`、布尔 `false`、对象/数组为空），多余字段忽略（仍可在 `event.raw` 中访问），未知枚举值（如新增 `intent_type`/错误码）原样透传，数字/布尔字符串自动转型。每个事件对象携带 `parseWarnings`（`String[]`，完全合规时为空数组）记录全部偏离项，SDK 会同时在 Logcat 以 `WARN` 输出（tag `XiaogeClient`），便于发现服务端协议漂移。业务侧如需严格判断，可检查 `event.parseWarnings.length == 0` 或 `event.text` 是否为空。
+
+### ctrl.state 状态常量
+
+比较 `StateEvent` 字段时使用 `ProtocolCodec` 中的 wire 常量，避免手写字符串（拼错不报错、永不匹配）：
+
+```java
+import com.xiaoge.client.ProtocolCodec;
+
+@Override
+public void onServerState(StateEvent event) {
+    if (ProtocolCodec.INTERACTION_MODE_SLEEPING.equals(event.interactionMode)) {
+        // 休眠态 UI
+    }
+}
+```
+
+可用常量：`LINK_STATE_CONNECTING/CONNECTED/RECONNECTING/CLOSED`、`INTERACTION_MODE_SLEEPING/DIALOGUE/LISTENING`、`ENGINE_GATE_CLOSED/OPEN/KWS_ONLY`、`RESOURCE_STATE_SLEEPING_HOT/SLEEPING_WARM/ACTIVE_AGENT/RELEASED_IDLE/PENDING_RECONNECT`。字段类型保持 `String`，未知协议值仍按宽松解析原样透传并记入 `parseWarnings`。本地 `SessionState`（会话生命周期）与服务端 `interaction_mode`（业务三态）是两个概念，不要互相比较。
+
+### 交互状态 interaction_mode 获取方式
+
+`interactionMode` 只能从 `onServerState(StateEvent event)` 回调获取；SDK 不缓存当前状态、也不提供查询接口，业务侧自行保存最新值：
+
+```java
+private volatile String latestInteractionMode;
+
+@Override
+public void onServerState(StateEvent event) {
+    latestInteractionMode = event.interactionMode;
+    if (ProtocolCodec.INTERACTION_MODE_SLEEPING.equals(event.interactionMode)) {
+        // 休眠态 UI（注意切换到主线程更新 UI）
+    }
+}
+```
+
+- **下发时机**：握手完成后紧跟 `ctrl.ready` 下发一次初始状态，之后服务端每次状态变化重发。
+- **快照语义**：每条 `ctrl.state` 都是四字段的**全量快照**，广播可能重复；按最新一条更新 UI/状态机，不必把每帧当作新事件（DEVICE_PROTOCOL §3.1）。
+- **三态含义**：
+
+| `interaction_mode` | 含义 | 典型 `engine_gate` | 典型 `resource_state` |
+| --- | --- | --- | --- |
+| `sleeping` | 业务休眠，等待唤醒/有效输入 | `open` | `SleepingHot` |
+| `dialogue` | 正常交互模式 | `open` | `ActiveAgent` |
+| `listening` | 收听输入，但被拒轮次不进入正常回复 | `open` | `ActiveAgent` |
+
+- **注意**：实际 wire 字段是 `interaction_mode`（不是 `interaction_state`）；当前三态全部 `engine_gate="open"`，不要因 sleeping/listening 自行停止上传音频；`linkState` 是连接状态，不代表是否在对话；本地 `SessionState` 是会话生命周期状态，与服务端业务三态是两个概念。比较方式见上文「ctrl.state 状态常量」。回调运行在 SDK 内部线程，UI 更新需切主线程。
+
+### 应用层保活（ctrl.ping）
+
+保活在 `XiaogeClient` 传输层实现，`XiaogeVoiceSession` 与直接使用 `XiaogeClient` 的 App 均自动生效：
+WebSocket 连接建立并发送 `ctrl.hello` 后，SDK 每 25 秒发送一次
+`{"type":"ctrl.ping","ts_ms":<epoch ms>}`（Logcat tag `XiaogeClient` 可见）。25 秒是客户端策略
+（对齐 DEVICE_PROTOCOL §4.2），不是服务端强制期限。
+
+- 调整周期：`new XiaogeClient(config, listener, http, pingIntervalSec)`，单位秒；`<= 0` 关闭自动保活。
+- 收到 `ctrl.pong` 时 SDK 按 `client_ts_ms` 回显用客户端时钟计算 RTT 并输出 `DEBUG` 日志，
+  随后仍交给 `onJson(payload)`；pong 不会唤醒 dialogue，也不延长业务 listening/idle 超时。
+- 保活仅保持传输/会话活性，SDK 不做"连续 pong 未收到则重连"的检测；`XiaogeVoiceSession`
+  的自动重连由传输失败（`onFailure`）触发，与 pong 无关。
+
+### 双工开关（ctrl.duplex）
+
+```java
+session.sendDuplex(false);   // XiaogeVoiceSession；直用 XiaogeClient 时为 client.sendDuplex(false)
+
+@Override
+public void onDuplexState(DuplexStateEvent event) {
+    Log.i("demo", "duplex enabled=" + event.enabled);
+}
+```
+
+- `sendDuplex(enabled)` 发送 `{"type":"ctrl.duplex","enabled":<bool>}`（DEVICE_PROTOCOL §3.3），
+  在 `XiaogeClient` 传输层实现，`XiaogeVoiceSession` 与直用 `XiaogeClient` 的 App 均可用。
+- 回执 `ctrl.duplex_state` 解析为 `DuplexStateEvent`（`enabled`、`tsMs`、`traceId`、`sessionId`、
+  `raw`、`parseWarnings`），两层 listener（`XiaogeClient.Listener.onDuplexState` /
+  `XiaogeSessionListener.onDuplexState`）都会触发，并照常走 `onJson`。
+- 回执语义是**已调度**，不等于 agent loop 已完成赋值；开关不直接修改业务三态
+  （sleeping/dialogue/listening 仍以 `onServerState` 为准）。
+- 没有 `full_duplex` wire 字段；`ctrl.mic_state` 未支持，不要发送。
+- demo（`clients/android/demo`）底部有 Duplex 开关可用于真机验证：通话中切换后，logcat 可见
+  `ctrl.duplex` 上行与 `ctrl.duplex_state` 回执，并弹 Toast 提示（scheduled）。
 
 ### 发送 `cmd_ack` / `cmd_result`
 
@@ -232,6 +314,20 @@ s.sendCmdAck(
 ```
 
 合法 `cmd_ack` status 为 `accepted`、`rejected`、`duplicate`；合法 `cmd_result` status 为 `running`、`succeeded`、`failed`、`canceled`、`timeout`。SDK 仍兼容合法原始字符串，但非法 status 会在本地抛出 `IllegalArgumentException`，不会发送到服务端。
+
+`sendCmdResult` 另有带 `result` 参数的重载,用于在 `data.cmd_result` 中携带可选的业务返回值(透传一个 JSON 对象),例如采集类命令的结果:
+
+```java
+s.sendCmdResult(
+        event,
+        ProtocolCodec.CMD_RESULT_STATUS_SUCCEEDED,
+        "ok",
+        "completed",
+        false,
+        new JSONObject("{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}"));
+```
+
+`result` 为 `null` 或使用旧重载时,消息中不含 `result` 字段,与旧协议完全兼容。
 
 SDK 不会默认回放 `cmd_ack` / `cmd_result`，业务侧不要在 `onJson(JSONObject)` 和 `onCommand(CommandEvent)` 中重复执行同一命令。
 

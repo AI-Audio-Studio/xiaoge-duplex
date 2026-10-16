@@ -1,0 +1,7 @@
+cJSON vendored source
+
+Source: https://github.com/DaveGamble/cJSON
+Version: v1.7.18
+Commit/tag object shown by git ls-remote during vendoring: acc76239bee01d8e9c858ae2cab296704e52d916 refs/tags/v1.7.18
+Files copied unchanged: cJSON.c, cJSON.h, LICENSE
+License: MIT, see LICENSE in this directory.

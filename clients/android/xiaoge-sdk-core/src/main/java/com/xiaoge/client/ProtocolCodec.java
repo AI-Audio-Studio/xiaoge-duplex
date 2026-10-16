@@ -27,6 +27,25 @@ public final class ProtocolCodec {
     public static final String CMD_RESULT_STATUS_CANCELED = "canceled";
     public static final String CMD_RESULT_STATUS_TIMEOUT = "timeout";
 
+    /* Wire values of the four ctrl.state enums (DEVICE_PROTOCOL 3.1). Compare
+     * StateEvent fields against these constants instead of hand-written strings;
+     * the fields stay String so unknown server values still pass through. */
+    public static final String LINK_STATE_CONNECTING = "connecting";
+    public static final String LINK_STATE_CONNECTED = "connected";
+    public static final String LINK_STATE_RECONNECTING = "reconnecting";
+    public static final String LINK_STATE_CLOSED = "closed";
+    public static final String INTERACTION_MODE_SLEEPING = "sleeping";
+    public static final String INTERACTION_MODE_DIALOGUE = "dialogue";
+    public static final String INTERACTION_MODE_LISTENING = "listening";
+    public static final String ENGINE_GATE_CLOSED = "closed";
+    public static final String ENGINE_GATE_OPEN = "open";
+    public static final String ENGINE_GATE_KWS_ONLY = "kws_only";
+    public static final String RESOURCE_STATE_SLEEPING_HOT = "SleepingHot";
+    public static final String RESOURCE_STATE_SLEEPING_WARM = "SleepingWarm";
+    public static final String RESOURCE_STATE_ACTIVE_AGENT = "ActiveAgent";
+    public static final String RESOURCE_STATE_RELEASED_IDLE = "ReleasedIdle";
+    public static final String RESOURCE_STATE_PENDING_RECONNECT = "PendingReconnect";
+
     private ProtocolCodec() {}
 
     public static void validateCaps(List<String> caps) {
@@ -101,6 +120,20 @@ public final class ProtocolCodec {
                 .put("caps", new JSONArray(s.grantedCaps)));
     }
 
+    /** Application keep-alive frame; the server echoes ts_ms as client_ts_ms in ctrl.pong. */
+    public static String ping() throws JSONException {
+        return compact(new JSONObject()
+                .put("type", "ctrl.ping")
+                .put("ts_ms", System.currentTimeMillis()));
+    }
+
+    /** Duplex switch frame; the server acks with ctrl.duplex_state once scheduled. */
+    public static String duplex(boolean enabled) throws JSONException {
+        return compact(new JSONObject()
+                .put("type", "ctrl.duplex")
+                .put("enabled", enabled));
+    }
+
     public static String frontendState(SessionInfo s, int seq, String trustLevel,
                                        String wakeState, String vad, int ttlMs) throws JSONException {
         if (seq < 0) {
@@ -152,6 +185,11 @@ public final class ProtocolCodec {
 
     public static String cmdResult(JSONObject cmd, String status, String code, String message, Boolean retryable)
             throws JSONException {
+        return cmdResult(cmd, status, code, message, retryable, null);
+    }
+
+    public static String cmdResult(JSONObject cmd, String status, String code, String message, Boolean retryable,
+                                   JSONObject result) throws JSONException {
         if (!status.equals(CMD_RESULT_STATUS_RUNNING)
                 && !status.equals(CMD_RESULT_STATUS_SUCCEEDED)
                 && !status.equals(CMD_RESULT_STATUS_FAILED)
@@ -162,17 +200,26 @@ public final class ProtocolCodec {
         boolean shouldRetry = retryable != null
                 ? retryable
                 : status.equals(CMD_RESULT_STATUS_FAILED) || status.equals(CMD_RESULT_STATUS_TIMEOUT);
-        return compact(commandBase(cmd)
+        JSONObject payload = commandBase(cmd)
                 .put("type", "data.cmd_result")
                 .put("status", status)
                 .put("code", code)
                 .put("message", message)
-                .put("retryable", shouldRetry));
+                .put("retryable", shouldRetry);
+        if (result != null) {
+            payload.put("result", result);
+        }
+        return compact(payload);
     }
 
     public static String cmdResult(CommandEvent event, String status, String code, String message, Boolean retryable)
             throws JSONException {
-        return cmdResult(commandContext(event), status, code, message, retryable);
+        return cmdResult(commandContext(event), status, code, message, retryable, null);
+    }
+
+    public static String cmdResult(CommandEvent event, String status, String code, String message, Boolean retryable,
+                                   JSONObject result) throws JSONException {
+        return cmdResult(commandContext(event), status, code, message, retryable, result);
     }
 
     private static JSONObject commandBase(JSONObject cmd) throws JSONException {

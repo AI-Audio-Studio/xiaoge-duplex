@@ -8,14 +8,27 @@ import java.util.List;
 import java.util.Set;
 
 public final class StateEvent {
+    /* Derived from the ProtocolCodec wire constants so the validation sets and the
+     * public comparison constants cannot drift apart. */
     private static final Set<String> KNOWN_LINK_STATES = EventJson.set(
-            "connecting", "connected", "reconnecting", "closed");
+            ProtocolCodec.LINK_STATE_CONNECTING,
+            ProtocolCodec.LINK_STATE_CONNECTED,
+            ProtocolCodec.LINK_STATE_RECONNECTING,
+            ProtocolCodec.LINK_STATE_CLOSED);
     private static final Set<String> KNOWN_INTERACTION_MODES = EventJson.set(
-            "sleeping", "dialogue", "listening");
+            ProtocolCodec.INTERACTION_MODE_SLEEPING,
+            ProtocolCodec.INTERACTION_MODE_DIALOGUE,
+            ProtocolCodec.INTERACTION_MODE_LISTENING);
     private static final Set<String> KNOWN_ENGINE_GATES = EventJson.set(
-            "closed", "open", "kws_only");
+            ProtocolCodec.ENGINE_GATE_CLOSED,
+            ProtocolCodec.ENGINE_GATE_OPEN,
+            ProtocolCodec.ENGINE_GATE_KWS_ONLY);
     private static final Set<String> KNOWN_RESOURCE_STATES = EventJson.set(
-            "SleepingHot", "SleepingWarm", "ActiveAgent", "ReleasedIdle", "PendingReconnect");
+            ProtocolCodec.RESOURCE_STATE_SLEEPING_HOT,
+            ProtocolCodec.RESOURCE_STATE_SLEEPING_WARM,
+            ProtocolCodec.RESOURCE_STATE_ACTIVE_AGENT,
+            ProtocolCodec.RESOURCE_STATE_RELEASED_IDLE,
+            ProtocolCodec.RESOURCE_STATE_PENDING_RECONNECT);
 
     public final String linkState;
     public final String interactionMode;

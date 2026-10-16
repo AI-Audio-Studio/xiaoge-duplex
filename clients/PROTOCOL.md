@@ -49,8 +49,18 @@ outside the frozen R5.2.2 contract.
 - Send `x-api-key` only on create_session HTTP when explicitly configured; WebSocket session authentication uses only `Authorization: Bearer <access_token>`.
 - Connect to `ws_url` using `Authorization: Bearer <access_token>`.
 - Send `ctrl.hello` with `proto=2`, `role=device`, `device_id`, and granted caps.
+- Send application keep-alive `ctrl.ping` with `ts_ms` every 25s after the
+  connection is established (see DEVICE_PROTOCOL §4.2; 25s is a client policy,
+  not a server deadline). `ctrl.pong` is informational only — measure RTT from
+  the echoed `client_ts_ms` with the client clock and do not use ping/pong as
+  wakeup or business-timeout extension.
 - Send optional `ctrl.frontend_state` with monotonic `seq`, `ttl_ms`, and
   `trust_level` in `authoritative/hint/observe`.
+- Toggle duplex with `ctrl.duplex {"enabled":<bool>}` (see DEVICE_PROTOCOL §3.3).
+  The server acks `ctrl.duplex_state` (`enabled/ts_ms` + IDs), meaning the switch
+  update was scheduled, not necessarily applied yet. There is no `full_duplex`
+  wire field, the switch does not directly change the business interaction mode,
+  and `ctrl.mic_state` is not supported — do not send it.
 - Send PCM as binary frames and handle downlink TTS PCM.
 - Handle `ctrl.clear` by clearing local playback buffers.
 - Consume only `data.cmd` and `data.cmd after confirmation` as executable

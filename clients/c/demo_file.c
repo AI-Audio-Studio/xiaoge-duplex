@@ -70,6 +70,11 @@ static void on_json(const char *json, void *u) {
     printf("%s\n", json);
 }
 
+static void on_duplex_state(const xiaoge_duplex_state_event *event, void *u) {
+    (void)u;
+    printf("duplex_state: enabled=%d ts_ms=%lld\n", event->enabled, event->ts_ms);
+}
+
 static size_t read_wav(const char *path, unsigned char **out) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
@@ -239,8 +244,8 @@ int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
             "usage:\n"
-            "  %s <create_session_url> <device_id> <credential-json-or-string> <in.wav> [out.wav] [--ca-cert path] [--insecure] [--api-key key]\n"
-            "  %s <ws_url> <access_token> <trace_id> <session_id> <device_id> <in.wav> [out.wav] [--ca-cert path] [--insecure]\n",
+            "  %s <create_session_url> <device_id> <credential-json-or-string> <in.wav> [out.wav] [--ca-cert path] [--insecure] [--api-key key] [--duplex off|on]\n"
+            "  %s <ws_url> <access_token> <trace_id> <session_id> <device_id> <in.wav> [out.wav] [--ca-cert path] [--insecure] [--duplex off|on]\n",
             argv[0],
             argv[0]);
         return 2;
@@ -255,12 +260,22 @@ int main(int argc, char **argv) {
     const char *api_key = getenv("XIAOGE_CLOUD_API_KEY");
     if (!api_key) api_key = XIAOGE_DEFAULT_API_KEY;
     int insecure = 0;
+    int duplex = -1; /* -1 = do not touch the duplex switch */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--insecure") == 0) insecure = 1;
         if (strcmp(argv[i], "--ca-cert") == 0 && i + 1 < argc && arg_is_value(argv[i + 1]))
             ca_cert_path = argv[++i];
         if (strcmp(argv[i], "--api-key") == 0 && i + 1 < argc && arg_is_value(argv[i + 1]))
             api_key = argv[++i];
+        if (strcmp(argv[i], "--duplex") == 0 && i + 1 < argc && arg_is_value(argv[i + 1])) {
+            const char *v = argv[++i];
+            if (strcmp(v, "off") == 0) duplex = 0;
+            else if (strcmp(v, "on") == 0) duplex = 1;
+            else {
+                fprintf(stderr, "--duplex must be off|on\n");
+                return 2;
+            }
+        }
     }
 
     const char *device_id = http_mode ? argv[2] : argv[5];
@@ -314,6 +329,7 @@ int main(int argc, char **argv) {
         .on_audio = on_audio,
         .on_clear = on_clear,
         .on_json = on_json,
+        .on_duplex_state = on_duplex_state,
         .user = &sink,
     };
     xiaoge_client *c = xiaoge_create_from_session_with_ca(&cfg, &sess, ca_cert_path, insecure, &cb);
@@ -326,10 +342,16 @@ int main(int argc, char **argv) {
     size_t sent = 0;
     time_t deadline = 0;
     int sent_state = 0;
+    int sent_duplex = 0;
     while (xiaoge_service(c, 50) == 0) {
         if (sink.ready && !sent_state) {
             xiaoge_send_frontend_state(c, "hint", "awake", "speech", 1000);
             sent_state = 1;
+        }
+        if (sink.ready && duplex >= 0 && !sent_duplex) {
+            printf("duplex: %s\n", duplex ? "on" : "off");
+            xiaoge_send_duplex(c, duplex);
+            sent_duplex = 1;
         }
         if (sink.ready && sent < pcm_len) {
             size_t chunk = pcm_len - sent < FRAME_BYTES ? pcm_len - sent : FRAME_BYTES;

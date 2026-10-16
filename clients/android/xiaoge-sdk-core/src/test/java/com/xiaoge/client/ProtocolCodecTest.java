@@ -6,6 +6,7 @@ import org.junit.Test;
 import java.util.Arrays;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public class ProtocolCodecTest {
@@ -67,6 +68,24 @@ public class ProtocolCodecTest {
         assertEquals(2, hello.getJSONArray("caps").length());
         assertEquals("audio", hello.getJSONArray("caps").getString(0));
         assertEquals("text", hello.getJSONArray("caps").getString(1));
+    }
+
+    @Test
+    public void pingJsonHasTypeAndTsMs() throws Exception {
+        JSONObject ping = new JSONObject(ProtocolCodec.ping());
+        assertEquals("ctrl.ping", ping.getString("type"));
+        assertTrue(ping.getLong("ts_ms") >= 0);
+        assertEquals(2, ping.length());
+    }
+
+    @Test
+    public void duplexJsonSerializesEnabled() throws Exception {
+        JSONObject on = new JSONObject(ProtocolCodec.duplex(true));
+        assertEquals("ctrl.duplex", on.getString("type"));
+        assertTrue(on.getBoolean("enabled"));
+        assertEquals(2, on.length());
+        JSONObject off = new JSONObject(ProtocolCodec.duplex(false));
+        assertFalse(off.getBoolean("enabled"));
     }
 
     @Test(expected = IllegalArgumentException.class)

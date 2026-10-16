@@ -146,6 +146,20 @@ public final class XiaogeVoiceSession {
         });
     }
 
+    /** Toggles the duplex switch through the active transport, if connected. */
+    public void sendDuplex(boolean enabled) {
+        executeOnControl(() -> {
+            XiaogeClient c = client;
+            if (c != null) {
+                try {
+                    c.sendDuplex(enabled);
+                } catch (Exception e) {
+                    dispatchFailure(e);
+                }
+            }
+        });
+    }
+
     /** Sends a command acknowledgement for a received {@code data.cmd} payload. */
     public void sendCmdAck(JSONObject cmd, String status, String code) {
         executeOnControl(() -> {
@@ -190,11 +204,17 @@ public final class XiaogeVoiceSession {
 
     /** Sends a command result for a received command event. */
     public void sendCmdResult(CommandEvent event, String status, String code, String message, Boolean retryable) {
+        sendCmdResult(event, status, code, message, retryable, null);
+    }
+
+    /** Sends a command result with an optional {@code result} object for a received command event. */
+    public void sendCmdResult(CommandEvent event, String status, String code, String message, Boolean retryable,
+                              JSONObject result) {
         executeOnControl(() -> {
             XiaogeClient c = client;
             if (c != null) {
                 try {
-                    c.sendCmdResult(event, status, code, message, retryable);
+                    c.sendCmdResult(event, status, code, message, retryable, result);
                 } catch (Exception e) {
                     dispatchFailure(e);
                 }
@@ -354,6 +374,15 @@ public final class XiaogeVoiceSession {
                 listener.onServerState(event);
             } catch (Throwable t) {
                 Log.w(TAG, "onServerState listener threw", t);
+            }
+        }
+
+        @Override
+        public void onDuplexState(DuplexStateEvent event) {
+            try {
+                listener.onDuplexState(event);
+            } catch (Throwable t) {
+                Log.w(TAG, "onDuplexState listener threw", t);
             }
         }
 

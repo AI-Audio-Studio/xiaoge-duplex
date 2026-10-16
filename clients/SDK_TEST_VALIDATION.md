@@ -436,6 +436,10 @@ python .\c\local_proxy.py
 cd E:\Project\Project2026\AIAudioCloudPlatform\xiaogeV2\xiaoge-duplex\xiaoge-duplex\clients
 chcp 65001
 $env:PATH = "D:\msys64\mingw64\bin;$env:PATH"
+ .\c\build-mingw64\xiaoge_demo_mic_win.exe http://127.0.0.1:10097/create_session --api-key $API_KEY
+```
+
+```powershell
 .\c\build-mingw64\xiaoge_demo_mic_win.exe --api-key $API_KEY --seconds 8 --reply-wait 15 --silence-ms 2000 --no-playback
 ```
 
@@ -534,10 +538,10 @@ MATLAB demo_file.m
 
 端口：
 
-| Port | Direction |
-| --- | --- |
-| 5001 | MATLAB -> bridge PCM |
-| 5002 | bridge -> MATLAB TTS PCM |
+| Port | Direction                     |
+| ---- | ----------------------------- |
+| 5001 | MATLAB -> bridge PCM          |
+| 5002 | bridge -> MATLAB TTS PCM      |
 | 5003 | bridge -> MATLAB JSONL events |
 
 ### 3.1 安装 Python bridge 依赖

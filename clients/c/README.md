@@ -118,6 +118,17 @@ xiaoge_send_cmd_ack_event(g_client, event, XIAOGE_CMD_ACK_STATUS_REJECTED,
 `canceled`, or `timeout`. Lower-level raw JSON helpers remain available for
 compatibility, but new command handlers should use the event helpers.
 
+`xiaoge_send_cmd_result_event_ex` / `xiaoge_send_cmd_result_ex2` add an optional
+business `result` object to the `data.cmd_result` frame. Pass a JSON object
+string (e.g. `"{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}"`) or `NULL` to
+omit the field; invalid or non-object JSON is rejected locally:
+
+```c
+xiaoge_send_cmd_result_event_ex(g_client, event, XIAOGE_CMD_RESULT_STATUS_SUCCEEDED,
+                                "ok", "completed", 0,
+                                "{\"type\":\"cap\",\"value\":40,\"gauge_id\":1}");
+```
+
 Submit `body` to the cloud fake server or test Gateway create_session endpoint.
 Then pass the returned `session.created` fields to the SDK:
 
@@ -143,6 +154,50 @@ while (xiaoge_service(c, 20) == 0) {}
 xiaoge_destroy(c);
 ```
 
+### Application keep-alive (ctrl.ping)
+
+`xiaoge_service()` drives an automatic application keep-alive: once the
+WebSocket connection is established, every call checks the elapsed time and
+sends `{"type":"ctrl.ping","ts_ms":<epoch ms>}` each
+`XIAOGE_KEEPALIVE_PING_INTERVAL_MS` (25000 ms). The first ping fires 25s after
+the connection is established. Applications that keep calling `xiaoge_service()`
+in their main loop get keep-alive for free; the 25s cadence is a client policy
+(DEVICE_PROTOCOL §4.2), not a server deadline.
+
+- Manual or extra ping: `xiaoge_send_ping(c)`.
+- The server replies `ctrl.pong`; the C SDK has no typed event for it and
+  delivers the raw JSON through `on_json`. Measure RTT from the echoed
+  `client_ts_ms` with the client clock.
+- Keep-alive only keeps the transport/session alive: it does not wake dialogue,
+  does not extend business listening/idle timeouts, and the SDK does not
+  reconnect on missed pongs.
+
+### Duplex switch (ctrl.duplex)
+
+```c
+xiaoge_send_duplex(c, 0); /* duplex off; 1 turns it back on */
+```
+
+Sends `{"type":"ctrl.duplex","enabled":<bool>}` (DEVICE_PROTOCOL §3.3). The
+server acks `ctrl.duplex_state` — meaning the switch update was scheduled, not
+necessarily applied yet — delivered through the typed callback:
+
+```c
+static void on_duplex_state(const xiaoge_duplex_state_event *event, void *user) {
+    printf("duplex enabled=%d ts=%lld\n", event->enabled, event->ts_ms);
+}
+```
+
+`xiaoge_duplex_state_event` carries `enabled`, `ts_ms`, IDs, and `raw_json`;
+strings are valid only until the callback returns (same rule as the other
+events). There is no `full_duplex` wire field, the switch does not directly
+change the business interaction mode, and `ctrl.mic_state` is not supported.
+
+ABI note: `on_duplex_state` is appended **after** `void *user` in
+`xiaoge_callbacks`. `copy_callbacks()` only copies the caller's `struct_size`
+prefix, so binaries built against older headers keep working (the new callback
+stays NULL); new callbacks must keep being appended at the end.
+
 ## Event callbacks
 
 The C SDK exposes a single `xiaoge_callbacks` struct. Business callbacks receive
@@ -158,6 +213,8 @@ Typed downlink events:
   IDs, `raw_json`.
 - `on_state(const xiaoge_state_event *)`: link/interaction/gate/resource state,
   optional `pending_confirmation_json`, IDs, `ts_ms`, `raw_json`.
+- `on_duplex_state(const xiaoge_duplex_state_event *)`: `ctrl.duplex_state` ack
+  for `xiaoge_send_duplex`, with `enabled`, `ts_ms`, IDs, `raw_json`.
 - `on_stt(const xiaoge_stt_event *)`: `text`, `final`, `utterance_id`,
   `trace_id`, `session_id`, `ts_ms`, `raw_json`.
 - `on_reply(const xiaoge_reply_event *)`: `text`, SDK-derived `final == 1`,
@@ -169,6 +226,28 @@ Typed downlink events:
   `message`, `retryable`, `ts_ms`, IDs, `raw_json`.
 - `on_failure(int code, const char *message, void *user)`: local/protocol
   validation failures before a typed business callback can be delivered.
+
+`interaction_mode` (the business tri-state sleeping/dialogue/listening) is only
+available through `on_state` snapshots: the first `ctrl.state` arrives right
+after `ctrl.ready`, the server re-sends a full four-field snapshot on every
+change, and broadcasts may repeat — treat the latest event as the current state
+and cache it yourself (the SDK keeps no query API, and event pointers are only
+valid inside the callback). All three modes currently report
+`engine_gate="open"`, so keep streaming audio in sleeping/listening; `link_state`
+is the connection state and says nothing about the dialogue. Unknown enum values
+reject the frame through `on_failure` (strict inbound validation, unlike the
+Python/Android lenient passthrough).
+
+State fields should be compared against the `XIAOGE_LINK_STATE_*`,
+`XIAOGE_INTERACTION_MODE_*`, `XIAOGE_ENGINE_GATE_*`, and
+`XIAOGE_RESOURCE_STATE_*` wire constants instead of hand-written strings (a
+typo'd literal never matches and never errors):
+
+```c
+if (strcmp(event->interaction_mode, XIAOGE_INTERACTION_MODE_SLEEPING) == 0) {
+    /* sleeping-mode UI */
+}
+```
 
 All event pointers and all `const char *` fields are valid only until the
 callback returns. Copy strings with `strdup` or application-owned storage before
@@ -220,6 +299,13 @@ Compatibility mode is still available when your test harness has already called
 The C SDK sends only `Authorization: Bearer <access_token>` on WSS upgrade
 requests. When an embedding HTTP layer performs create_session itself, it must
 send the configured cloud key as the create_session `x-api-key` header.
+
+`--duplex off|on` (both demos, Windows mic demo included) toggles the duplex
+switch once the session is ready: it sends `ctrl.duplex` and prints the
+`ctrl.duplex_state` ack as `duplex_state: enabled=... ts_ms=...`. With
+`--duplex off`, upstream PCM keeps flowing but the server stops replying —
+transcripts still arrive, no reply audio — which is the observable behavior for
+verifying the switch.
 
 ## Local proxy
 

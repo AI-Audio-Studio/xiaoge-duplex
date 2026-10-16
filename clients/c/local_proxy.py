@@ -34,7 +34,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 _DEFAULTS: dict[str, Any] = {
     "server_host": "60.205.197.165",
-    "server_port": 10099,
+    "server_port": 10097,
     "local_host": "127.0.0.1",
     "local_port": 10097,
     "verify_ssl": False,

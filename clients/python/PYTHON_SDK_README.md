@@ -163,6 +163,85 @@ asyncio.run(main())
 
 事件字段均从原始 payload 拷贝而来，`event.raw` 保留原始协议内容供调试。`ReplyEvent.is_final` 是 SDK 为统一文本事件接口派生的值，R5.2.2 `data.reply` 协议 payload 没有 `final` 字段，SDK 不会把它写入 raw payload。
 
+### 状态枚举常量
+
+`ctrl.state` 的四个合同枚举提供 `str` 枚举常量，用于替代手写字符串比较（拼错的字符串不报错，只会永不匹配）：
+
+```python
+from xiaoge_client import InteractionMode
+
+def on_state(event):
+    if event.interaction_mode == InteractionMode.SLEEPING:
+        ...  # 休眠态 UI/逻辑
+
+client.on_state = on_state
+```
+
+| 枚举 | 取值 |
+| --- | --- |
+| `LinkState` | `CONNECTING` / `CONNECTED` / `RECONNECTING` / `CLOSED` |
+| `InteractionMode` | `SLEEPING` / `DIALOGUE` / `LISTENING` |
+| `EngineGate` | `CLOSED` / `OPEN` / `KWS_ONLY` |
+| `ResourceState` | `SLEEPING_HOT` / `SLEEPING_WARM` / `ACTIVE_AGENT` / `RELEASED_IDLE` / `PENDING_RECONNECT` |
+
+枚举混入 `str`，可直接与 `event.link_state` 等字符串字段比较（`InteractionMode.SLEEPING == "sleeping"` 为 `True`）。字段类型保持字符串：未知协议值仍按宽松解析原样透传并记入 `parse_warnings`。注意业务三态 `interaction_mode` 与引擎 `agent_state` 是两个概念，不要混用。
+
+### 交互状态 interaction_mode 获取方式
+
+`interaction_mode` 只能从 `on_state` 回调的事件对象获取；SDK 不缓存当前状态、也不提供查询接口，业务侧自行保存最新值：
+
+```python
+latest_mode: str | None = None
+
+def on_state(event):
+    global latest_mode
+    latest_mode = event.interaction_mode
+    if event.interaction_mode == InteractionMode.SLEEPING:
+        ...  # 休眠态 UI/逻辑
+
+client.on_state = on_state
+```
+
+- **下发时机**：握手完成后紧跟 `ctrl.ready` 下发一次初始状态，之后服务端每次状态变化重发。
+- **快照语义**：每条 `ctrl.state` 都是四字段的**全量快照**，广播可能重复；按最新一条更新 UI/状态机，不必把每帧当作新事件（DEVICE_PROTOCOL §3.1）。
+- **三态含义**：
+
+| `interaction_mode` | 含义 | 典型 `engine_gate` | 典型 `resource_state` |
+| --- | --- | --- | --- |
+| `sleeping` | 业务休眠，等待唤醒/有效输入 | `open` | `SleepingHot` |
+| `dialogue` | 正常交互模式 | `open` | `ActiveAgent` |
+| `listening` | 收听输入，但被拒轮次不进入正常回复 | `open` | `ActiveAgent` |
+
+- **注意**：实际 wire 字段是 `interaction_mode`（不是 `interaction_state`）；当前三态全部 `engine_gate="open"`，不要因 sleeping/listening 自行停止上传音频；`link_state` 是连接状态，不代表是否在对话；SDK 引擎状态 `agent_state` 不等于业务三态。比较方式见上文「状态枚举常量」。
+
+### 应用层保活（ctrl.ping）
+
+`run()` 在发送 `ctrl.hello` 后自动启动应用层保活：每 25 秒发送一次
+`{"type":"ctrl.ping","ts_ms":<epoch ms>}`（`send_json` 会照常写入 trace，`message_type=ctrl.ping`）。
+25 秒是客户端策略（对齐 DEVICE_PROTOCOL §4.2 的浏览器前端），不是服务端强制期限。
+
+- 调整周期：在 `run()` 之前给 `client.ping_interval_s` 赋值；`<= 0` 关闭自动保活。
+- 手动补发：`await client.send_ping()`。
+- 收到 `ctrl.pong` 时 SDK 按 `client_ts_ms` 回显用客户端时钟计算 RTT 并输出 `DEBUG` 日志，
+  随后仍交给 `on_json(payload)`；pong 不会唤醒 dialogue，也不延长业务 listening/idle 超时。
+- 保活仅保持传输/会话活性，SDK 不做"连续 pong 未收到则重连"的检测；如需该容错策略请在业务层实现。
+
+### 双工开关（ctrl.duplex）
+
+```python
+await client.send_duplex(False)   # 关闭双工；True 重新开启
+
+client.on_duplex_state = lambda event: print("duplex enabled =", event.enabled)
+```
+
+- `send_duplex(enabled)` 发送 `{"type":"ctrl.duplex","enabled":<bool>}`（DEVICE_PROTOCOL §3.3）；
+  入参必须是 bool，传字符串/数字会抛 `XiaogeProtocolError`。
+- 服务端成功调度后回 `ctrl.duplex_state`，SDK 解析为 `DuplexStateEvent`（`enabled`、`ts_ms`、
+  `trace_id`、`session_id`、`raw`、`parse_warnings`）并触发 `on_duplex_state`，同时照常走 `on_json`。
+- 回执语义是**已调度**，不等于 agent loop 已完成赋值；开关自身不直接修改业务三态
+  （sleeping/dialogue/listening 仍以 `ctrl.state` 为准）。
+- 没有 `full_duplex` wire 字段；`ctrl.mic_state` 未支持，不要发送。
+
 ### 下行事件宽松解析
 
 下行事件不会因服务端协议字段漂移而丢失：字段缺失时以类型默认值交付（字符串 `""`、数字 `0`、布尔 `False`、对象/数组为空），多余字段忽略（仍可在 `event.raw` 中访问），未知枚举值（如新增 `intent_type`/错误码）原样透传；Python 端不做数字/布尔字符串转型，类型不符时直接给默认值并告警。每个事件对象携带 `parse_warnings`（`tuple[str, ...]`，完全合规时为空）记录全部偏离项，SDK 会通过 `logging`（logger `xiaoge.client`）以 `WARNING` 级别输出，便于发现服务端协议漂移。业务侧如需严格判断，可检查 `not event.parse_warnings` 或 `event.text` 是否为空。
@@ -213,9 +292,14 @@ from xiaoge_client import CmdAckStatus, CmdResultStatus, ProtocolCodec
 ack = ProtocolCodec.cmd_ack(command, CmdAckStatus.ACCEPTED, "ok", "queued")
 running = ProtocolCodec.cmd_result(command, CmdResultStatus.RUNNING, "ok", "started")
 succeeded = ProtocolCodec.cmd_result(command, CmdResultStatus.SUCCEEDED, "ok", "completed")
+# 可选:在 cmd_result 中携带业务返回值
+succeeded = ProtocolCodec.cmd_result(
+    command, CmdResultStatus.SUCCEEDED, "ok", "completed",
+    result={"type": "cap", "value": 40, "gauge_id": 1},
+)
 ```
 
-合法 `cmd_ack` status 为 `accepted`、`rejected`、`duplicate`；合法 `cmd_result` status 为 `running`、`succeeded`、`failed`、`canceled`、`timeout`。SDK 仍兼容合法原始字符串，但非法 status 会在本地抛出 `XiaogeProtocolError`，不会发送到服务端。
+合法 `cmd_ack` status 为 `accepted`、`rejected`、`duplicate`；合法 `cmd_result` status 为 `running`、`succeeded`、`failed`、`canceled`、`timeout`。SDK 仍兼容合法原始字符串，但非法 status 会在本地抛出 `XiaogeProtocolError`，不会发送到服务端。`result` 为可选关键字参数,不传时消息中不含该字段,与旧协议兼容。
 
 ## 9. 本地自测
 
@@ -275,6 +359,10 @@ sent=<bytes> bytes received=<bytes> bytes out=out_python.wav
 - `received > 0`：服务端有 TTS PCM 下行。
 - `received = 0`：客户端链路可能仍成功，但服务端/agent 没有下发音频，需要查服务端 ASR/TTS/agent。
 
+双工开关验证：加 `--duplex off`（或 `--duplex on`），连接后 demo 发送 `ctrl.duplex` 并在收到
+`ctrl.duplex_state` 回执时打印 `duplex_state: enabled= ...`。`--duplex off` 时语音仍会上传，
+但服务端不再回复（转写仍可见、无 `reply:`/下行音频），可用于对照验证开关生效。
+
 ## 12. 麦克风 Demo
 
 ```bash
@@ -293,6 +381,9 @@ python examples/demo_mic.py \
 ready 16000
 talking; press Ctrl-C to exit
 ```
+
+麦克风 Demo 同样支持 `--duplex off|on`：连接后发送 `ctrl.duplex`，收到回执打印
+`duplex_state: enabled= ...`；关闭双工时持续说话可观察"stt final: 仍打印、reply: 不再出现"。
 
 如果服务端返回最终识别结果，demo 会打印：
 

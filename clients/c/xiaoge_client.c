@@ -46,6 +46,8 @@ struct xiaoge_client {
     char seen_cmd_ids[32][128];
     int seen_cmd_count;
     int auto_fake_cmd_executor;
+    int keepalive_started;
+    long long last_ping_ms;
 };
 
 static long long now_ms(void) {
@@ -146,6 +148,10 @@ static int json_add_optional_ll(cJSON *obj, const char *key, long long value) {
 }
 
 static int cap_valid(const char *cap);
+static int build_ping_json(char *out, size_t out_len);
+static int build_duplex_json(int enabled, char *out, size_t out_len);
+static int build_duplex_state_event(const char *s, const cJSON *root, xiaoge_duplex_state_event *ev,
+                                    char trace[128], char session[128]);
 
 static int caps_csv_to_json_array(const char *csv, cJSON *arr) {
     char tmp[256];
@@ -316,8 +322,8 @@ static int build_cmd_status_json(const char *type, const char *trace, const char
                                  const char *utt, const char *cmd_id, const char *status,
                                  const char *code, const char *message, int has_retryable,
                                  int retryable, long long received_at_ms, long long started_at_ms,
-                                 long long finished_at_ms, long long duration_ms, char *out,
-                                 size_t out_len) {
+                                 long long finished_at_ms, long long duration_ms,
+                                 const char *result_json, char *out, size_t out_len) {
     cJSON *root = cJSON_CreateObject();
     if (!root) return -1;
     int ok = json_add_string(root, "type", type) == 0 &&
@@ -333,6 +339,16 @@ static int build_cmd_status_json(const char *type, const char *trace, const char
     if (ok) ok = json_add_optional_ll(root, "started_at_ms", started_at_ms) == 0;
     if (ok) ok = json_add_optional_ll(root, "finished_at_ms", finished_at_ms) == 0;
     if (ok) ok = json_add_optional_ll(root, "duration_ms", duration_ms) == 0;
+    if (ok && result_json && *result_json) {
+        cJSON *result = cJSON_Parse(result_json);
+        if (!result || !cJSON_IsObject(result)) {
+            cJSON_Delete(result);
+            ok = 0;
+        } else if (cJSON_AddItemToObject(root, "result", result) != 1) {
+            cJSON_Delete(result);
+            ok = 0;
+        }
+    }
     int rc = ok ? json_print_checked(root, out, out_len) : -1;
     cJSON_Delete(root);
     return rc;
@@ -346,7 +362,7 @@ static int build_cmd_ack_json(const char *cmd_json, const char *status, const ch
                       cmd_id, sizeof(cmd_id)) != 0)
         return -1;
     return build_cmd_status_json("data.cmd_ack", trace, session, utt, cmd_id, status, code,
-                                 message, 0, 0, now_ms(), -1, -1, -1, out, out_len);
+                                 message, 0, 0, now_ms(), -1, -1, -1, NULL, out, out_len);
 }
 
 static int build_cmd_ids_from_event(const xiaoge_command_event *event, char *trace_id, size_t trace_len,
@@ -368,24 +384,25 @@ static int build_cmd_ack_event_json(const xiaoge_command_event *event, const cha
                                  cmd_id, sizeof(cmd_id)) != 0)
         return -1;
     return build_cmd_status_json("data.cmd_ack", trace, session, utt, cmd_id, status, code,
-                                 message, 0, 0, now_ms(), -1, -1, -1, out, out_len);
+                                 message, 0, 0, now_ms(), -1, -1, -1, NULL, out, out_len);
 }
 
 static int build_cmd_result_event_json(const xiaoge_command_event *event, const char *status, const char *code,
-                                       const char *message, int retryable, char *out, size_t out_len) {
+                                       const char *message, int retryable, const char *result_json,
+                                       char *out, size_t out_len) {
     if (!out || !cmd_result_status_valid(status) || !code || !*code) return -1;
     char trace[128] = "", session[128] = "", utt[128] = "", cmd_id[128] = "";
     if (build_cmd_ids_from_event(event, trace, sizeof(trace), session, sizeof(session), utt, sizeof(utt),
                                  cmd_id, sizeof(cmd_id)) != 0)
         return -1;
     return build_cmd_status_json("data.cmd_result", trace, session, utt, cmd_id, status, code,
-                                 message, 1, retryable, -1, -1, -1, -1, out, out_len);
+                                 message, 1, retryable, -1, -1, -1, -1, result_json, out, out_len);
 }
 
 static int build_cmd_result_json(const char *cmd_json, const char *status, const char *code,
                                  const char *message, int retryable, long long started_at_ms,
-                                 long long finished_at_ms, long long duration_ms, char *out,
-                                 size_t out_len) {
+                                 long long finished_at_ms, long long duration_ms,
+                                 const char *result_json, char *out, size_t out_len) {
     if (!out || !cmd_result_status_valid(status) || !code || !*code) return -1;
     char trace[128] = "", session[128] = "", utt[128] = "", cmd_id[128] = "";
     if (build_cmd_ids(cmd_json, trace, sizeof(trace), session, sizeof(session), utt, sizeof(utt),
@@ -393,7 +410,7 @@ static int build_cmd_result_json(const char *cmd_json, const char *status, const
         return -1;
     return build_cmd_status_json("data.cmd_result", trace, session, utt, cmd_id, status, code,
                                  message, 1, retryable, -1, started_at_ms, finished_at_ms,
-                                 duration_ms, out, out_len);
+                                 duration_ms, result_json, out, out_len);
 }
 
 int xiaoge_send_cmd_ack(xiaoge_client *c, const char *cmd_json,
@@ -407,9 +424,18 @@ int xiaoge_send_cmd_result_ex(xiaoge_client *c, const char *cmd_json,
                               const char *status, const char *code, const char *message,
                               int retryable, long long started_at_ms,
                               long long finished_at_ms, long long duration_ms) {
-    char buf[1024];
+    return xiaoge_send_cmd_result_ex2(c, cmd_json, status, code, message, retryable, started_at_ms,
+                                      finished_at_ms, duration_ms, NULL);
+}
+
+int xiaoge_send_cmd_result_ex2(xiaoge_client *c, const char *cmd_json,
+                               const char *status, const char *code, const char *message,
+                               int retryable, long long started_at_ms,
+                               long long finished_at_ms, long long duration_ms,
+                               const char *result_json) {
+    char buf[2048];
     if (build_cmd_result_json(cmd_json, status, code, message, retryable, started_at_ms,
-                              finished_at_ms, duration_ms, buf, sizeof(buf)) != 0)
+                              finished_at_ms, duration_ms, result_json, buf, sizeof(buf)) != 0)
         return -1;
     return send_text(c, buf);
 }
@@ -430,8 +456,16 @@ int xiaoge_send_cmd_ack_event(xiaoge_client *c, const xiaoge_command_event *even
 int xiaoge_send_cmd_result_event(xiaoge_client *c, const xiaoge_command_event *event,
                                  const char *status, const char *code, const char *message,
                                  int retryable) {
-    char buf[1024];
-    if (build_cmd_result_event_json(event, status, code, message, retryable, buf, sizeof(buf)) != 0) return -1;
+    return xiaoge_send_cmd_result_event_ex(c, event, status, code, message, retryable, NULL);
+}
+
+int xiaoge_send_cmd_result_event_ex(xiaoge_client *c, const xiaoge_command_event *event,
+                                    const char *status, const char *code, const char *message,
+                                    int retryable, const char *result_json) {
+    char buf[2048];
+    if (build_cmd_result_event_json(event, status, code, message, retryable, result_json,
+                                    buf, sizeof(buf)) != 0)
+        return -1;
     return send_text(c, buf);
 }
 
@@ -516,20 +550,23 @@ static int clear_reason_valid(const char *s) {
 }
 
 static int link_state_valid(const char *s) {
-    return str_in4(s, "connecting", "connected", "reconnecting", "closed");
+    return str_in4(s, XIAOGE_LINK_STATE_CONNECTING, XIAOGE_LINK_STATE_CONNECTED,
+                   XIAOGE_LINK_STATE_RECONNECTING, XIAOGE_LINK_STATE_CLOSED);
 }
 
 static int interaction_mode_valid(const char *s) {
-    return str_in(s, "sleeping", "dialogue", "listening");
+    return str_in(s, XIAOGE_INTERACTION_MODE_SLEEPING, XIAOGE_INTERACTION_MODE_DIALOGUE,
+                  XIAOGE_INTERACTION_MODE_LISTENING);
 }
 
 static int engine_gate_valid(const char *s) {
-    return str_in(s, "closed", "open", "kws_only");
+    return str_in(s, XIAOGE_ENGINE_GATE_CLOSED, XIAOGE_ENGINE_GATE_OPEN, XIAOGE_ENGINE_GATE_KWS_ONLY);
 }
 
 static int resource_state_valid(const char *s) {
-    return str_in(s, "SleepingHot", "SleepingWarm", "ActiveAgent") ||
-           str_in(s, "ReleasedIdle", "PendingReconnect", NULL);
+    return str_in(s, XIAOGE_RESOURCE_STATE_SLEEPING_HOT, XIAOGE_RESOURCE_STATE_SLEEPING_WARM,
+                  XIAOGE_RESOURCE_STATE_ACTIVE_AGENT) ||
+           str_in(s, XIAOGE_RESOURCE_STATE_RELEASED_IDLE, XIAOGE_RESOURCE_STATE_PENDING_RECONNECT, NULL);
 }
 
 static int build_clear_event(const char *s, const cJSON *root, xiaoge_clear_event *ev, char reason[64], char utt[128],
@@ -570,6 +607,25 @@ static int build_state_event(const char *s, const cJSON *root, xiaoge_state_even
     ev->engine_gate = gate;
     ev->resource_state = resource;
     ev->pending_confirmation_json = pending[0] ? pending : NULL;
+    ev->ts_ms = ts;
+    ev->trace_id = trace;
+    ev->session_id = session;
+    ev->raw_json = s;
+    return 0;
+}
+
+static int build_duplex_state_event(const char *s, const cJSON *root, xiaoge_duplex_state_event *ev,
+                                    char trace[128], char session[128]) {
+    int enabled = 0;
+    long long ts = -1;
+    if (!cJSON_IsBool(cJSON_GetObjectItemCaseSensitive(root, "enabled")) ||
+        json_get_bool(root, "enabled", &enabled) != 0 ||
+        json_get_ll(root, "ts_ms", &ts) != 0 || ts < 0 ||
+        json_get_string(root, "trace_id", trace, 128) != 0 || !trace[0] ||
+        json_get_string(root, "session_id", session, 128) != 0 || !session[0]) {
+        return -1;
+    }
+    ev->enabled = enabled;
     ev->ts_ms = ts;
     ev->trace_id = trace;
     ev->session_id = session;
@@ -804,6 +860,18 @@ static void dispatch_error(struct xiaoge_client *c, const char *s, const cJSON *
     observe_json(c, s);
 }
 
+static void dispatch_duplex_state(struct xiaoge_client *c, const char *s, const cJSON *root) {
+    xiaoge_duplex_state_event ev;
+    char trace[128], session[128];
+    if (build_duplex_state_event(s, root, &ev, trace, session) != 0) {
+        observe_json(c, s);
+        failure(c, "invalid ctrl.duplex_state payload");
+        return;
+    }
+    if (c->cb.on_duplex_state) c->cb.on_duplex_state(&ev, c->cb.user);
+    observe_json(c, s);
+}
+
 static void dispatch_text(struct xiaoge_client *c, const char *s) {
     cJSON *root = json_parse_object(s);
     if (!root) {
@@ -834,6 +902,8 @@ static void dispatch_text(struct xiaoge_client *c, const char *s) {
         }
         if (c->cb.on_state) c->cb.on_state(&ev, c->cb.user);
         observe_json(c, s);
+    } else if (json_type_is(root, "ctrl.duplex_state")) {
+        dispatch_duplex_state(c, s, root);
     } else if (json_type_is(root, "data.stt")) {
         dispatch_stt(c, s, root);
     } else if (json_type_is(root, "data.reply")) {
@@ -862,6 +932,15 @@ int xiaoge_test_build_ready_event(const char *json, xiaoge_ready_event *event, c
                                   char *config, char *trace, char *session) {
     cJSON *root = json_parse_object(json);
     int rc = build_ready_event(json, root, event, caps, config, trace, session);
+    cJSON_Delete(root);
+    return rc;
+}
+
+int xiaoge_test_build_state_event(const char *json, xiaoge_state_event *event, char link[64],
+                                  char mode[64], char gate[64], char resource[64], char pending[1024],
+                                  char trace[128], char session[128]) {
+    cJSON *root = json_parse_object(json);
+    int rc = build_state_event(json, root, event, link, mode, gate, resource, pending, trace, session);
     cJSON_Delete(root);
     return rc;
 }
@@ -898,10 +977,10 @@ int xiaoge_test_build_cmd_ack_json(const char *cmd_json, const char *status, con
 
 int xiaoge_test_build_cmd_result_json(const char *cmd_json, const char *status, const char *code,
                                       const char *message, int retryable, long long started_at_ms,
-                                      long long finished_at_ms, long long duration_ms, char *out,
-                                      size_t out_len) {
+                                      long long finished_at_ms, long long duration_ms,
+                                      const char *result_json, char *out, size_t out_len) {
     return build_cmd_result_json(cmd_json, status, code, message, retryable, started_at_ms,
-                                 finished_at_ms, duration_ms, out, out_len);
+                                 finished_at_ms, duration_ms, result_json, out, out_len);
 }
 
 int xiaoge_test_auto_fake_cmd_enabled(int value) {
@@ -909,6 +988,22 @@ int xiaoge_test_auto_fake_cmd_enabled(int value) {
     memset(&cfg, 0, sizeof(cfg));
     cfg.auto_fake_cmd_executor = value;
     return auto_fake_cmd_enabled(&cfg);
+}
+
+int xiaoge_test_build_ping_json(char *out, size_t out_len) {
+    return build_ping_json(out, out_len);
+}
+
+int xiaoge_test_build_duplex_json(int enabled, char *out, size_t out_len) {
+    return build_duplex_json(enabled, out, out_len);
+}
+
+int xiaoge_test_build_duplex_state_event(const char *json, xiaoge_duplex_state_event *event,
+                                         char *trace, char *session) {
+    cJSON *root = json_parse_object(json);
+    int rc = build_duplex_state_event(json, root, event, trace, session);
+    cJSON_Delete(root);
+    return rc;
 }
 
 int xiaoge_test_json_cloud_cmd_compatible(const char *cmd_json) {
@@ -948,6 +1043,8 @@ static int cb_lws(struct lws *wsi, enum lws_callback_reasons reason,
     }
     case LWS_CALLBACK_CLIENT_ESTABLISHED:
         send_hello(c);
+        c->keepalive_started = 1;
+        c->last_ping_ms = now_ms();
         break;
     case LWS_CALLBACK_CLIENT_RECEIVE: {
         int binary = lws_frame_is_binary(wsi);
@@ -1150,8 +1247,44 @@ int xiaoge_send_frontend_state(xiaoge_client *c, const char *trust_level,
     return rc;
 }
 
+static int build_ping_json(char *out, size_t out_len) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return -1;
+    int ok = json_add_string(root, "type", "ctrl.ping") == 0 &&
+             json_add_number_ll(root, "ts_ms", now_ms()) == 0;
+    int rc = ok && json_print_checked(root, out, out_len) == 0 ? 0 : -1;
+    cJSON_Delete(root);
+    return rc;
+}
+
+int xiaoge_send_ping(xiaoge_client *c) {
+    char buf[256];
+    if (!c) return -1;
+    return build_ping_json(buf, sizeof(buf)) == 0 ? send_text(c, buf) : -1;
+}
+
+static int build_duplex_json(int enabled, char *out, size_t out_len) {
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return -1;
+    int ok = json_add_string(root, "type", "ctrl.duplex") == 0 &&
+             cJSON_AddBoolToObject(root, "enabled", enabled != 0) != NULL;
+    int rc = ok && json_print_checked(root, out, out_len) == 0 ? 0 : -1;
+    cJSON_Delete(root);
+    return rc;
+}
+
+int xiaoge_send_duplex(xiaoge_client *c, int enabled) {
+    char buf[128];
+    if (!c) return -1;
+    return build_duplex_json(enabled, buf, sizeof(buf)) == 0 ? send_text(c, buf) : -1;
+}
+
 int xiaoge_service(xiaoge_client *c, int timeout_ms) {
     if (!c || c->finished) return -1;
+    if (c->keepalive_started && now_ms() - c->last_ping_ms >= XIAOGE_KEEPALIVE_PING_INTERVAL_MS) {
+        c->last_ping_ms = now_ms();
+        xiaoge_send_ping(c);
+    }
     lws_service(c->ctx, timeout_ms);
     return c->finished ? -1 : 0;
 }
